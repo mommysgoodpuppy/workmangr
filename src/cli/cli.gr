@@ -1,0 +1,101 @@
+module Cli
+
+from "array" include Array
+from "fs" include Fs
+from "path" include Path
+from "string" include String
+from "wasi/process" include Process
+
+from "../core/analysis.gr" include Analysis
+from "./report.gr" include Report
+
+let usage = "Usage: wmgr type <file.wm>"
+
+let exitWith = (code: Number, message: String) => {
+  print(message)
+  match (Process.exit(code)) {
+    Ok(_) => void,
+    Err(_) => void,
+  }
+}
+
+let envLookup = (name: String) => {
+  match (Process.env()) {
+    Err(_) => None,
+    Ok(vars) => {
+      let prefix = name ++ "="
+      let prefixLen = String.length(prefix)
+      Array.reduce(
+        (acc, entry) => {
+          match (acc) {
+            Some(_) => acc,
+            None =>
+              if (String.startsWith(prefix, entry)) {
+                Some(String.slice(prefixLen, entry))
+              } else {
+                None
+              },
+          }
+        },
+        None,
+        vars,
+      )
+    },
+  }
+}
+
+let main = () => {
+  match (Process.argv()) {
+    Err(_ex) => exitWith(1, "Failed to read argv"),
+    Ok(args) => {
+
+      let argCount = Array.length(args)
+      let commandFromArg =
+        if (argCount > 1) { Some(Array.get(1, args)) } else { None }
+      let fileFromArg =
+        if (argCount > 2) {
+          Some(Array.get(2, args))
+        } else if (argCount > 1 && Array.get(1, args) != "type") {
+          Some(Array.get(1, args))
+        } else {
+          None
+        }
+
+      let command =
+        match (commandFromArg) {
+          Some(cmd) => cmd,
+          None =>
+            match (envLookup("WMGR_CMD")) {
+              Some(cmd) => cmd,
+              None => "type",
+            },
+        }
+
+      let filePathOpt =
+        match (fileFromArg) {
+          Some(path) => Some(path),
+          None => envLookup("WMGR_FILE"),
+        }
+
+      match (filePathOpt) {
+        None => exitWith(1, usage),
+        Some(filePath) => {
+          let path = Path.fromString(filePath)
+          match (Fs.Utf8.readFile(path)) {
+            Err(_fsErr) => exitWith(1, "Failed to read file: " ++ filePath),
+            Ok(source) => {
+              if (command != "type") {
+                exitWith(1, usage)
+              } else {
+                let analysis = Analysis.analyze(source)
+                Report.report(source, analysis)
+              }
+            },
+          }
+        },
+      }
+    },
+  }
+}
+
+main()

@@ -1,0 +1,193 @@
+module Report
+
+from "array" include Array
+from "list" include List
+from "map" include Map
+from "string" include String
+
+from "../core/ast.gr" include Ast
+from "../core/analysis.gr" include Analysis
+from "../core/infer.gr" include Infer
+from "../core/source.gr" include Source
+from "../core/types.gr" include Types
+
+record NodeSummary {
+  id: Number,
+  span: Source.Span,
+  line: Number,
+  col: Number,
+  excerpt: String,
+  typeStr: String,
+}
+
+let getLineText = (source: String, line: Number) => {
+  let lines = String.split("\n", source)
+  let index = line - 1
+  if (index < 0 || index >= Array.length(lines)) {
+    ""
+  } else {
+    Array.get(index, lines)
+  }
+}
+
+let summarizeNode = (source: String, node: Ast.Expr, analysis: Analysis.Analysis) => {
+  match (Map.get(node.id, analysis.infer.nodeTypes)) {
+    None => None,
+    Some(nodeType) => {
+      let pos = Source.offsetToLineCol(source, node.span.start)
+      let excerpt = Source.slice(source, node.span)
+      let appliedType = Types.applySubstType(analysis.infer.subst, nodeType)
+      let typeStr = Types.typeToString(appliedType)
+      Some({
+        id: node.id,
+        span: node.span,
+        line: pos.line,
+        col: pos.col,
+        excerpt,
+        typeStr,
+      })
+    },
+  }
+}
+
+let summarizeBinding = (source: String, binding: Ast.Binding, analysis: Analysis.Analysis) => {
+  match (Map.get(binding.name, analysis.infer.topBindings)) {
+    None => None,
+    Some(scheme) => {
+      let pos = Source.offsetToLineCol(source, binding.nameSpan.start)
+      let excerpt = Source.slice(source, binding.nameSpan)
+      let appliedType = Types.applySubstType(analysis.infer.subst, scheme.ty)
+      let typeStr = Types.typeToString(appliedType)
+      Some({
+        id: binding.id,
+        span: binding.nameSpan,
+        line: pos.line,
+        col: pos.col,
+        excerpt,
+        typeStr,
+      })
+    },
+  }
+}
+
+let rec collectExprs = (expr: Ast.Expr) =>
+  match (expr.kind) {
+    Ast.IntLit(_) => [expr],
+    Ast.Ident(_) => [expr],
+    Ast.Unknown => [expr],
+    Ast.Block(inner) => [expr, ...collectExprs(inner)],
+    Ast.Lambda(_, body) => [expr, ...collectExprs(body)],
+  }
+
+let collectAllExprs = (program: Ast.Program) => {
+  let rec loop = (bindings: List<Ast.Binding>) =>
+    match (bindings) {
+      [] => [],
+      [binding, ...rest] => List.append(collectExprs(binding.value), loop(rest)),
+    }
+  loop(program.bindings)
+}
+
+let collectBindingSummaries = (source: String, program: Ast.Program, analysis: Analysis.Analysis) => {
+  let rec loop = (bindings: List<Ast.Binding>, acc: List<NodeSummary>) =>
+    match (bindings) {
+      [] => acc,
+      [binding, ...rest] =>
+        match (summarizeBinding(source, binding, analysis)) {
+          None => loop(rest, acc),
+          Some(summary) => loop(rest, [summary, ...acc]),
+        },
+    }
+  List.reverse(loop(program.bindings, []))
+}
+
+let groupByLine = (summaries: List<NodeSummary>) => {
+  let groups: Map.Map<Number, List<NodeSummary>> = Map.make()
+  List.forEach(
+    (summary) => {
+      let existing =
+        match (Map.get(summary.line, groups)) {
+          Some(list) => list,
+          None => [],
+        }
+      Map.set(summary.line, [summary, ...existing], groups)
+    },
+    summaries,
+  )
+  groups
+}
+
+let sortBySpan = (items: List<NodeSummary>) =>
+  List.sort(
+    compare=((a, b) =>
+      if (a.span.start == b.span.start) { a.span.end - b.span.end } else { a.span.start - b.span.start }
+    ),
+    items,
+  )
+
+let sortByCol = (items: List<NodeSummary>) =>
+  List.sort(compare=((a, b) => a.col - b.col), items)
+
+let printLineSummaries = (
+  source: String,
+  groups: Map.Map<Number, List<NodeSummary>>,
+) => {
+  let lineKeys = Map.keys(groups)
+  let lines = List.sort(compare=((a, b) => a - b), lineKeys)
+
+  List.forEach(
+    (lineNum) => {
+      let lineText = getLineText(source, lineNum)
+      print("Line " ++ toString(lineNum) ++ ": " ++ lineText)
+
+      let lineItems =
+        match (Map.get(lineNum, groups)) {
+          Some(items) => sortByCol(sortBySpan(items)),
+          None => [],
+        }
+
+      List.forEach(
+        (item) => {
+          print(
+            " Col " ++ toString(item.col) ++ ": " ++ item.excerpt ++
+            "    //(nodeId:" ++ toString(item.id) ++ ")",
+          )
+          print("  type: " ++ item.typeStr)
+        },
+        lineItems,
+      )
+      print("")
+    },
+    lines,
+  )
+}
+
+let printTopBindings = (analysis: Analysis.Analysis) => {
+  print("=== Top-Level Bindings ===")
+  print("")
+
+  let bindings = Map.toList(analysis.infer.topBindings)
+
+  List.forEach(
+    (pair) => {
+      let (name, scheme): (String, Types.Scheme) = pair
+      let applied = Types.applySubstType(analysis.infer.subst, scheme.ty)
+      print(name ++ " : " ++ Types.typeToString(applied))
+    },
+    bindings,
+  )
+}
+
+let report = (source: String, analysis: Analysis.Analysis) => {
+  let exprs = collectAllExprs(analysis.program)
+  let maybeSummaries = List.map((expr) => summarizeNode(source, expr, analysis), exprs)
+  let summaries = List.filterMap((x) => x, maybeSummaries)
+
+  let bindingSummaries = collectBindingSummaries(source, analysis.program, analysis)
+  let allSummaries = List.append(bindingSummaries, summaries)
+  let groups = groupByLine(allSummaries)
+  printLineSummaries(source, groups)
+  printTopBindings(analysis)
+}
+
+provide { report }

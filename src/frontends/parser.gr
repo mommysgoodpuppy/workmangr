@@ -1,0 +1,205 @@
+module Parser
+
+from "runtime/unsafe/panic" include Panic
+
+from "../core/ast.gr" include Ast
+from "./lexer.gr" include Lexer
+from "../core/source.gr" include Source
+
+record ParseState {
+  tokens: List<Lexer.Token>,
+  nextId: Number,
+}
+
+let freshId = (state: ParseState) => {
+  let id = state.nextId
+  (id, { ...state, nextId: id + 1 })
+}
+
+let dropToken = (tokens: List<Lexer.Token>) =>
+  match (tokens) {
+    [_head, ...tail] => tail,
+    [] => [],
+  }
+
+let currentToken = (state: ParseState) =>
+  match (state.tokens) {
+    [head, ..._tail] => head,
+    [] => { kind: Lexer.EOF, span: Source.makeSpan(0, 0) },
+  }
+
+let rec tokenAt = (tokens: List<Lexer.Token>, index: Number) => {
+  if (index < 0) {
+    None
+  } else {
+    match (tokens) {
+      [] => None,
+      [head, ...tail] =>
+        if (index == 0) { Some(head) } else { tokenAt(tail, index - 1) },
+    }
+  }
+}
+
+let kindIs = (kind, expected) =>
+  match ((kind, expected)) {
+    (Lexer.LetKw, Lexer.LetKw) => true,
+    (Lexer.LParen, Lexer.LParen) => true,
+    (Lexer.RParen, Lexer.RParen) => true,
+    (Lexer.LBrace, Lexer.LBrace) => true,
+    (Lexer.RBrace, Lexer.RBrace) => true,
+    (Lexer.Eq, Lexer.Eq) => true,
+    (Lexer.FatArrow, Lexer.FatArrow) => true,
+    (Lexer.Question, Lexer.Question) => true,
+    (Lexer.EOF, Lexer.EOF) => true,
+    _ => false,
+  }
+
+let expectSimple = (expected, state: ParseState) => {
+  let tok = currentToken(state)
+  if (kindIs(tok.kind, expected)) {
+    (tok, { ...state, tokens: dropToken(state.tokens) })
+  } else {
+    Panic.panic("Parse error: unexpected token")
+  }
+}
+
+let expectIdent = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.IdentTok(name) =>
+      (name, tok, { ...state, tokens: dropToken(state.tokens) }),
+    _ => Panic.panic("Parse error: expected identifier"),
+  }
+}
+
+let lambdaHead = (tokens: List<Lexer.Token>) => {
+  let t0 = tokenAt(tokens, 0)
+  let t1 = tokenAt(tokens, 1)
+  let t2 = tokenAt(tokens, 2)
+  let t3 = tokenAt(tokens, 3)
+
+  match ((t0, t1, t2, t3)) {
+    (Some({ kind: Lexer.LParen, span: _ }), Some({ kind: Lexer.RParen, span: _ }), Some({ kind: Lexer.FatArrow, span: _ }), _) =>
+      Some(None),
+    (Some({ kind: Lexer.LParen, span: _ }), Some({ kind: Lexer.IdentTok(name), span: _ }), Some({ kind: Lexer.RParen, span: _ }), Some({ kind: Lexer.FatArrow, span: _ })) =>
+      Some(Some(name)),
+    _ => None,
+  }
+}
+
+let spanFrom = (start: Source.Span, end: Source.Span) =>
+  Source.makeSpan(start.start, end.end)
+
+let rec parseExpr = (state: ParseState) => {
+  match (lambdaHead(state.tokens)) {
+    Some(paramOpt) => parseLambda(paramOpt, state),
+    None => {
+      let tok = currentToken(state)
+      match (tok.kind) {
+        Lexer.LBrace => parseBlock(state),
+        _ => parsePrimary(state),
+      }
+    },
+  }
+}
+
+and parseLambda = (paramOpt: Option<String>, state: ParseState) => {
+  let (id, state1) = freshId(state)
+  let (lparenTok, state2): (Lexer.Token, ParseState) =
+    expectSimple(Lexer.LParen, state1)
+
+  let (paramNameOpt, state3, _rparenTok) =
+    match (paramOpt) {
+      None => {
+        let (rp, st) = expectSimple(Lexer.RParen, state2)
+        (None, st, rp)
+      },
+      Some(_) => {
+        let (name, _identTok, stIdent) = expectIdent(state2)
+        let (rp, stRp) = expectSimple(Lexer.RParen, stIdent)
+        (Some(name), stRp, rp)
+      },
+    }
+
+  let (_arrowTok, state4) = expectSimple(Lexer.FatArrow, state3)
+  let (body, state5): (Ast.Expr, ParseState) = parseExpr(state4)
+  let span = spanFrom(lparenTok.span, body.span)
+
+  let expr: Ast.Expr = { id, span, kind: Ast.Lambda(paramNameOpt, body) }
+  (expr, state5)
+}
+
+and parseBlock = (state: ParseState) => {
+  let (id, state1) = freshId(state)
+  let (lbraceTok, state2): (Lexer.Token, ParseState) =
+    expectSimple(Lexer.LBrace, state1)
+  let (inner, state3): (Ast.Expr, ParseState) = parseExpr(state2)
+  let (rbraceTok, state4): (Lexer.Token, ParseState) =
+    expectSimple(Lexer.RBrace, state3)
+  let span = spanFrom(lbraceTok.span, rbraceTok.span)
+  let expr: Ast.Expr = { id, span, kind: Ast.Block(inner) }
+  (expr, state4)
+}
+
+and parsePrimary = (state: ParseState) => {
+  let (id, state1) = freshId(state)
+  let tok = currentToken(state1)
+
+  match (tok.kind) {
+    Lexer.IntTok(value) => {
+      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let expr: Ast.Expr = { id, span: tok.span, kind: Ast.IntLit(value) }
+      (expr, state2)
+    },
+    Lexer.IdentTok(name) => {
+      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Ident(name) }
+      (expr, state2)
+    },
+    Lexer.Question => {
+      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Unknown }
+      (expr, state2)
+    },
+    _ => Panic.panic("Parse error: expected expression"),
+  }
+}
+
+let rec parseBindings = (state: ParseState) => {
+  let tok = currentToken(state)
+  if (kindIs(tok.kind, Lexer.EOF)) {
+    ([], state)
+  } else {
+    let (binding, state1) = parseBinding(state)
+    let (rest, state2) = parseBindings(state1)
+    ([binding, ...rest], state2)
+  }
+}
+
+and parseBinding = (state: ParseState) => {
+  let (id, state1) = freshId(state)
+  let (letTok, state2): (Lexer.Token, ParseState) =
+    expectSimple(Lexer.LetKw, state1)
+  let (name, nameTok, state3) = expectIdent(state2)
+  let (_eqTok, state4) = expectSimple(Lexer.Eq, state3)
+  let (value, state5): (Ast.Expr, ParseState) = parseExpr(state4)
+  let span = spanFrom(letTok.span, value.span)
+  let binding: Ast.Binding = {
+    id,
+    span,
+    nameSpan: nameTok.span,
+    name,
+    value,
+  }
+  (binding, state5)
+}
+
+let parse = (source: String) => {
+  let tokens = Lexer.lex(source)
+  let initial: ParseState = { tokens, nextId: 1 }
+  let (bindings, _finalState) = parseBindings(initial)
+  let program: Ast.Program = { bindings: bindings }
+  program
+}
+
+provide { parse }

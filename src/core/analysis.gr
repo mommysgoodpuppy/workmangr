@@ -1,0 +1,19 @@
+module Analysis
+
+from "./ast.gr" include Ast
+from "./infer.gr" include Infer
+from "./types.gr" include Types
+from "../frontends/parser.gr" include Parser
+
+provide record Analysis {
+  program: Ast.Program,
+  infer: Infer.InferState,
+}
+
+let analyze = (source: String) => {
+  let program = Parser.parse(source)
+  let infer = Infer.inferProgram(program)
+  { program, infer }
+}
+
+provide { analyze }

@@ -1,0 +1,28 @@
+module Ast
+
+from "./source.gr" include Source
+
+provide enum rec ExprKind {
+  IntLit(Number),
+  Ident(String),
+  Lambda(Option<String>, Expr),
+  Block(Expr),
+  Unknown,
+}
+and provide record Expr {
+  id: Number,
+  span: Source.Span,
+  kind: ExprKind,
+}
+
+provide record Binding {
+  id: Number,
+  span: Source.Span,
+  nameSpan: Source.Span,
+  name: String,
+  value: Expr,
+}
+
+provide record Program {
+  bindings: List<Binding>,
+}

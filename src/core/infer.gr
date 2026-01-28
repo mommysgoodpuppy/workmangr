@@ -1,0 +1,169 @@
+module Infer
+
+from "map" include Map
+from "runtime/unsafe/panic" include Panic
+
+from "./ast.gr" include Ast
+from "./types.gr" include Types
+
+provide record InferState {
+  nextVar: Number,
+  subst: Types.Subst,
+  env: Types.Env,
+  nodeTypes: Map.Map<Number, Types.Type>,
+  topBindings: Map.Map<String, Types.Scheme>,
+}
+
+let makeInitialState = () => {
+  let subst = Types.emptySubst()
+  let env = Types.emptyEnv()
+  let nodeTypes = Map.make()
+  let topBindings = Map.make()
+  { nextVar: 1, subst, env, nodeTypes, topBindings }
+}
+
+let freshVar = (state: InferState) => {
+  let id = state.nextVar
+  (Types.TVar(id), { ...state, nextVar: id + 1 })
+}
+
+let apply = (state: InferState, t: Types.Type) =>
+  Types.applySubstType(state.subst, t)
+
+let occurs = (varId: Number, t: Types.Type, state: InferState) => {
+  let fv = Types.freeVars(apply(state, t))
+  Types.containsVar(fv, varId)
+}
+
+let bindVar = (varId: Number, t: Types.Type, state: InferState) => {
+  let tApplied = apply(state, t)
+  if (tApplied == Types.TVar(varId)) {
+    state
+  } else if (occurs(varId, tApplied, state)) {
+    Panic.panic("Type error: occurs check failed")
+  } else {
+    Map.set(varId, tApplied, state.subst)
+    state
+  }
+}
+
+let rec unify = (left: Types.Type, right: Types.Type, state: InferState) => {
+  let l = apply(state, left)
+  let r = apply(state, right)
+
+  match ((l, r)) {
+    (Types.TNumber, Types.TNumber) => state,
+    (Types.TVoid, Types.TVoid) => state,
+    (Types.TVar(id), t) => bindVar(id, t, state),
+    (t, Types.TVar(id)) => bindVar(id, t, state),
+    (Types.TFun(a1, b1), Types.TFun(a2, b2)) => {
+      let state1 = unify(a1, a2, state)
+      unify(b1, b2, state1)
+    },
+    _ => Panic.panic("Type error: cannot unify types"),
+  }
+}
+
+let recordNodeType = (id: Number, t: Types.Type, state: InferState) => {
+  let applied = apply(state, t)
+  Map.set(id, applied, state.nodeTypes)
+  applied
+}
+
+let lookupEnv = (name: String, state: InferState) => {
+  match (Map.get(name, state.env)) {
+    Some(scheme) => {
+      let (inst, nextVar) = Types.instantiate(scheme, state.nextVar)
+      (Types.applySubstType(state.subst, inst), { ...state, nextVar })
+    },
+    None => Panic.panic("Type error: unknown identifier"),
+  }
+}
+
+let withBinding = (
+  name: String,
+  scheme: Types.Scheme,
+  state: InferState,
+  fn: (InferState => (Types.Type, InferState)),
+) => {
+  let previous = Map.get(name, state.env)
+  Map.set(name, scheme, state.env)
+  let (resultType, stateAfter) = fn(state)
+  match (previous) {
+    Some(prevScheme) => Map.set(name, prevScheme, state.env),
+    None => Map.remove(name, state.env),
+  }
+  (resultType, stateAfter)
+}
+
+let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
+  match (expr.kind) {
+    Ast.IntLit(_value) => {
+      let t = recordNodeType(expr.id, Types.TNumber, state)
+      (t, state)
+    },
+    Ast.Ident(name) => {
+      let (t, state1) = lookupEnv(name, state)
+      let tRecorded = recordNodeType(expr.id, t, state1)
+      (tRecorded, state1)
+    },
+    Ast.Unknown => {
+      let (t, state1) = freshVar(state)
+      let tRecorded = recordNodeType(expr.id, t, state1)
+      (tRecorded, state1)
+    },
+    Ast.Block(inner) => {
+      let (tInner, state1) = inferExpr(inner, state)
+      let t = recordNodeType(expr.id, tInner, state1)
+      (t, state1)
+    },
+    Ast.Lambda(paramOpt, body) =>
+      match (paramOpt) {
+        None => {
+          let (tBody, state1) = inferExpr(body, state)
+          let fnType = Types.TFun(Types.TVoid, tBody)
+          let t = recordNodeType(expr.id, fnType, state1)
+          (t, state1)
+        },
+        Some(paramName) => {
+          let (paramType, state1) = freshVar(state)
+          let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
+          let (fnType, stFn) = withBinding(
+            paramName,
+            monoScheme,
+            state1,
+            (st) => {
+              let (tBody, stBody) = inferExpr(body, st)
+              (Types.TFun(paramType, tBody), stBody)
+            },
+          )
+          let tRecorded = recordNodeType(expr.id, fnType, stFn)
+          (tRecorded, stFn)
+        },
+      },
+  }
+}
+
+let inferBinding = (binding: Ast.Binding, state: InferState) => {
+  let (tValue, state1) = inferExpr(binding.value, state)
+  Types.applySubstEnv(state1.subst, state1.env)
+  let scheme = Types.generalize(state1.env, state1.subst, tValue)
+  Map.set(binding.name, scheme, state1.env)
+  Map.set(binding.name, scheme, state1.topBindings)
+  state1
+}
+
+let inferProgram = (program: Ast.Program) => {
+  let state = makeInitialState()
+  let rec loop = (bindings: List<Ast.Binding>, st: InferState) =>
+    match (bindings) {
+      [] => st,
+      [b, ...rest] => loop(rest, inferBinding(b, st)),
+    }
+
+  let finalState = loop(program.bindings, state)
+  Types.applySubstEnv(finalState.subst, finalState.env)
+  finalState
+}
+
+provide { inferProgram }

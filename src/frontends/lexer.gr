@@ -1,0 +1,122 @@
+module Lexer
+
+from "char" include Char
+from "string" include String
+
+from "../core/source.gr" include Source
+
+provide enum TokenKind {
+  LetKw,
+  IdentTok(String),
+  IntTok(Number),
+  LParen,
+  RParen,
+  LBrace,
+  RBrace,
+  Eq,
+  FatArrow,
+  Question,
+  EOF,
+}
+
+provide record Token {
+  kind: TokenKind,
+  span: Source.Span,
+}
+
+let isIdentStart = (ch: Char) =>
+  Char.Ascii.isAlpha(ch) || ch == '_'
+
+let isIdentContinue = (ch: Char) =>
+  isIdentStart(ch) || Char.Ascii.isDigit(ch)
+
+let digitValue = (ch: Char) => Char.code(ch) - Char.code('0')
+
+let lex = (source: String) => {
+  let len = String.length(source)
+
+  let peek = (index: Number) =>
+    if (index < 0 || index >= len) { None } else { Some(String.charAt(index, source)) }
+
+  let rec skipWhitespace = (index: Number) => {
+    match (peek(index)) {
+      Some(ch) => {
+        if (Char.Ascii.isWhitespace(ch)) {
+          skipWhitespace(index + 1)
+        } else {
+          index
+        }
+      },
+      None => index,
+    }
+  }
+
+  let readIdent = (start: Number) => {
+    let rec loop = (index: Number) => {
+      match (peek(index)) {
+        Some(ch) => {
+          if (isIdentContinue(ch)) { loop(index + 1) } else { index }
+        },
+        _ => index,
+      }
+    }
+    let endIndex = loop(start + 1)
+    (String.slice(start, end=endIndex, source), endIndex)
+  }
+
+  let readNumber = (start: Number) => {
+    let rec loop = (index: Number, acc: Number) => {
+      match (peek(index)) {
+        Some(ch) => {
+          if (Char.Ascii.isDigit(ch)) {
+            loop(index + 1, acc * 10 + digitValue(ch))
+          } else {
+            (acc, index)
+          }
+        },
+        _ => (acc, index),
+      }
+    }
+    loop(start + 1, digitValue(String.charAt(start, source)))
+  }
+
+  let makeToken = (kind: TokenKind, start: Number, end: Number) =>
+    { kind, span: Source.makeSpan(start, end) }
+
+  let rec loop = (index: Number) => {
+    let i = skipWhitespace(index)
+    if (i >= len) {
+      [makeToken(EOF, i, i)]
+    } else {
+      let ch = String.charAt(i, source)
+
+      if (isIdentStart(ch)) {
+        let (ident, endIndex) = readIdent(i)
+        let kind = if (ident == "let") { LetKw } else { IdentTok(ident) }
+        [makeToken(kind, i, endIndex), ...loop(endIndex)]
+      } else if (Char.Ascii.isDigit(ch)) {
+        let (value, endIndex) = readNumber(i)
+        [makeToken(IntTok(value), i, endIndex), ...loop(endIndex)]
+      } else {
+        match (ch) {
+          '(' => [makeToken(LParen, i, i + 1), ...loop(i + 1)],
+          ')' => [makeToken(RParen, i, i + 1), ...loop(i + 1)],
+          '{' => [makeToken(LBrace, i, i + 1), ...loop(i + 1)],
+          '}' => [makeToken(RBrace, i, i + 1), ...loop(i + 1)],
+          '=' => {
+            match (peek(i + 1)) {
+              Some('>') => [makeToken(FatArrow, i, i + 2), ...loop(i + 2)],
+              _ => [makeToken(Eq, i, i + 1), ...loop(i + 1)],
+            }
+          },
+          '?' => [makeToken(Question, i, i + 1), ...loop(i + 1)],
+          _ => loop(i + 1),
+        }
+      }
+    }
+  }
+
+  loop(0)
+}
+
+provide { lex }

@@ -1,0 +1,167 @@
+module Types
+
+from "list" include List
+from "map" include Map
+
+provide enum rec Type {
+  TNumber,
+  TVoid,
+  TVar(Number),
+  TFun(Type, Type),
+}
+
+provide record Scheme {
+  quantifiers: List<Number>,
+  ty: Type,
+}
+
+provide type Subst = Map.Map<Number, Type>
+provide type Env = Map.Map<String, Scheme>
+
+let emptySubst = () => Map.make()
+let emptyEnv = () => Map.make()
+
+let rec typeToString = (t: Type) =>
+  match (t) {
+    TNumber => "Number",
+    TVoid => "Void",
+    TVar(id) => "'" ++ toString(id),
+    TFun(a, b) => {
+      let left =
+        match (a) {
+          TFun(_, _) => "(" ++ typeToString(a) ++ ")",
+          _ => typeToString(a),
+        }
+      left ++ " -> " ++ typeToString(b)
+    },
+  }
+
+let containsVar = (vars: List<Number>, target: Number) => {
+  let rec loop = (rest: List<Number>) =>
+    match (rest) {
+      [] => false,
+      [x, ...xs] => if (x == target) { true } else { loop(xs) },
+    }
+  loop(vars)
+}
+
+let dedupeVars = (vars: List<Number>) => {
+  let rec loop = (input: List<Number>, acc: List<Number>) =>
+    match (input) {
+      [] => acc,
+      [x, ...xs] =>
+        if (containsVar(acc, x)) {
+          loop(xs, acc)
+        } else {
+          loop(xs, [x, ...acc])
+        },
+    }
+  List.reverse(loop(vars, []))
+}
+
+let rec freeVars = (t: Type) =>
+  match (t) {
+    TNumber => [],
+    TVoid => [],
+    TVar(id) => [id],
+    TFun(a, b) => List.append(freeVars(a), freeVars(b)),
+  }
+
+let freeVarsScheme = (scheme: Scheme) => {
+  let fv = freeVars(scheme.ty)
+  List.filter((id) => !containsVar(scheme.quantifiers, id), fv)
+}
+
+let freeVarsEnv = (env: Env) => {
+  let pairs = Map.toList(env)
+  let gathered =
+    List.reduce(
+      (acc, pair) => {
+        let (_name, scheme) = pair
+        List.append(acc, freeVarsScheme(scheme))
+      },
+      [],
+      pairs,
+    )
+  dedupeVars(gathered)
+}
+
+let rec applySubstType = (subst: Subst, t: Type) =>
+  match (t) {
+    TNumber => t,
+    TVoid => t,
+    TFun(a, b) => TFun(applySubstType(subst, a), applySubstType(subst, b)),
+    TVar(id) =>
+      match (Map.get(id, subst)) {
+        Some(t2) => applySubstType(subst, t2),
+        None => t,
+      },
+  }
+
+let applySubstScheme = (subst: Subst, scheme: Scheme) => {
+  // Do not substitute quantified variables.
+  let filtered = Map.make()
+  Map.forEach(
+    (key, value) => {
+      if (!containsVar(scheme.quantifiers, key)) {
+        Map.set(key, value, filtered)
+      }
+    },
+    subst,
+  )
+  { ...scheme, ty: applySubstType(filtered, scheme.ty) }
+}
+
+let applySubstEnv = (subst: Subst, env: Env) =>
+  Map.forEach(
+    (name, scheme) => Map.set(name, applySubstScheme(subst, scheme), env),
+    env,
+  )
+
+let generalize = (env: Env, subst: Subst, t: Type) => {
+  let tApplied = applySubstType(subst, t)
+  let envVars = freeVarsEnv(env)
+  let typeVars = dedupeVars(freeVars(tApplied))
+  let quantifiers = List.filter((id) => !containsVar(envVars, id), typeVars)
+  { quantifiers, ty: tApplied }
+}
+
+let instantiate = (scheme: Scheme, nextVarStart: Number) => {
+  let mapping: Map.Map<Number, Type> = Map.make()
+
+  let nextVar =
+    List.reduce(
+      (next, id) => {
+        Map.set(id, TVar(next), mapping)
+        next + 1
+      },
+      nextVarStart,
+      scheme.quantifiers,
+    )
+
+  let rec replace = (t: Type) =>
+    match (t) {
+      TNumber => t,
+      TVoid => t,
+      TFun(a, b) => TFun(replace(a), replace(b)),
+      TVar(id) =>
+        match (Map.get(id, mapping)) {
+          Some(t2) => t2,
+          None => t,
+        },
+    }
+
+  (replace(scheme.ty), nextVar)
+}
+
+provide {
+  emptySubst,
+  emptyEnv,
+  typeToString,
+  containsVar,
+  freeVars,
+  applySubstType,
+  applySubstEnv,
+  generalize,
+  instantiate,
+}

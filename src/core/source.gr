@@ -1,0 +1,41 @@
+module Source
+
+from "string" include String
+
+provide record Span {
+  start: Number,
+  end: Number,
+}
+
+provide record LineCol {
+  line: Number,
+  col: Number,
+}
+
+let makeSpan = (start: Number, end: Number) => { start, end }
+
+let slice = (source: String, span: Span) =>
+  String.slice(span.start, end=span.end, source)
+
+// 1-based line, 0-based column to mirror the v0 CLI shape.
+let offsetToLineCol = (source: String, offset: Number) => {
+  let limit = if (offset < 0) { 0 } else { offset }
+  let len = String.length(source)
+
+  let rec loop = (index: Number, line: Number, col: Number) => {
+    if (index >= limit || index >= len) {
+      { line, col }
+    } else {
+      let ch = String.charAt(index, source)
+      if (ch == '\n') {
+        loop(index + 1, line + 1, 0)
+      } else {
+        loop(index + 1, line, col + 1)
+      }
+    }
+  }
+
+  loop(0, 1, 0)
+}
+
+provide { makeSpan, slice, offsetToLineCol }
