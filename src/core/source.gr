@@ -3,6 +3,8 @@ module Source
 from "string" include String
 
 provide record Span {
+  line: Number,
+  col: Number,
   start: Number,
   end: Number,
 }
@@ -12,7 +14,12 @@ provide record LineCol {
   col: Number,
 }
 
-let makeSpan = (start: Number, end: Number) => { start, end }
+let makeSpan = (
+  line,
+  col,
+  start,
+  end
+) => { line, col, start, end }
 
 let slice = (source: String, span: Span) =>
   String.slice(span.start, end=span.end, source)

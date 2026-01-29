@@ -1,0 +1,109 @@
+module Util
+
+provide let (|>) = (x, f) => f(x)
+
+provide let testStrShort = "
+let input = \"L1, R3, R1, L5, L2, L5\";
+
+export type GenericError =
+  | Error;
+"
+
+provide let testStr = "
+
+let input = \"L1, R3, R1, L5, L2, L5\";
+
+export type GenericError =
+  | Error;
+
+record Location = { x: Int, y: Int };
+record Operation = { direction: Direction, distance: Int };
+type Direction = L | R;
+type Orientation = N | E | S | W;
+let start: Location = { x= 0, y= 0 };
+
+// Function to parse a string into an Operation
+let produceOp = (in) => {
+  let intL = 'L' :> charToInt;
+  let intR = 'R' :> charToInt;
+  let val = (in, 0) :> list.at :> stripErr;
+  let direction = stripErr(
+    match(val) {
+      intL => { IOk(L) },
+      intR => { IOk(R) },
+      _ => { IErr(Error) }
+    }
+  );
+  let distance = (isDigit, in) 
+    :> list.filter 
+    :> posIntStringToInt;
+  let yoink = match(direction, distance) {
+    (direction, Some(distance)) => { 
+      IOk(Operation{ direction, distance }) 
+    },
+    (direction, None) => { 
+      IErr((direction, distance)) 
+    }
+  };
+  yoink
+};
+
+// Function to create a movement function based on orientation and distance
+let move = (orient, distance) => {
+  (pos) => {
+    match(orient) {
+      N => { .{ x= pos.x, y= pos.y + distance } },
+      E => { .{ x= pos.x + distance, y= pos.y } },
+      S => { .{ x= pos.x, y= pos.y - distance } },
+      W => { .{ x= pos.x - distance, y= pos.y } }
+    }
+  }
+};
+let rec walker = (opList, orient, location) => {
+  let (opx, opList2) = stripErr(list.uncons(opList));
+  let newOrient = match((opx.direction, orient)) {
+    (L, N) => { W },
+    (L, E) => { N },
+    (L, S) => { E },
+    (L, W) => { S },
+    (R, N) => { E },
+    (R, E) => { S },
+    (R, S) => { W },
+    (R, W) => { N }
+  };
+  let amount = opx.distance;
+  let newLoc = move(newOrient, amount)(location);
+  if (list.length(opList2) > 0) { 
+    walker(opList2, newOrient, newLoc) 
+  } else {
+    newLoc
+  }
+};
+
+let rec yoink = (infectedList) => {
+  match(list.uncons(infectedList)) {
+    IOk((head, tail)) => {
+      match(head, yoink(tail)) {
+        (IOk(value), IOk(restList)) => { IOk(Link(value, restList)) },
+        (IErr(err), _) => { IErr(err) },
+        (_, IErr(err)) => { IErr(err) }
+      }
+    },
+    IErr(_) => { IOk(Empty) }
+  }
+};
+
+let process = (in) => {
+  let str = stringToList(in);
+  let cleanedStr = list.remove(char(\" \"), str);
+  let opStrList = list.splitBy(cleanedStr, char(\",\"));
+  let opList = list.map(produceOp, opStrList);
+  let cleanOpList = stripErr(yoink(opList));
+  let finalLoc = walker(cleanOpList, N, start);
+  abs(finalLoc.x) + abs(finalLoc.y)
+};
+
+let main = => {
+  print(process(input));
+}
+"

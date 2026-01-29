@@ -3,6 +3,7 @@ module Lexer
 from "char" include Char
 from "string" include String
 from "option" include Option
+from "list" include List
 from "runtime/unsafe/panic" include Panic
 from "../util.gr" include Util
 use Util.{ testStr }
@@ -30,6 +31,13 @@ provide enum TokenKind {
   Colon, // :
   Slash, // /
   DSlash, // //
+  Arrow, // >
+  Period, // .
+  DPeriod, // ..
+  Plus, // +
+  DPlus, // ++
+  Dash, // -
+  DDash, // --
   EOF, // eof
 }
 
@@ -42,6 +50,7 @@ provide record Token {
 enum ReadValue {
   StringVal(String),
   NumVal(Number),
+  CharVal(Char),
 }
 
 record Position {
@@ -87,20 +96,17 @@ provide let lex = source => {
   }
 
   // continue until not whitespace
-  let rec skipWhitespace = position => {
-    match (peek(position.index)) {
-      Some(ch) => {
-        if (Char.Ascii.isWhitespace(ch)) {
-          let newPos = advancePosition(position, ch)
-          skipWhitespace(newPos)
-        } else {
-          position
-        }
-      },
-      None => {
-        position
-      },
+  let skipWhitespace = position => {
+    let mut p = position
+    while (true) {
+      match (peek(p.index)) {
+        Some(ch) when Char.Ascii.isWhitespace(ch) => {
+          p = advancePosition(p, ch)
+        },
+        _ => break,
+      }
     }
+    p
   }
 
   // name start
@@ -216,175 +222,304 @@ provide let lex = source => {
     loop(startPosition, "")
   }
 
+  //read char to end
+  let readChar = (startPosition: Position) => {
+    match (peek(startPosition.index)) {
+      Some(ch) => {
+        if (ch == '\'') {
+          panic("Empty char literal")
+        } else {
+          let char = ch
+          let afterChar = advancePosition(startPosition, ch)
+          match (peek(afterChar.index)) {
+            Some('\'') => {
+              {
+                value: CharVal(char),
+                position: advancePosition(afterChar, '\''),
+              }
+            },
+            _ => panic("Unclosed char literal"),
+          }
+        }
+      },
+      None => panic("Unclosed char literal"),
+    }
+  }
+
   //create a Token
   let makeToken = (kind: TokenKind, line, col, start, end) =>
     { kind, span: Source.makeSpan(line, col, start, end) }
 
-  let rec loop = (position: Position) => {
-    let pos = skipWhitespace(position)
-
-    let val = if (pos.index >= lenght) {
-      [makeToken(EOF, pos.line, pos.col, pos.index, pos.index)]
-    } else {
-      let ch = String.charAt(pos.index, source)
-
-      match (ch) {
-        ch when isNameStart(ch) => {
-          let res = readName(pos)
-          let kind = if (res.value == StringVal("let")) {
-            LetKw
-          } else {
-            match (res.value) {
-              StringVal(ident) => {
-                NameTok(ident)
-              },
-              _ => {
-                panic("WTF")
-              },
-            }
-          }
-          [
-            makeToken(kind, pos.line, pos.col, pos.index, res.position.index),
-            ...loop(res.position)
-          ]
-        },
-        ch when Char.Ascii.isDigit(ch) => {
-          let res = readNumber(pos)
-          let val = match (res.value) {
-            NumVal(ident) => {
-              ident
+  let mut tokens = []
+  let mut pos = { index: 0, line: 1, col: 1 }
+  while (pos.index < lenght) {
+    pos = skipWhitespace(pos)
+    if (pos.index >= lenght) break
+    let ch = String.charAt(pos.index, source)
+    match (ch) {
+      ch when isNameStart(ch) => {
+        let res = readName(pos)
+        let kind = if (res.value == StringVal("let")) {
+          LetKw
+        } else {
+          match (res.value) {
+            StringVal(ident) => {
+              NameTok(ident)
             },
             _ => {
               panic("WTF")
             },
           }
-          [
-            makeToken(
-              IntTok(val),
-              pos.line,
-              pos.col,
-              pos.index,
-              res.position.index
-            ),
-            ...loop(res.position)
-          ]
-        },
-        '"' => {
-          let res = readString(advancePosition(pos, ch))
-          let str = match (res.value) {
-            StringVal(s) => s,
-            _ => panic("Unexpected value type"),
-          }
-          [
-            makeToken(
-              StringTok(str),
-              pos.line,
-              pos.col,
-              pos.index,
-              res.position.index
-            ),
-            ...loop(res.position)
-          ]
-        },
-        ch => { //Var(ch)
-          match (ch) {
-            '(' =>
-              [
-                makeToken(LParen, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            ')' =>
-              [
-                makeToken(RParen, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            '{' =>
-              [
-                makeToken(LBrace, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            '}' =>
-              [
-                makeToken(RBrace, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            '?' =>
-              [
-                makeToken(Question, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            '|' =>
-              [
-                makeToken(Pipe, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            ';' => 
-              [
-                makeToken(SemiColon, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            ':' => 
-              [
-                makeToken(Colon, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],
-            ',' => 
-              [
-                makeToken(Comma, pos.line, pos.col, pos.index, pos.index + 1),
-                ...loop(advancePosition(pos, ch))
-              ],  
-            '=' => {
-              match (peek(pos.index + 1)) {
-                Some('>') =>
-                  [
-                    makeToken(
-                      FatArrow,
-                      pos.line,
-                      pos.col,
-                      pos.index,
-                      pos.index + 2
-                    ),
-                    ...loop(advancePosition(advancePosition(pos, ch), '>'))
-                  ],
-                _ =>
-                  [
-                    makeToken(Eq, pos.line, pos.col, pos.index, pos.index + 1),
-                    ...loop(advancePosition(pos, ch))
-                  ],
-              }
-            },
-            '/' => {
-              match (peek(pos.index + 1)) {
-                Some('/') =>
-                  [
-                    makeToken(
-                      DSlash,
-                      pos.line,
-                      pos.col,
-                      pos.index,
-                      pos.index + 2
-                    ),
-                    ...loop(advancePosition(advancePosition(pos, ch), '>'))
-                  ],
-                _ =>
-                  [
-                    makeToken(Slash, pos.line, pos.col, pos.index, pos.index + 1),
-                    ...loop(advancePosition(pos, ch))
-                  ],
-              }
-            },
-            _ => {
-              let msg = "unknown tok: \"" ++ Char.toString(ch) ++ "\""
-              panic(msg)
+        }
+        tokens = [
+          makeToken(kind, pos.line, pos.col, pos.index, res.position.index),
+          ...tokens
+        ]
+        pos = res.position
+      },
+      ch when Char.Ascii.isDigit(ch) => {
+        let res = readNumber(pos)
+        let val = match (res.value) {
+          NumVal(ident) => {
+            ident
+          },
+          _ => {
+            panic("WTF")
+          },
+        }
+        tokens = [
+          makeToken(
+            IntTok(val),
+            pos.line,
+            pos.col,
+            pos.index,
+            res.position.index
+          ),
+          ...tokens
+        ]
+        pos = res.position
+      },
+      '"' => {
+        let res = readString(advancePosition(pos, ch))
+        let str = match (res.value) {
+          StringVal(s) => s,
+          _ => panic("Unexpected value type"),
+        }
+        tokens = [
+          makeToken(
+            StringTok(str),
+            pos.line,
+            pos.col,
+            pos.index,
+            res.position.index
+          ),
+          ...tokens
+        ]
+        pos = res.position
+      },
+      '\'' => {
+        let res = readChar(advancePosition(pos, ch))
+        let chr = match (res.value) {
+          CharVal(c) => c,
+          _ => panic("Unexpected value type"),
+        }
+        tokens = [
+          makeToken(
+            QuoteTok(chr),
+            pos.line,
+            pos.col,
+            pos.index,
+            res.position.index
+          ),
+          ...tokens
+        ]
+        pos = res.position
+      },
+      ch => { //Var(ch)
+        match (ch) {
+          '(' => {
+            tokens = [
+              makeToken(LParen, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          ')' => {
+            tokens = [
+              makeToken(RParen, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          '{' => {
+            tokens = [
+              makeToken(LBrace, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          '}' => {
+            tokens = [
+              makeToken(RBrace, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          '?' => {
+            tokens = [
+              makeToken(Question, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          '|' => {
+            tokens = [
+              makeToken(Pipe, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          ';' => {
+            tokens = [
+              makeToken(SemiColon, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          ':' => {
+            tokens = [
+              makeToken(Colon, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          ',' => {
+            tokens = [
+              makeToken(Comma, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          '>' => {
+            tokens = [
+              makeToken(Arrow, pos.line, pos.col, pos.index, pos.index + 1),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          //len2
+          '-' => {
+            match (peek(pos.index + 1)) {
+              Some('-') => {
+                tokens = [
+                  makeToken(DDash, pos.line, pos.col, pos.index, pos.index + 2),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '-')
+              },
+              _ => {
+                tokens = [
+                  makeToken(Dash, pos.line, pos.col, pos.index, pos.index + 1),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
             }
-          }
-        },
-      }
+          },
+          '.' => {
+            match (peek(pos.index + 1)) {
+              Some('.') => {
+                tokens = [
+                  makeToken(
+                    DPeriod,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '.')
+              },
+              _ => {
+                tokens = [
+                  makeToken(Period, pos.line, pos.col, pos.index, pos.index + 1),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
+          },
+          '+' => {
+            match (peek(pos.index + 1)) {
+              Some('+') => {
+                tokens = [
+                  makeToken(DPlus, pos.line, pos.col, pos.index, pos.index + 2),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '+')
+              },
+              _ => {
+                tokens = [
+                  makeToken(Plus, pos.line, pos.col, pos.index, pos.index + 1),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
+          },
+          '=' => {
+            match (peek(pos.index + 1)) {
+              Some('>') => {
+                tokens = [
+                  makeToken(
+                    FatArrow,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '>')
+              },
+              _ => {
+                tokens = [
+                  makeToken(Eq, pos.line, pos.col, pos.index, pos.index + 1),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
+          },
+          '/' => {
+            match (peek(pos.index + 1)) {
+              Some('/') => {
+                tokens = [
+                  makeToken(DSlash, pos.line, pos.col, pos.index, pos.index + 2),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '/')
+              },
+              _ => {
+                tokens = [
+                  makeToken(Slash, pos.line, pos.col, pos.index, pos.index + 1),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
+          },
+          _ => {
+            let msg = "unknown tok: \"" ++ Char.toString(ch) ++ "\""
+            panic(msg)
+          },
+        }
+      },
     }
-    print(val)
-    val
   }
-  loop({ index: 0, line: 1, col: 1 })
+  tokens = [makeToken(EOF, pos.line, pos.col, pos.index, pos.index), ...tokens]
+  List.reverse(tokens)
 }
 
 print(lex(testStr))
