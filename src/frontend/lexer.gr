@@ -44,7 +44,7 @@ provide enum TokenKind {
   LitNum(Number), //138510
   LitString(String), // "*"
   LitChar(Char), // '*'
-  LitBool(Bool), // truefalse
+  LitBool(Bool), // true false
   //symbols
   LParen, // (
   RParen, // )
@@ -53,6 +53,7 @@ provide enum TokenKind {
   FatArrow, // =>
   Question, // ?
   Pipe, // |
+  DPipe, // ||
   SemiColon, // ;
   Comma, // ,
   Colon, // :
@@ -77,6 +78,7 @@ provide enum TokenKind {
 provide record Token {
   kind: TokenKind,
   span: Source.Span,
+  mate: Option<Number> //index
 }
 
 enum ReadValue {
@@ -144,6 +146,12 @@ provide let lex = source => {
   // name start
   let isNameStart = (ch: Char) => {
     Char.Ascii.isAlpha(ch) || ch == '_'
+  }
+
+  // check if uppercase
+  let isUpper = (ch: Char) => {
+    let code = Char.code(ch)
+    code >= Char.code('A') && code <= Char.code('Z')
   }
 
   //read a name to end
@@ -278,6 +286,45 @@ provide let lex = source => {
     }
   }
 
+  // determine token kind from name
+  let tokenKindFromName = (name: String) => {
+    match (name) {
+      "if" => KwIf,
+      "else" => KwElse,
+      "elseif" => KwElseIf,
+      "match" => KwMatch,
+      "when" => KwWhen,
+      "let" => KwLet,
+      "mut" => KwMut,
+      "rec" => KwRec,
+      "and" => KwAnd,
+      "type" => KwType,
+      "record" => KwRecord,
+      "from" => KwFrom,
+      "import" => KwImport,
+      "export" => KwExport,
+      "as" => KwAs,
+      "infectious" => KwInfectious,
+      "domain" => KwDomain,
+      "policy" => KwPolicy,
+      "op" => KwOp,
+      "annotate" => KwAnnotate,
+      "void" => KwVoid,
+      "panic" => KwPanic,
+      "Var" => KwVar,
+      "AllErrors" => KwAllErrors,
+      "true" => LitBool(true),
+      "false" => LitBool(false),
+      _ => {
+        if (isUpper(String.charAt(0, name))) {
+          ConstructorTok(name)
+        } else {
+          NameTok(name)
+        }
+      },
+    }
+  }
+
   //create a Token
   let makeToken = (kind: TokenKind, line, col, start, end) =>
     { kind, span: Source.makeSpan(line, col, start, end) }
@@ -291,18 +338,11 @@ provide let lex = source => {
     match (ch) {
       ch when isNameStart(ch) => {
         let res = readName(pos)
-        let kind = if (res.value == StringVal("let")) {
-          KwLet
-        } else {
-          match (res.value) {
-            StringVal(ident) => {
-              NameTok(ident)
-            },
-            _ => {
-              panic("WTF")
-            },
-          }
+        let ident = match (res.value) {
+          StringVal(s) => s,
+          _ => panic("WTF"),
         }
+        let kind = tokenKindFromName(ident)
         tokens = [
           makeToken(kind, pos.line, pos.col, pos.index, res.position.index),
           ...tokens
@@ -404,13 +444,6 @@ provide let lex = source => {
             ]
             pos = advancePosition(pos, ch)
           },
-          '|' => {
-            tokens = [
-              makeToken(Pipe, pos.line, pos.col, pos.index, pos.index + 1),
-              ...tokens
-            ]
-            pos = advancePosition(pos, ch)
-          },
           ';' => {
             tokens = [
               makeToken(SemiColon, pos.line, pos.col, pos.index, pos.index + 1),
@@ -440,6 +473,24 @@ provide let lex = source => {
             pos = advancePosition(pos, ch)
           },
           //len2
+          '|' => {
+            match (peek(pos.index + 1)) {
+              Some('-') => {
+                tokens = [
+                  makeToken(DPipe, pos.line, pos.col, pos.index, pos.index + 2),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '-')
+              },
+              _ => {
+                tokens = [
+                  makeToken(Pipe, pos.line, pos.col, pos.index, pos.index + 1),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
+          },
           '-' => {
             match (peek(pos.index + 1)) {
               Some('-') => {
@@ -517,13 +568,7 @@ provide let lex = source => {
               },
               Some('=') => {
                 tokens = [
-                  makeToken(
-                    EqEq,
-                    pos.line,
-                    pos.col,
-                    pos.index,
-                    pos.index + 2
-                  ),
+                  makeToken(EqEq, pos.line, pos.col, pos.index, pos.index + 2),
                   ...tokens
                 ]
                 pos = advancePosition(advancePosition(pos, ch), '>')
