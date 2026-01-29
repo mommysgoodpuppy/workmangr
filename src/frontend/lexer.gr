@@ -1,0 +1,211 @@
+module Lexer
+
+from "char" include Char
+from "string" include String
+from "option" include Option
+
+from "../core/source.gr" include Source
+
+provide enum TokenKind {
+  LetKw, // let
+  IdentTok(String),
+  IntTok(Number),
+  LParen, // (
+  RParen, // )
+  LBrace, // {
+  RBrace, // }
+  Eq, // =
+  FatArrow, // =>
+  Question, // ?
+  EOF, // eof
+}
+
+//the base token type
+provide record Token {
+  kind: TokenKind,
+  span: Source.Span,
+}
+
+enum ReadValue {
+  StringVal(String),
+  NumVal(Number),
+}
+
+record Position {
+  index: Number,
+  line: Number,
+  col: Number,
+}
+
+record ReadResult {
+  value: ReadValue,
+  position: Position,
+}
+
+//lexer function
+provide let lex = source => {
+
+  //source lenght
+  let lenght = String.length(source)
+
+  //peek a token
+  let peek = index => {
+    if (index < 0 || index >= lenght) {
+      None
+    } else {
+      Some(String.charAt(index, source))
+    }
+  }
+
+  // advance position based on character
+  let advancePosition = (pos: Position, ch: Char) => {
+    let newIndex = pos.index + 1
+    let newLine = if (ch == '\n') {
+      pos.line + 1
+    } else {
+      pos.line
+    }
+    let newCol = if (ch == '\n') {
+      1
+    } else {
+      pos.col + 1
+    }
+    { index: newIndex, line: newLine, col: newCol }
+  }
+
+  // name start
+  let isNameStart = (ch: Char) => {
+    Char.Ascii.isAlpha(ch) || ch == '_'
+  }
+
+  // continue until not whitespace
+  let rec skipWhitespace = position => {
+    match (peek(position.index)) {
+      Some(ch) => {
+        if (Char.Ascii.isWhitespace(ch)) {
+          let newPos = advancePosition(position, ch)
+          skipWhitespace(newPos)
+        } else {
+          position
+        }
+      },
+      None => {
+        position
+      },
+    }
+  }
+
+  //read a name to end
+  let readName = (startPosition: Position) => {
+    // name cont
+    let isNameContinue = (ch: Char) => {
+      isNameStart(ch) || Char.Ascii.isDigit(ch)
+    }
+
+    let rec loop = (currentPos: Position) => {
+      match (peek(currentPos.index)) {
+        Some(ch) => {
+          if (isNameContinue(ch)) {
+            let newPos = advancePosition(currentPos, ch)
+            loop(newPos)
+          } else {
+            currentPos
+          }
+        },
+        _ => currentPos,
+      }
+    }
+    let endPos = loop(startPosition)
+    let name = String.slice(startPosition.index, end=endPos.index, source)
+    { value: StringVal(name), position: endPos }
+  }
+
+  //read a number to end
+  let readNumber = (startPosition: Position) => {
+    // number
+    let digitValue = (ch: Char) => {
+      Char.code(ch) - Char.code('0')
+    }
+
+    let firstCh = String.charAt(startPosition.index, source)
+    let initialAcc = digitValue(firstCh)
+
+    let rec loop = (currentPos: Position, acc: Number) => {
+      match (peek(currentPos.index)) {
+        Some(ch) => {
+          if (Char.Ascii.isDigit(ch)) {
+            let newAcc = acc * 10 + digitValue(ch)
+            let newPos = advancePosition(currentPos, ch)
+            loop(newPos, newAcc)
+          } else {
+            { value: NumVal(acc), position: currentPos }
+          }
+        },
+        _ => { value: NumVal(acc), position: currentPos },
+      }
+    }
+    let startAfterFirst = advancePosition(startPosition, firstCh)
+    loop(startAfterFirst, initialAcc)
+  }
+
+  //create a Token
+  let makeToken = (kind: TokenKind, line, col, start, end) =>
+    { kind, span: Source.makeSpan(line, col, start, end) }
+
+  let rec loop = (position: Position) => {
+    let pos = skipWhitespace(position)
+
+    if (pos.index >= lenght) {
+      [makeToken(EOF, pos.line, pos.col, pos.index, pos.index)]
+    } else {
+      let ch = String.charAt(pos.index, source)
+
+      match (ch) {
+        ch when isNameStart(ch) => {
+          let res = readName(pos)
+          let kind = if (res.value == StringVal("let")) {
+            LetKw
+          } else {
+            match (res.value) {
+              StringVal(ident) => {
+                IdentTok(ident)
+              },
+            }
+          }
+          [
+            makeToken(kind, pos.line, pos.col, pos.index, res.position.index),
+            ...loop(res.position)
+          ]
+        },
+        ch when Char.Ascii.isDigit(ch) => {
+          let res = readNumber(position)
+          let val = match (res.value) {
+            NumVal(ident) => {
+              ident
+            }
+          }
+          [makeToken(IntTok(val), pos.line, pos.col, pos.index, res.position.index), 
+          ...loop(res.position)]
+        },
+        ch => { //Var(ch)
+          match (ch) {
+
+            '(' => [makeToken(LParen, i, i + 1), ...loop(i + 1)],
+            ')' => [makeToken(RParen, i, i + 1), ...loop(i + 1)],
+            '{' => [makeToken(LBrace, i, i + 1), ...loop(i + 1)],
+            '}' => [makeToken(RBrace, i, i + 1), ...loop(i + 1)],
+            '=' => {
+              match (peek(i + 1)) {
+                Some('>') => [makeToken(FatArrow, i, i + 2), ...loop(i + 2)],
+                _ => [makeToken(Eq, i, i + 1), ...loop(i + 1)],
+              }
+            },
+            '?' => [makeToken(Question, i, i + 1), ...loop(i + 1)],
+            _ => loop(i + 1),
+          }
+        }
+      }
+    }
+  }
+  loop({ index: 0, line: 1, col: 1 })
+}
