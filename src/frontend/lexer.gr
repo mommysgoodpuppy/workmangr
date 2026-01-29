@@ -3,13 +3,20 @@ module Lexer
 from "char" include Char
 from "string" include String
 from "option" include Option
+from "runtime/unsafe/panic" include Panic
+from "../util.gr" include Util
+use Util.{ testStr }
+
+use Panic.{ panic }
 
 from "../core/source.gr" include Source
 
 provide enum TokenKind {
   LetKw, // let
-  IdentTok(String),
+  NameTok(String),
   IntTok(Number),
+  StringTok(String), // "*"
+  QuoteTok(Char), // '*'
   LParen, // (
   RParen, // )
   LBrace, // {
@@ -17,6 +24,12 @@ provide enum TokenKind {
   Eq, // =
   FatArrow, // =>
   Question, // ?
+  Pipe, // |
+  SemiColon, // ;
+  Comma, // ,
+  Colon, // :
+  Slash, // /
+  DSlash, // //
   EOF, // eof
 }
 
@@ -73,11 +86,6 @@ provide let lex = source => {
     { index: newIndex, line: newLine, col: newCol }
   }
 
-  // name start
-  let isNameStart = (ch: Char) => {
-    Char.Ascii.isAlpha(ch) || ch == '_'
-  }
-
   // continue until not whitespace
   let rec skipWhitespace = position => {
     match (peek(position.index)) {
@@ -93,6 +101,11 @@ provide let lex = source => {
         position
       },
     }
+  }
+
+  // name start
+  let isNameStart = (ch: Char) => {
+    Char.Ascii.isAlpha(ch) || ch == '_'
   }
 
   //read a name to end
@@ -148,6 +161,61 @@ provide let lex = source => {
     loop(startAfterFirst, initialAcc)
   }
 
+  //read string to end
+  let readString = (startPosition: Position) => {
+    let rec loop = (currentPos: Position, acc: String) => {
+      match (peek(currentPos.index)) {
+        Some(ch) => {
+          if (ch == '"') {
+            // end of string
+            { value: StringVal(acc), position: advancePosition(currentPos, ch) }
+          } else if (ch == '\\') {
+            // escape sequence
+            match (peek(currentPos.index + 1)) {
+              Some(nextCh) => {
+                let escaped = if (nextCh == '"') {
+                  "\""
+                } else if (nextCh == '\\') {
+                  "\\"
+                } else if (nextCh == 'n') {
+                  "\n"
+                } else if (nextCh == 't') {
+                  "\t"
+                } else if (nextCh == 'r') {
+                  "\r"
+                } else {
+                  String.slice(
+                    currentPos.index + 1,
+                    end=currentPos.index + 2,
+                    source
+                  ) // treat as literal
+                }
+                let newAcc = acc ++ escaped
+                let newPos = advancePosition(
+                  advancePosition(currentPos, ch),
+                  nextCh
+                )
+                loop(newPos, newAcc)
+              },
+              None => panic("Unclosed escape sequence"),
+            }
+          } else {
+            let charStr = String.slice(
+              currentPos.index,
+              end=currentPos.index + 1,
+              source
+            )
+            let newAcc = acc ++ charStr
+            let newPos = advancePosition(currentPos, ch)
+            loop(newPos, newAcc)
+          }
+        },
+        None => panic("Unclosed string literal"),
+      }
+    }
+    loop(startPosition, "")
+  }
+
   //create a Token
   let makeToken = (kind: TokenKind, line, col, start, end) =>
     { kind, span: Source.makeSpan(line, col, start, end) }
@@ -155,7 +223,7 @@ provide let lex = source => {
   let rec loop = (position: Position) => {
     let pos = skipWhitespace(position)
 
-    if (pos.index >= lenght) {
+    let val = if (pos.index >= lenght) {
       [makeToken(EOF, pos.line, pos.col, pos.index, pos.index)]
     } else {
       let ch = String.charAt(pos.index, source)
@@ -168,7 +236,10 @@ provide let lex = source => {
           } else {
             match (res.value) {
               StringVal(ident) => {
-                IdentTok(ident)
+                NameTok(ident)
+              },
+              _ => {
+                panic("WTF")
               },
             }
           }
@@ -178,34 +249,142 @@ provide let lex = source => {
           ]
         },
         ch when Char.Ascii.isDigit(ch) => {
-          let res = readNumber(position)
+          let res = readNumber(pos)
           let val = match (res.value) {
             NumVal(ident) => {
               ident
-            }
+            },
+            _ => {
+              panic("WTF")
+            },
           }
-          [makeToken(IntTok(val), pos.line, pos.col, pos.index, res.position.index), 
-          ...loop(res.position)]
+          [
+            makeToken(
+              IntTok(val),
+              pos.line,
+              pos.col,
+              pos.index,
+              res.position.index
+            ),
+            ...loop(res.position)
+          ]
+        },
+        '"' => {
+          let res = readString(advancePosition(pos, ch))
+          let str = match (res.value) {
+            StringVal(s) => s,
+            _ => panic("Unexpected value type"),
+          }
+          [
+            makeToken(
+              StringTok(str),
+              pos.line,
+              pos.col,
+              pos.index,
+              res.position.index
+            ),
+            ...loop(res.position)
+          ]
         },
         ch => { //Var(ch)
           match (ch) {
-
-            '(' => [makeToken(LParen, i, i + 1), ...loop(i + 1)],
-            ')' => [makeToken(RParen, i, i + 1), ...loop(i + 1)],
-            '{' => [makeToken(LBrace, i, i + 1), ...loop(i + 1)],
-            '}' => [makeToken(RBrace, i, i + 1), ...loop(i + 1)],
+            '(' =>
+              [
+                makeToken(LParen, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            ')' =>
+              [
+                makeToken(RParen, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            '{' =>
+              [
+                makeToken(LBrace, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            '}' =>
+              [
+                makeToken(RBrace, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            '?' =>
+              [
+                makeToken(Question, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            '|' =>
+              [
+                makeToken(Pipe, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            ';' => 
+              [
+                makeToken(SemiColon, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            ':' => 
+              [
+                makeToken(Colon, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],
+            ',' => 
+              [
+                makeToken(Comma, pos.line, pos.col, pos.index, pos.index + 1),
+                ...loop(advancePosition(pos, ch))
+              ],  
             '=' => {
-              match (peek(i + 1)) {
-                Some('>') => [makeToken(FatArrow, i, i + 2), ...loop(i + 2)],
-                _ => [makeToken(Eq, i, i + 1), ...loop(i + 1)],
+              match (peek(pos.index + 1)) {
+                Some('>') =>
+                  [
+                    makeToken(
+                      FatArrow,
+                      pos.line,
+                      pos.col,
+                      pos.index,
+                      pos.index + 2
+                    ),
+                    ...loop(advancePosition(advancePosition(pos, ch), '>'))
+                  ],
+                _ =>
+                  [
+                    makeToken(Eq, pos.line, pos.col, pos.index, pos.index + 1),
+                    ...loop(advancePosition(pos, ch))
+                  ],
               }
             },
-            '?' => [makeToken(Question, i, i + 1), ...loop(i + 1)],
-            _ => loop(i + 1),
+            '/' => {
+              match (peek(pos.index + 1)) {
+                Some('/') =>
+                  [
+                    makeToken(
+                      DSlash,
+                      pos.line,
+                      pos.col,
+                      pos.index,
+                      pos.index + 2
+                    ),
+                    ...loop(advancePosition(advancePosition(pos, ch), '>'))
+                  ],
+                _ =>
+                  [
+                    makeToken(Slash, pos.line, pos.col, pos.index, pos.index + 1),
+                    ...loop(advancePosition(pos, ch))
+                  ],
+              }
+            },
+            _ => {
+              let msg = "unknown tok: \"" ++ Char.toString(ch) ++ "\""
+              panic(msg)
+            }
           }
-        }
+        },
       }
     }
+    print(val)
+    val
   }
   loop({ index: 0, line: 1, col: 1 })
 }
+
+print(lex(testStr))
