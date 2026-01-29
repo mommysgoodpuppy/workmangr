@@ -78,7 +78,7 @@ provide enum TokenKind {
 provide record Token {
   kind: TokenKind,
   span: Source.Span,
-  mate: Option<Number> //index
+  mate: Option<Number>, //index
 }
 
 enum ReadValue {
@@ -104,7 +104,8 @@ provide let lex = source => {
   //source lenght
   let lenght = String.length(source)
 
-  //peek a token
+  let mut parenStack = []
+  let mut braceStack = []
   let peek = index => {
     if (index < 0 || index >= lenght) {
       None
@@ -326,9 +327,8 @@ provide let lex = source => {
   }
 
   //create a Token
-  let makeToken = (kind: TokenKind, line, col, start, end) =>
-    { kind, span: Source.makeSpan(line, col, start, end) }
-
+  let makeToken = (kind: TokenKind, line, col, start, end, mate) =>
+    { kind, span: Source.makeSpan(line, col, start, end), mate }
   let mut tokens = []
   let mut pos = { index: 0, line: 1, col: 1 }
   while (pos.index < lenght) {
@@ -344,7 +344,14 @@ provide let lex = source => {
         }
         let kind = tokenKindFromName(ident)
         tokens = [
-          makeToken(kind, pos.line, pos.col, pos.index, res.position.index),
+          makeToken(
+            kind,
+            pos.line,
+            pos.col,
+            pos.index,
+            res.position.index,
+            None
+          ),
           ...tokens
         ]
         pos = res.position
@@ -365,7 +372,8 @@ provide let lex = source => {
             pos.line,
             pos.col,
             pos.index,
-            res.position.index
+            res.position.index,
+            None
           ),
           ...tokens
         ]
@@ -383,7 +391,8 @@ provide let lex = source => {
             pos.line,
             pos.col,
             pos.index,
-            res.position.index
+            res.position.index,
+            None
           ),
           ...tokens
         ]
@@ -401,7 +410,8 @@ provide let lex = source => {
             pos.line,
             pos.col,
             pos.index,
-            res.position.index
+            res.position.index,
+            None
           ),
           ...tokens
         ]
@@ -411,63 +421,150 @@ provide let lex = source => {
         match (ch) {
           '(' => {
             tokens = [
-              makeToken(LParen, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                LParen,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
+            parenStack = [pos.index, ...parenStack]
             pos = advancePosition(pos, ch)
           },
           ')' => {
+            if (List.isEmpty(parenStack)) {
+              panic("Unmatched )")
+            }
+            let mateIndex = match (List.head(parenStack)) {
+              Some(idx) => idx,
+              None => panic("Should not happen"),
+            }
+            parenStack = match (List.tail(parenStack)) {
+              Some(tail) => tail,
+              None => panic("Should not happen"),
+            }
             tokens = [
-              makeToken(RParen, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                RParen,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                Some(mateIndex)
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
           },
           '{' => {
             tokens = [
-              makeToken(LBrace, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                LBrace,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
+            braceStack = [pos.index, ...braceStack]
             pos = advancePosition(pos, ch)
           },
           '}' => {
+            if (List.isEmpty(braceStack)) {
+              panic("Unmatched }")
+            }
+            let mateIndex = match (List.head(braceStack)) {
+              Some(idx) => idx,
+              None => panic("Should not happen"),
+            }
+            braceStack = match (List.tail(braceStack)) {
+              Some(tail) => tail,
+              None => panic("Should not happen"),
+            }
             tokens = [
-              makeToken(RBrace, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                RBrace,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                Some(mateIndex)
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
           },
           '?' => {
             tokens = [
-              makeToken(Question, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                Question,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
           },
           ';' => {
             tokens = [
-              makeToken(SemiColon, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                SemiColon,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
           },
           ':' => {
             tokens = [
-              makeToken(Colon, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                Colon,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
           },
           ',' => {
             tokens = [
-              makeToken(Comma, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                Comma,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
           },
           '>' => {
             tokens = [
-              makeToken(Arrow, pos.line, pos.col, pos.index, pos.index + 1),
+              makeToken(
+                Arrow,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
               ...tokens
             ]
             pos = advancePosition(pos, ch)
@@ -477,14 +574,28 @@ provide let lex = source => {
             match (peek(pos.index + 1)) {
               Some('-') => {
                 tokens = [
-                  makeToken(DPipe, pos.line, pos.col, pos.index, pos.index + 2),
+                  makeToken(
+                    DPipe,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(advancePosition(pos, ch), '-')
               },
               _ => {
                 tokens = [
-                  makeToken(Pipe, pos.line, pos.col, pos.index, pos.index + 1),
+                  makeToken(
+                    Pipe,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(pos, ch)
@@ -495,14 +606,28 @@ provide let lex = source => {
             match (peek(pos.index + 1)) {
               Some('-') => {
                 tokens = [
-                  makeToken(DDash, pos.line, pos.col, pos.index, pos.index + 2),
+                  makeToken(
+                    DDash,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(advancePosition(pos, ch), '-')
               },
               _ => {
                 tokens = [
-                  makeToken(Dash, pos.line, pos.col, pos.index, pos.index + 1),
+                  makeToken(
+                    Dash,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(pos, ch)
@@ -518,7 +643,8 @@ provide let lex = source => {
                     pos.line,
                     pos.col,
                     pos.index,
-                    pos.index + 2
+                    pos.index + 2,
+                    None
                   ),
                   ...tokens
                 ]
@@ -526,7 +652,14 @@ provide let lex = source => {
               },
               _ => {
                 tokens = [
-                  makeToken(Period, pos.line, pos.col, pos.index, pos.index + 1),
+                  makeToken(
+                    Period,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(pos, ch)
@@ -537,14 +670,28 @@ provide let lex = source => {
             match (peek(pos.index + 1)) {
               Some('+') => {
                 tokens = [
-                  makeToken(DPlus, pos.line, pos.col, pos.index, pos.index + 2),
+                  makeToken(
+                    DPlus,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(advancePosition(pos, ch), '+')
               },
               _ => {
                 tokens = [
-                  makeToken(Plus, pos.line, pos.col, pos.index, pos.index + 1),
+                  makeToken(
+                    Plus,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(pos, ch)
@@ -560,7 +707,8 @@ provide let lex = source => {
                     pos.line,
                     pos.col,
                     pos.index,
-                    pos.index + 2
+                    pos.index + 2,
+                    None
                   ),
                   ...tokens
                 ]
@@ -568,14 +716,28 @@ provide let lex = source => {
               },
               Some('=') => {
                 tokens = [
-                  makeToken(EqEq, pos.line, pos.col, pos.index, pos.index + 2),
+                  makeToken(
+                    EqEq,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
                   ...tokens
                 ]
-                pos = advancePosition(advancePosition(pos, ch), '>')
+                pos = advancePosition(advancePosition(pos, ch), '=')
               },
               _ => {
                 tokens = [
-                  makeToken(Eq, pos.line, pos.col, pos.index, pos.index + 1),
+                  makeToken(
+                    Eq,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(pos, ch)
@@ -586,14 +748,28 @@ provide let lex = source => {
             match (peek(pos.index + 1)) {
               Some('/') => {
                 tokens = [
-                  makeToken(DSlash, pos.line, pos.col, pos.index, pos.index + 2),
+                  makeToken(
+                    DSlash,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(advancePosition(pos, ch), '/')
               },
               _ => {
                 tokens = [
-                  makeToken(Slash, pos.line, pos.col, pos.index, pos.index + 1),
+                  makeToken(
+                    Slash,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
                   ...tokens
                 ]
                 pos = advancePosition(pos, ch)
@@ -608,7 +784,16 @@ provide let lex = source => {
       },
     }
   }
-  tokens = [makeToken(EOF, pos.line, pos.col, pos.index, pos.index), ...tokens]
+  if (!List.isEmpty(parenStack)) {
+    panic("Unmatched (")
+  }
+  if (!List.isEmpty(braceStack)) {
+    panic("Unmatched {")
+  }
+  tokens = [
+    makeToken(EOF, pos.line, pos.col, pos.index, pos.index, None),
+    ...tokens
+  ]
   List.reverse(tokens)
 }
 
