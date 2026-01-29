@@ -13,16 +13,43 @@ use Panic.{ panic }
 from "../core/source.gr" include Source
 
 provide enum TokenKind {
-  LetKw, // let
-  NameTok(String),
-  IntTok(Number),
-  StringTok(String), // "*"
-  QuoteTok(Char), // '*'
+  //keywords
+  KwIf, // if
+  KwElse, // else
+  KwElseIf, //ban xD
+  KwMatch, //match
+  KwWhen, // when
+  KwLet, // let
+  KwMut, // mut
+  KwRec, // rec
+  KwAnd, // and
+  KwType, // type
+  KwRecord, // record
+  KwFrom, // from
+  KwImport, // import
+  KwExport, // export
+  KwAs, // as
+  KwInfectious, // infectious
+  KwDomain, // domain
+  KwPolicy, // policy
+  KwOp, // op
+  KwAnnotate, // annotate
+  KwVoid, // void
+  KwPanic, // panic
+  KwVar, // Var
+  KwAllErrors, // AllErrors
+  //literals
+  NameTok(String), // strs
+  ConstructorTok(String), // Strs
+  LitNum(Number), //138510
+  LitString(String), // "*"
+  LitChar(Char), // '*'
+  LitBool(Bool), // truefalse
+  //symbols
   LParen, // (
   RParen, // )
   LBrace, // {
   RBrace, // }
-  Eq, // =
   FatArrow, // =>
   Question, // ?
   Pipe, // |
@@ -34,10 +61,15 @@ provide enum TokenKind {
   Arrow, // >
   Period, // .
   DPeriod, // ..
+  //operators
+  Eq, // =
+  EqEq, // ==
   Plus, // +
   DPlus, // ++
   Dash, // -
   DDash, // --
+  //other
+  Directive, // @stuff;
   EOF, // eof
 }
 
@@ -260,7 +292,7 @@ provide let lex = source => {
       ch when isNameStart(ch) => {
         let res = readName(pos)
         let kind = if (res.value == StringVal("let")) {
-          LetKw
+          KwLet
         } else {
           match (res.value) {
             StringVal(ident) => {
@@ -289,7 +321,7 @@ provide let lex = source => {
         }
         tokens = [
           makeToken(
-            IntTok(val),
+            LitNum(val),
             pos.line,
             pos.col,
             pos.index,
@@ -307,7 +339,7 @@ provide let lex = source => {
         }
         tokens = [
           makeToken(
-            StringTok(str),
+            LitString(str),
             pos.line,
             pos.col,
             pos.index,
@@ -325,7 +357,7 @@ provide let lex = source => {
         }
         tokens = [
           makeToken(
-            QuoteTok(chr),
+            LitChar(chr),
             pos.line,
             pos.col,
             pos.index,
@@ -474,6 +506,19 @@ provide let lex = source => {
                 tokens = [
                   makeToken(
                     FatArrow,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '>')
+              },
+              Some('=') => {
+                tokens = [
+                  makeToken(
+                    EqEq,
                     pos.line,
                     pos.col,
                     pos.index,
