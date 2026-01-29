@@ -5,10 +5,11 @@ from "string" include String
 from "option" include Option
 from "list" include List
 from "runtime/unsafe/panic" include Panic
+use Panic.{ panic }
 from "../util.gr" include Util
 use Util.{ testStr }
 
-use Panic.{ panic }
+
 
 from "../core/source.gr" include Source
 
@@ -39,7 +40,7 @@ provide enum TokenKind {
   KwVar, // Var
   KwAllErrors, // AllErrors
   //literals
-  NameTok(String), // strs
+  LitName(String), // strs
   ConstructorTok(String), // Strs
   LitNum(Number), //138510
   LitString(String), // "*"
@@ -320,7 +321,7 @@ provide let lex = source => {
         if (isUpper(String.charAt(0, name))) {
           ConstructorTok(name)
         } else {
-          NameTok(name)
+          LitName(name)
         }
       },
     }
