@@ -189,6 +189,16 @@ and parsePrimary = (state: ParseState) => {
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.IntLit(value) }
       (expr, state2)
     },
+    Lexer.LitString(value) => {
+      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let expr: Ast.Expr = { id, span: tok.span, kind: Ast.StrLit(value) }
+      (expr, state2)
+    },
+    Lexer.LitChar(value) => {
+      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let expr: Ast.Expr = { id, span: tok.span, kind: Ast.CharLit(value) }
+      (expr, state2)
+    },
     Lexer.LitName(name) => {
       let state2 = { ...state1, tokens: dropToken(state1.tokens) }
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Ident(name) }

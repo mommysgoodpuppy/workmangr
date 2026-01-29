@@ -4,6 +4,8 @@ from "./source.gr" include Source
 
 provide enum rec ExprKind {
   IntLit(Number),
+  StrLit(String),
+  CharLit(Char),
   Ident(String),
   Lambda(Option<String>, Expr),
   Block(Expr),
