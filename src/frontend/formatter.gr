@@ -8,230 +8,62 @@ from "../util.gr" include Util
 
 use Util.{ (|>), testStr }
 
-from "./lexer.gr" include Lexer
+from "./frontend.gr" include Frontend
+from "../core/ast.gr" include Ast
+use Ast.*
 
-record FormatState {
-  parts: List<String>,
-  indent: Number,
-  atLineStart: Bool,
-  prevKind: Option<Lexer.TokenKind>,
+let rec formatExpr = (expr: Ast.Expr) => {
+  match (expr.kind) {
+    Ast.IntLit(n) => toString(n),
+    Ast.StrLit(s) => "\"" ++ s ++ "\"",
+    Ast.CharLit(c) => "'" ++ Char.toString(c) ++ "'",
+    Ast.Ident(name) => name,
+    Ast.Lambda(param, body) => {
+      let paramStr = match (param) {
+        Some(p) => p,
+        None => "_",
+      }
+      paramStr ++ " => " ++ formatExpr(body)
+    },
+    Ast.Infix(Ast.OpFatArrow, left, right) => {
+      // This shouldn't happen after lowering, but just in case
+      formatExpr(left) ++ " => " ++ formatExpr(right)
+    },
+    Ast.Block(inner) => {
+      "{ " ++ formatExpr(inner) ++ " }"
+    },
+    Ast.Paren(inner) => {
+      "(" ++ formatExpr(inner) ++ ")"
+    },
+    Ast.Tuple(exprs) => {
+      let formatted = List.map(formatExpr, exprs)
+      "(" ++ Array.join(", ", Array.fromList(formatted)) ++ ")"
+    },
+    Ast.Unit => "()",
+    Ast.Unknown => "<unknown>",
+  }
 }
 
-let indentString = (level: Number) => {
-  let rec loop = (n: Number, acc: String) => if (n <= 0) {
-    acc
+let formatTopLevel = (tl: Ast.TopLevel) => {
+  let base = match (tl.kind) {
+    Ast.LetBinding(b) => formatBinding(b),
+    Ast.TypeDef(name, def) => "type " ++ name ++ " = " ++ def,
+  }
+  if (tl.exported) {
+    "export " ++ base
   } else {
-    loop(n - 1, acc ++ "  ")
-  }
-  loop(level, "")
-}
-
-let push = (state: FormatState, text: String) => {
-  let prefix = if (state.atLineStart) {
-    indentString(state.indent)
-  } else {
-    ""
-  }
-  { ...state, parts: [prefix ++ text, ...state.parts], atLineStart: false }
-}
-
-let newline = (state: FormatState) => {
-  if (state.atLineStart) {
-    state
-  } else {
-    { ...state, parts: ["\n", ...state.parts], atLineStart: true }
+    base
   }
 }
 
-let flush = (state: FormatState) => {
-  List.join("", List.reverse(state.parts))
+let formatProgram = (program: Ast.Program) => {
+  let items = List.map(formatTopLevel, program.topLevels)
+  Array.join("\n\n", Array.fromList(items))
 }
-
-let isWord = (kind: Lexer.TokenKind) =>
-  match (kind) {
-    Lexer.LitName(_) => true,
-    Lexer.ConstructorTok(_) => true,
-    Lexer.LitNum(_) => true,
-    Lexer.LitString(_) => true,
-    Lexer.LitChar(_) => true,
-    Lexer.LitBool(_) => true,
-    _ => false,
-  }
-
-let shouldSpaceBeforeWord = (prevKind: Option<Lexer.TokenKind>) =>
-  match (prevKind) {
-    None => false,
-    Some(kind) =>
-      match (kind) {
-        Lexer.Period => false,
-        Lexer.LParen => false,
-        Lexer.LBrace => false,
-        _ => isWord(kind) || kind == Lexer.RParen || kind == Lexer.RBrace,
-      },
-  }
 
 provide let format = (source: String) => {
-  let tokens = Lexer.lex(source)
-  let initial: FormatState = {
-    parts: [],
-    indent: 0,
-    atLineStart: true,
-    prevKind: None,
-  }
-
-  let rec processToken = (state: FormatState, tok: Lexer.Token, rest: List<Lexer.Token>) => {
-    let withPrev = (s: FormatState) => { ...s, prevKind: Some(tok.kind) }
-    match (tok.kind) {
-      Lexer.LitName(name) when name == "let" || name == "type" || name == "record" ||
-        name == "export" => {
-        let s1 = newline(state)
-        let s2 = push(s1, name)
-        loop(withPrev(s2), rest)
-      },
-      Lexer.LitName(name) when name == "if" || name == "match" => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, name ++ " ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LitName(name) => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, name)
-        loop(withPrev(s1), rest)
-      },
-      Lexer.ConstructorTok(name) => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, name)
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LitNum(value) => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, toString(value))
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LitString(value) => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, "\"" ++ value ++ "\"")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LitChar(value) => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, "'" ++ Char.toString(value) ++ "'")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LitBool(value) => {
-        let s0 = if (shouldSpaceBeforeWord(state.prevKind)) {
-          push(state, " ")
-        } else {
-          state
-        }
-        let s1 = push(s0, toString(value))
-        loop(withPrev(s1), rest)
-      },
-      Lexer.Eq => {
-        let s1 = push(state, " = ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.Colon => {
-        let s1 = push(state, ": ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.Arrow => {
-        let s1 = push(state, " > ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.Plus => {
-        let s1 = push(state, " + ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.Dash => {
-        let s1 = push(state, " - ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.FatArrow => {
-        let s1 = push(state, " => ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LParen => {
-        let s1 = push(state, "(")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.RParen => {
-        let s1 = push(state, ")")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.LBrace => {
-        let s1 = push(state, "{")
-        let s2 = newline(s1)
-        let s3 = { ...s2, indent: s2.indent + 1 }
-        loop(withPrev(s3), rest)
-      },
-      Lexer.RBrace => {
-        let s1 = { ...state, indent: state.indent - 1 }
-        let s2 = newline(s1)
-        let s3 = push(s2, "}")
-        loop(withPrev(s3), rest)
-      },
-      Lexer.Comma => {
-        let s1 = push(state, ", ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.SemiColon => {
-        let s1 = push(state, ";")
-        let s2 = newline(s1)
-        loop(withPrev(s2), rest)
-      },
-      Lexer.Pipe => {
-        let s1 = push(state, " | ")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.Period => {
-        let s1 = push(state, ".")
-        loop(withPrev(s1), rest)
-      },
-      Lexer.EOF => state,
-      _ => loop(withPrev(state), rest),
-    }
-  }
-
-  and loop = (state: FormatState, remaining: List<Lexer.Token>) =>
-    match (remaining) {
-      [] => state,
-      [tok, next, ...rest] =>
-        match ((tok.kind, next.kind)) {
-          (Lexer.Colon, Lexer.Arrow) => {
-            let s1 = push(state, " :> ")
-            loop({ ...s1, prevKind: Some(Lexer.Arrow) }, rest)
-          },
-          _ => processToken(state, tok, [next, ...rest]),
-        },
-      [tok, ...rest] => processToken(state, tok, rest),
-    }
-
-  loop(initial, tokens) |> flush |> String.trim
+  let program = Frontend.parseAndLower(source)
+  formatProgram(program)
 }
 
 print(format(testStr))

@@ -6,7 +6,7 @@ from "list" include List
 from "string" include String
 
 from "../core/ast.gr" include Ast
-use Ast.*
+use Ast.{ type TopLevel }
 from "./lexer.gr" include Lexer
 from "../core/source.gr" include Source
 
@@ -119,7 +119,7 @@ let rec parseExpr = (state: ParseState) => {
   let (expr: Ast.Expr, state1) = parseTerm(state)
   match (currentToken(state1).kind) {
     Lexer.FatArrow => {
-      let (id, stateAfterId) = freshId(state)
+      let (id, stateAfterId) = freshId(state1)
       let (_, state2) = expectSimple(Lexer.FatArrow, stateAfterId)
       let (rhs, state3): (Ast.Expr, ParseState) = parseExpr(state2)
       let span = spanFromTokens(expr.span, rhs.span)
@@ -220,21 +220,44 @@ and parsePrimary = (state: ParseState) => {
   }
 }
 
-let rec parseBindings = (state: ParseState) => {
+let rec parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.EOF => ([], state),
     Lexer.SemiColon => {
       // Skip semicolons
       let state1 = { ...state, tokens: dropToken(state.tokens) }
-      parseBindings(state1)
+      parseTopLevels(state1)
     },
     Lexer.LitName(name) when name == "let" => {
-      let (binding, state1) = parseBinding(state)
-      let (rest, state2) = parseBindings(state1)
-      ([binding, ...rest], state2)
+      let (binding, state1): (Ast.Binding, ParseState) = parseBinding(state)
+      let (id, state2) = freshId(state1)
+      let topLevel: Ast.TopLevel = {
+        id,
+        span: binding.span,
+        kind: Ast.LetBinding(binding),
+        exported: false,
+      }
+      let (rest, state3) = parseTopLevels(state2)
+      ([topLevel, ...rest], state3)
     },
-    _ => ([], state),
+    Lexer.LitName(name) when name == "export" => {
+      let state1 = dropToken(state) // drop export
+      let (inner, state2) = parseTopLevels(state1)
+      match (inner) {
+        [tl, ...rest] => {
+          let exportedTl = { ...tl, exported: true }
+          ([exportedTl, ...rest], state2)
+        },
+        [] => panic("Expected something after export"),
+      }
+    },
+    Lexer.LitName(name) when name == "type" => {
+      let (typeDef, state1) = parseTypeDef(state)
+      let (rest, state2) = parseTopLevels(state1)
+      ([typeDef, ...rest], state2)
+    },
+    _ => panic("Unknown top-level construct: " ++ Lexer.tokenToString(tok)),
   }
 }
 and parseBinding = (state: ParseState) => {
@@ -245,15 +268,32 @@ and parseBinding = (state: ParseState) => {
   let (value, state5): (Ast.Expr, ParseState) = parseExpr(state4)
   let span = spanFromTokens(letTok.span, value.span)
   let binding: Ast.Binding = { id, span, nameSpan: litName.span, name, value }
-  (binding, state5)
-}
-
-provide let parse = (source: String) => {
+  and parseTypeDef = (state: ParseState) => {
+    let (id, state1) = freshId(state)
+    let (typeTok, state2) = expectKeyword("type", state1)
+    let (name, _, state3) = expectName(state2)
+    let (_, state4) = expectSimple(Lexer.Eq, state3)
+    // Simple: parse until ;
+    let rec parseDef = (acc, st) => {
+      let tok = currentToken(st)
+      match (tok.kind) {
+        Lexer.SemiColon => (acc, dropToken(st)),
+        Lexer.EOF => (acc, st),
+        _ => parseDef(acc ++ " " ++ tok.text, dropToken(st)), // approximate
+      }
+    }
+    let (def, state5) = parseDef("", state4)
+    let topLevel = Ast.TopLevel{
+      id,
+      span: typeTok.span, // approximate
+      kind: Ast.TypeDef(name, def),
+      exported: false,
+    }
+    (topLevel, state5)
+  }
   let tokens = Lexer.lex(source)
   let initial: ParseState = { tokens, nextId: 1, allTokens: tokens }
-  let (bindings, _finalState) = parseBindings(initial)
-  let program: Ast.Program = { bindings, }
+  let (topLevels, _finalState) = parseTopLevels(initial)
+  let program: Ast.Program = { topLevels, }
   program
 }
-
-print(parse(testStr))

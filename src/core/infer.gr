@@ -84,7 +84,7 @@ let withBinding = (
   name: String,
   scheme: Types.Scheme,
   state: InferState,
-  fn: (InferState => (Types.Type, InferState)),
+  fn: InferState => (Types.Type, InferState),
 ) => {
   let previous = Map.get(name, state.env)
   Map.set(name, scheme, state.env)
@@ -117,30 +117,68 @@ let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
       let t = recordNodeType(expr.id, tInner, state1)
       (t, state1)
     },
-    Ast.Lambda(paramOpt, body) =>
-      match (paramOpt) {
-        None => {
-          let (tBody, state1) = inferExpr(body, state)
-          let fnType = Types.TFun(Types.TVoid, tBody)
-          let t = recordNodeType(expr.id, fnType, state1)
-          (t, state1)
-        },
-        Some(paramName) => {
-          let (paramType, state1) = freshVar(state)
-          let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
-          let (fnType, stFn) = withBinding(
-            paramName,
-            monoScheme,
-            state1,
-            (st) => {
-              let (tBody, stBody) = inferExpr(body, st)
-              (Types.TFun(paramType, tBody), stBody)
-            },
-          )
-          let tRecorded = recordNodeType(expr.id, fnType, stFn)
-          (tRecorded, stFn)
-        },
+    Ast.Lambda(paramOpt, body) => match (paramOpt) {
+      None => {
+        let (tBody, state1) = inferExpr(body, state)
+        let fnType = Types.TFun(Types.TVoid, tBody)
+        let t = recordNodeType(expr.id, fnType, state1)
+        (t, state1)
       },
+      Some(paramName) => {
+        let (paramType, state1) = freshVar(state)
+        let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
+        let (fnType, stFn) = withBinding(
+          paramName,
+          monoScheme,
+          state1,
+          st => {
+            let (tBody, stBody) = inferExpr(body, st)
+            (Types.TFun(paramType, tBody), stBody)
+          }
+        )
+        let tRecorded = recordNodeType(expr.id, fnType, stFn)
+        (tRecorded, stFn)
+      },
+    },
+    Ast.StrLit(_value) => {
+      let t = recordNodeType(expr.id, Types.TNumber, state) // Placeholder
+      (t, state)
+    },
+    Ast.CharLit(_value) => {
+      let t = recordNodeType(expr.id, Types.TNumber, state) // Placeholder
+      (t, state)
+    },
+    Ast.Paren(inner) => {
+      let (tInner, state1) = inferExpr(inner, state)
+      let t = recordNodeType(expr.id, tInner, state1)
+      (t, state1)
+    },
+    Ast.Tuple(exprs) => {
+      let (types, state1) = inferExprList(exprs, state)
+      let t = recordNodeType(expr.id, Types.TNumber, state1) // Placeholder
+      (t, state1)
+    },
+    Ast.Unit => {
+      let t = recordNodeType(expr.id, Types.TVoid, state)
+      (t, state)
+    },
+    Ast.Infix(op, left, right) => {
+      // For now, just handle the operands - this will be replaced by lowering
+      let (tLeft, state1) = inferExpr(left, state)
+      let (tRight, state2) = inferExpr(right, state1)
+      let t = recordNodeType(expr.id, Types.TNumber, state2) // Placeholder
+      (t, state2)
+    },
+  }
+}
+and inferExprList = (exprs: List<Ast.Expr>, state: InferState) => {
+  match (exprs) {
+    [] => ([], state),
+    [expr, ...rest] => {
+      let (t, state1) = inferExpr(expr, state)
+      let (restTypes, state2) = inferExprList(rest, state1)
+      ([t, ...restTypes], state2)
+    },
   }
 }
 

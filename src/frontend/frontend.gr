@@ -1,0 +1,9 @@
+module Frontend
+
+from "./parser.gr" include Parser
+from "./lower.gr" include Lower
+
+provide let parseAndLower = (source: String) => {
+  let parsed = Parser.parse(source)
+  Lower.lowerProgram(parsed)
+}

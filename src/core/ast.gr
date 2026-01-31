@@ -33,6 +33,18 @@ provide record Binding {
   value: Expr,
 }
 
+provide record rec TopLevel {
+  id: Number,
+  span: Source.Span,
+  kind: TopLevelKind,
+  exported: Bool,
+} 
+
+and provide enum TopLevelKind {
+  LetBinding(Binding),
+  TypeDef(String, String), // name, def
+}
+
 provide record Program {
-  bindings: List<Binding>,
+  topLevels: List<TopLevel>,
 }

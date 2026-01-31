@@ -1,6 +1,6 @@
 module Lower
 
-from "./ast.gr" include Ast
+from "../core/ast.gr" include Ast
 use Ast.*
 from "list" include List
 
@@ -43,13 +43,17 @@ and extractParamName = (param: Ast.Expr) => {
     _ => None, // Complex parameter patterns not supported yet
   }
 }
-
 let lowerBinding = (binding: Ast.Binding) => {
   { ...binding, value: lowerExpr(binding.value) }
 }
 
-let lowerProgram = (program: Ast.Program) => {
-  { bindings: List.map(lowerBinding, program.bindings), }
+let rec lowerTopLevel = (tl: Ast.TopLevel) => {
+  match (tl.kind) {
+    Ast.LetBinding(b) => { ...tl, kind: Ast.LetBinding(lowerBinding(b)) },
+    Ast.TypeDef(_, _) => tl,
+  }
 }
 
-provide { lowerProgram }
+provide let lowerProgram = (program: Ast.Program) => {
+  { topLevels: List.map(lowerTopLevel, program.topLevels), }
+}
