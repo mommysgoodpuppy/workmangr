@@ -3,17 +3,20 @@ module Analysis
 from "./ast.gr" include Ast
 from "./infer.gr" include Infer
 from "./types.gr" include Types
-from "../frontends/parser.gr" include Parser
+from "./lower.gr" include Lower
+from "../frontend/parser.gr" include Parser
 
 provide record Analysis {
   program: Ast.Program,
   infer: Infer.InferState,
 }
 
-let analyze = (source: String) => {
-  let program = Parser.parse(source)
-  let infer = Infer.inferProgram(program)
-  { program, infer }
+provide let testLambda = () => {
+  let source = "let id = (x) => {x};"
+  print("Source: " ++ source)
+  let parsed = Parser.parse(source)
+  print("Parsed AST:")
+  print(parsed)
 }
 
-provide { analyze }
+testLambda()

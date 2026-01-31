@@ -2,6 +2,7 @@ module Lexer
 
 from "char" include Char
 from "string" include String
+from "number" include Number
 from "option" include Option
 from "list" include List
 from "runtime/unsafe/panic" include Panic
@@ -9,34 +10,10 @@ use Panic.{ panic }
 from "../util.gr" include Util
 use Util.{ testStr }
 
-
-
 from "../core/source.gr" include Source
 
 provide enum TokenKind {
-  //keywords
-  KwIf, // if
-  KwElse, // else
-  KwElseIf, //ban xD
-  KwMatch, //match
-  KwWhen, // when
-  KwLet, // let
-  KwMut, // mut
-  KwRec, // rec
-  KwAnd, // and
-  KwType, // type
-  KwRecord, // record
-  KwFrom, // from
-  KwImport, // import
-  KwExport, // export
-  KwAs, // as
-  KwInfectious, // infectious
-  KwDomain, // domain
-  KwPolicy, // policy
-  KwOp, // op
-  KwAnnotate, // annotate
-  KwVoid, // void
-  KwPanic, // panic
+  //special keywords
   KwVar, // Var
   KwAllErrors, // AllErrors
   //literals
@@ -80,6 +57,45 @@ provide record Token {
   kind: TokenKind,
   span: Source.Span,
   mate: Option<Number>, //index
+}
+
+provide let tokenToString = (token: Token) => match (token.kind) {
+  KwVar => "Var",
+  KwAllErrors => "AllErrors",
+  LitName(name) => name,
+  ConstructorTok(name) => name,
+  LitNum(num) => "<number>",
+  LitString(str) => "\"" ++ str ++ "\"",
+  LitChar(ch) => "'" ++ Char.toString(ch) ++ "'",
+  LitBool(b) => if (b) {
+    "true"
+  } else {
+    "false"
+  },
+  LParen => "(",
+  RParen => ")",
+  LBrace => "{",
+  RBrace => "}",
+  FatArrow => "=>",
+  Question => "?",
+  Pipe => "|",
+  DPipe => "||",
+  SemiColon => ";",
+  Comma => ",",
+  Colon => ":",
+  Slash => "/",
+  DSlash => "//",
+  Arrow => ">",
+  Period => ".",
+  DPeriod => "..",
+  Eq => "=",
+  EqEq => "==",
+  Plus => "+",
+  DPlus => "++",
+  Dash => "-",
+  DDash => "--",
+  Directive => "@",
+  EOF => "EOF",
 }
 
 enum ReadValue {
@@ -291,28 +307,6 @@ provide let lex = source => {
   // determine token kind from name
   let tokenKindFromName = (name: String) => {
     match (name) {
-      "if" => KwIf,
-      "else" => KwElse,
-      "elseif" => KwElseIf,
-      "match" => KwMatch,
-      "when" => KwWhen,
-      "let" => KwLet,
-      "mut" => KwMut,
-      "rec" => KwRec,
-      "and" => KwAnd,
-      "type" => KwType,
-      "record" => KwRecord,
-      "from" => KwFrom,
-      "import" => KwImport,
-      "export" => KwExport,
-      "as" => KwAs,
-      "infectious" => KwInfectious,
-      "domain" => KwDomain,
-      "policy" => KwPolicy,
-      "op" => KwOp,
-      "annotate" => KwAnnotate,
-      "void" => KwVoid,
-      "panic" => KwPanic,
       "Var" => KwVar,
       "AllErrors" => KwAllErrors,
       "true" => LitBool(true),
@@ -748,18 +742,18 @@ provide let lex = source => {
           '/' => {
             match (peek(pos.index + 1)) {
               Some('/') => {
-                tokens = [
-                  makeToken(
-                    DSlash,
-                    pos.line,
-                    pos.col,
-                    pos.index,
-                    pos.index + 2,
-                    None
-                  ),
-                  ...tokens
-                ]
-                pos = advancePosition(advancePosition(pos, ch), '/')
+                let rec skipLine = (p: Position) => {
+                  match (peek(p.index)) {
+                    None => p,
+                    Some('\n') => p,
+                    Some(c) => skipLine(advancePosition(p, c)),
+                  }
+                }
+                let afterSlashes = advancePosition(
+                  advancePosition(pos, ch),
+                  '/'
+                )
+                pos = skipLine(afterSlashes)
               },
               _ => {
                 tokens = [
@@ -798,4 +792,4 @@ provide let lex = source => {
   List.reverse(tokens)
 }
 
-print(lex(testStr))
+// print(lex(testStr))

@@ -1,0 +1,55 @@
+module Lower
+
+from "./ast.gr" include Ast
+use Ast.*
+from "list" include List
+
+// Transform => infix expressions into lambdas
+let rec lowerExpr = (expr: Ast.Expr) => {
+  match (expr.kind) {
+    Ast.Infix(Ast.OpFatArrow, param, body) => {
+      // Transform 'param => body' into a lambda
+      // For now, extract parameter name from simple cases
+      let paramName = extractParamName(param)
+      let loweredBody = lowerExpr(body)
+      { ...expr, kind: Ast.Lambda(paramName, loweredBody) }
+    },
+    Ast.Block(inner) => {
+      { ...expr, kind: Ast.Block(lowerExpr(inner)) }
+    },
+    Ast.Paren(inner) => {
+      { ...expr, kind: Ast.Paren(lowerExpr(inner)) }
+    },
+    Ast.Tuple(exprs) => {
+      { ...expr, kind: Ast.Tuple(List.map(lowerExpr, exprs)) }
+    },
+    Ast.Infix(op, left, right) => {
+      // Handle other infix operators
+      let loweredLeft = lowerExpr(left)
+      let loweredRight = lowerExpr(right)
+      { ...expr, kind: Ast.Infix(op, loweredLeft, loweredRight) }
+    },
+    // Other cases remain unchanged
+    _ => expr,
+  }
+}
+and extractParamName = (param: Ast.Expr) => {
+  match (param.kind) {
+    Ast.Ident(name) => Some(name),
+    Ast.Paren(inner) => match (inner.kind) {
+      Ast.Ident(name) => Some(name),
+      _ => None, // Complex parameter patterns not supported yet
+    },
+    _ => None, // Complex parameter patterns not supported yet
+  }
+}
+
+let lowerBinding = (binding: Ast.Binding) => {
+  { ...binding, value: lowerExpr(binding.value) }
+}
+
+let lowerProgram = (program: Ast.Program) => {
+  { bindings: List.map(lowerBinding, program.bindings), }
+}
+
+provide { lowerProgram }

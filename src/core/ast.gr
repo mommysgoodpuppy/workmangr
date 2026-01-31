@@ -2,13 +2,21 @@ module Ast
 
 from "./source.gr" include Source
 
+provide enum Op {
+  OpFatArrow,
+}
+
 provide enum rec ExprKind {
   IntLit(Number),
   StrLit(String),
   CharLit(Char),
   Ident(String),
   Lambda(Option<String>, Expr),
+  Infix(Op, Expr, Expr),
   Block(Expr),
+  Paren(Expr),
+  Tuple(List<Expr>),
+  Unit,
   Unknown,
 }
 and provide record Expr {

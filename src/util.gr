@@ -2,14 +2,16 @@ module Util
 
 provide let (|>) = (x, f) => f(x)
 
-provide let testStrShort = "
+provide let testStrShort =
+  "
 let input = \"L1, R3, R1, L5, L2, L5\";
 
 export type GenericError =
   | Error;
 "
 
-provide let testStr = "
+provide let testStr =
+  "
 
 let input = \"L1, R3, R1, L5, L2, L5\";
 

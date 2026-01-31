@@ -2,8 +2,11 @@ module Parser
 
 from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
+from "list" include List
+from "string" include String
 
 from "../core/ast.gr" include Ast
+use Ast.*
 from "./lexer.gr" include Lexer
 from "../core/source.gr" include Source
 
@@ -28,7 +31,7 @@ let dropToken = (tokens: List<Lexer.Token>) => match (tokens) {
   [] => [],
 }
 
-// ?
+// inspect token
 let currentToken = (state: ParseState) => match (state.tokens) {
   [head, ..._tail] => head,
   [] => { kind: Lexer.EOF, span: Source.makeSpan(1, 1, 0, 0), mate: None },
@@ -50,7 +53,7 @@ let rec tokenAt = (tokens: List<Lexer.Token>, index: Number) => {
   }
 }
 
-// check token
+// check token validity
 let kindIs = (kind, expected) => kind == expected
 
 //expect type
@@ -59,10 +62,12 @@ let expectSimple = (expected, state: ParseState) => {
   if (kindIs(tok.kind, expected)) {
     (tok, { ...state, tokens: dropToken(state.tokens) })
   } else {
-    Panic.panic("Parse error: unexpected token")
+    let str = "Parse error: unexpected token " ++ Lexer.tokenToString(tok)
+    Panic.panic(str)
   }
 }
 
+//expect name
 let expectName = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
@@ -72,26 +77,13 @@ let expectName = (state: ParseState) => {
   }
 }
 
-let lambdaHead = (tokens: List<Lexer.Token>) => {
-  let t0 = tokenAt(tokens, 0)
-  let t1 = tokenAt(tokens, 1)
-  let t2 = tokenAt(tokens, 2)
-  let t3 = tokenAt(tokens, 3)
-
-  match ((t0, t1, t2, t3)) {
-    (
-      Some({ kind: Lexer.LParen, span: _ }),
-      Some({ kind: Lexer.RParen, span: _ }),
-      Some({ kind: Lexer.FatArrow, span: _ }),
-      _,
-    ) => Some(None),
-    (
-      Some({ kind: Lexer.LParen, span: _ }),
-      Some({ kind: Lexer.LitName(name), span: _ }),
-      Some({ kind: Lexer.RParen, span: _ }),
-      Some({ kind: Lexer.FatArrow, span: _ }),
-    ) => Some(Some(name)),
-    _ => None,
+//expect keyword tokenized as a name
+let expectKeyword = (keyword: String, state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LitName(name) when name == keyword =>
+      (tok, { ...state, tokens: dropToken(state.tokens) }),
+    _ => Panic.panic("Parse error: expected keyword"),
   }
 }
 
@@ -117,65 +109,46 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
 let spanFromTokens = (startSpan: Source.Span, endSpan: Source.Span) =>
   Source.makeSpan(startSpan.line, startSpan.col, startSpan.start, endSpan.end)
 
-let spanFromMate = (
-  state: ParseState,
-  endTok: Lexer.Token,
-  endSpan: Source.Span,
-) => {
+let spanFromEnd = (state: ParseState, endTok: Lexer.Token) => {
   let startTok = fetchMate(state, endTok)
-  spanFromTokens(startTok.span, endSpan)
+  spanFromTokens(startTok.span, endTok.span)
 }
 
+//parse
 let rec parseExpr = (state: ParseState) => {
-  match (lambdaHead(state.tokens)) {
-    Some(paramOpt) => parseLambda(paramOpt, state),
-    None => {
-      let tok = currentToken(state)
-      match (tok.kind) {
-        Lexer.LBrace => parseBlock(state),
-        _ => parsePrimary(state),
+  let (expr: Ast.Expr, state1) = parseTerm(state)
+  match (currentToken(state1).kind) {
+    Lexer.FatArrow => {
+      let (id, stateAfterId) = freshId(state)
+      let (_, state2) = expectSimple(Lexer.FatArrow, stateAfterId)
+      let (rhs, state3): (Ast.Expr, ParseState) = parseExpr(state2)
+      let span = spanFromTokens(expr.span, rhs.span)
+      let node: Ast.Expr = {
+        id,
+        span,
+        kind: Ast.Infix(Ast.OpFatArrow, expr, rhs),
       }
+      (node, state3)
     },
+    _ => (expr, state1),
   }
 }
-and parseLambda = (paramOpt: Option<String>, state: ParseState) => {
-  let (id, state1) = freshId(state)
-  let (lparenTok, state2): (Lexer.Token, ParseState) = expectSimple(
-    Lexer.LParen,
-    state1
-  )
-
-  let (paramNameOpt, state3, _rparenTok) = match (paramOpt) {
-    None => {
-      let (rp, st) = expectSimple(Lexer.RParen, state2)
-      (None, st, rp)
-    },
-    Some(_) => {
-      let (name, _identTok, stIdent) = expectName(state2)
-      let (rp, stRp) = expectSimple(Lexer.RParen, stIdent)
-      (Some(name), stRp, rp)
-    },
+and parseTerm = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LBrace => parseBlock(state),
+    _ => parsePrimary(state),
   }
-
-  let (_arrowTok, state4) = expectSimple(Lexer.FatArrow, state3)
-  let (body, state5): (Ast.Expr, ParseState) = parseExpr(state4)
-  let span = spanFromMate(state5, _rparenTok, body.span)
-
-  let expr: Ast.Expr = { id, span, kind: Ast.Lambda(paramNameOpt, body) }
-  (expr, state5)
 }
 and parseBlock = (state: ParseState) => {
   let (id, state1) = freshId(state)
-  let (lbraceTok, state2): (Lexer.Token, ParseState) = expectSimple(
-    Lexer.LBrace,
-    state1
-  )
+  let (_, state2) = expectSimple(Lexer.LBrace, state1)
   let (inner, state3): (Ast.Expr, ParseState) = parseExpr(state2)
   let (rbraceTok, state4): (Lexer.Token, ParseState) = expectSimple(
     Lexer.RBrace,
     state3
   )
-  let span = spanFromMate(state4, rbraceTok, inner.span)
+  let span = spanFromEnd(state4, rbraceTok)
   let expr: Ast.Expr = { id, span, kind: Ast.Block(inner) }
   (expr, state4)
 }
@@ -204,6 +177,40 @@ and parsePrimary = (state: ParseState) => {
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Ident(name) }
       (expr, state2)
     },
+    Lexer.LParen => {
+      let (_, state2) = expectSimple(Lexer.LParen, state1)
+      if (kindIs(currentToken(state2).kind, Lexer.RParen)) {
+        let (rparenTok, state3) = expectSimple(Lexer.RParen, state2)
+        let span = spanFromTokens(tok.span, rparenTok.span)
+        let expr: Ast.Expr = { id, span, kind: Ast.Unit }
+        (expr, state3)
+      } else {
+        let (inner, state3) = parseExpr(state2)
+        if (kindIs(currentToken(state3).kind, Lexer.Comma)) {
+          let mut exprs = [inner]
+          let mut currentState = state3
+          while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+            let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
+            let (nextExpr, state_next) = parseExpr(state_temp)
+            exprs = [nextExpr, ...exprs]
+            currentState = state_next
+          }
+          let (rparenTok, state4) = expectSimple(Lexer.RParen, currentState)
+          let span = spanFromTokens(tok.span, rparenTok.span)
+          let expr: Ast.Expr = {
+            id,
+            span,
+            kind: Ast.Tuple(List.reverse(exprs)),
+          }
+          (expr, state4)
+        } else {
+          let (rparenTok, state4) = expectSimple(Lexer.RParen, state3)
+          let span = spanFromTokens(tok.span, rparenTok.span)
+          let expr: Ast.Expr = { id, span, kind: Ast.Paren(inner) }
+          (expr, state4)
+        }
+      }
+    },
     Lexer.Question => {
       let state2 = { ...state1, tokens: dropToken(state1.tokens) }
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Unknown }
@@ -215,22 +222,26 @@ and parsePrimary = (state: ParseState) => {
 
 let rec parseBindings = (state: ParseState) => {
   let tok = currentToken(state)
-  if (kindIs(tok.kind, Lexer.EOF)) {
-    ([], state)
-  } else {
-    let (binding, state1) = parseBinding(state)
-    let (rest, state2) = parseBindings(state1)
-    ([binding, ...rest], state2)
+  match (tok.kind) {
+    Lexer.EOF => ([], state),
+    Lexer.SemiColon => {
+      // Skip semicolons
+      let state1 = { ...state, tokens: dropToken(state.tokens) }
+      parseBindings(state1)
+    },
+    Lexer.LitName(name) when name == "let" => {
+      let (binding, state1) = parseBinding(state)
+      let (rest, state2) = parseBindings(state1)
+      ([binding, ...rest], state2)
+    },
+    _ => ([], state),
   }
 }
 and parseBinding = (state: ParseState) => {
   let (id, state1) = freshId(state)
-  let (letTok, state2): (Lexer.Token, ParseState) = expectSimple(
-    Lexer.KwLet,
-    state1
-  )
+  let (letTok, state2): (Lexer.Token, ParseState) = expectKeyword("let", state1)
   let (name, litName, state3) = expectName(state2)
-  let (_eqTok, state4) = expectSimple(Lexer.Eq, state3)
+  let (_, state4) = expectSimple(Lexer.Eq, state3)
   let (value, state5): (Ast.Expr, ParseState) = parseExpr(state4)
   let span = spanFromTokens(letTok.span, value.span)
   let binding: Ast.Binding = { id, span, nameSpan: litName.span, name, value }
