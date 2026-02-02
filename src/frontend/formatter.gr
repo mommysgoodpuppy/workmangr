@@ -44,6 +44,10 @@ let rec formatExpr = (expr: Ast.Expr) => {
   }
 }
 
+let formatBinding = (b: Ast.Binding) => {
+  "let " ++ b.name ++ " = " ++ formatExpr(b.value)
+}
+
 let formatTopLevel = (tl: Ast.TopLevel) => {
   let base = match (tl.kind) {
     Ast.LetBinding(b) => formatBinding(b),

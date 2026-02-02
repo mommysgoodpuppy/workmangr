@@ -59,7 +59,7 @@ provide record Token {
   mate: Option<Number>, //index
 }
 
-provide let tokenToString = (token: Token) => match (token.kind) {
+provide let tokenKindToString = (kind) => match (kind) {
   KwVar => "Var",
   KwAllErrors => "AllErrors",
   LitName(name) => name,

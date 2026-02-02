@@ -30,6 +30,7 @@ provide record Binding {
   span: Source.Span,
   nameSpan: Source.Span,
   name: String,
+  xtype: Option<String>, 
   value: Expr,
 }
 
