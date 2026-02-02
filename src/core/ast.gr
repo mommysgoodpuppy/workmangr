@@ -70,6 +70,9 @@ provide enum rec ExprKind {
   Paren(Expr),
   Tuple(List<Expr>),
   RecordLit(List<RecordItem>),
+  MatchApply(MatchApply),
+  MatchFn(MatchFn),
+  Bundle(BundleExpr),
   Hole(Hole),
 }
 and provide enum RecordItem {
@@ -142,15 +145,41 @@ and provide record Pattern {
   kind: PatternKind, 
   attach: Attachments
 }
-and provide record Match {
-  node: Node,
-  scrutinee: Option<List<Expr>>,   // match expr: Some([...]); match bundle literal: None
-  arms: List<MatchArm>,
+and provide enum BundleItemKind { 
+  Case(Pattern, Option<Expr>, Block), 
+  Include(Name), 
+  Trivia(Trivia) 
 }
-and provide enum MatchArm {
-  PatternArm(Pattern, Option<Expr> /*when*/, Block),
-  BundleRef(Name),
-  Trivia(Trivia)
+and provide record BundleItem {
+  node: Node,
+  kind: BundleItemKind,
+  attach: Attachments
+}
+and provide record BundleLiteral {
+  node: Node,
+  items: List<BundleItem>
+}
+and provide enum BundleExprKind {
+  Literal(BundleLiteral),
+  Ref(Name),
+  Compose(List<BundleExpr>),
+  Hole(Hole),
+  Paren(BundleExpr)
+}
+and provide record BundleExpr { 
+  node: Node, 
+  kind: BundleExprKind, 
+  attach: Attachments
+}
+and provide record MatchApply {
+  node: Node,
+  scrutinees: List<Expr>,
+  bundle: BundleExpr,
+}
+and provide record MatchFn {
+  node: Node,
+  params: List<Pattern>,
+  bundle: BundleExpr,
 }
 and provide enum TypeExprKind {
   Hole(Hole),
