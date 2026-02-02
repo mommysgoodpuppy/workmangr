@@ -6,7 +6,7 @@ from "list" include List
 from "string" include String
 
 from "../core/ast.gr" include Ast
-use Ast.{ type TopLevel }
+use Ast.{ type Program }
 from "./lexer.gr" include Lexer
 from "../core/source.gr" include Source
 
@@ -25,16 +25,21 @@ let freshId = (state: ParseState) => {
   (id, { ...state, nextId: id + 1 })
 }
 
-// drop 1 token from the list
-let dropToken = (tokens: List<Lexer.Token>) => match (tokens) {
-  [_head, ...tail] => tail,
-  [] => [],
-}
-
 // inspect token
 let currentToken = (state: ParseState) => match (state.tokens) {
   [head, ..._tail] => head,
   [] => { kind: Lexer.EOF, span: Source.makeSpan(1, 1, 0, 0), mate: None },
+}
+
+// drop 1 token from the list
+let dropToken = (state: ParseState) => {
+  let tok = currentToken(state)
+  //print(tok)
+  print("Processed token: " ++ Lexer.tokenKindToString(tok.kind))
+  match (state.tokens) {
+    [_head, ...tail] => { ...state, tokens: tail },
+    [] => { ...state, tokens: [] },
+  }
 }
 
 //return token at an index
@@ -60,7 +65,7 @@ let kindIs = (kind, expected) => kind == expected
 let expectSimple = (expected, state: ParseState) => {
   let tok = currentToken(state)
   if (kindIs(tok.kind, expected)) {
-    (tok, { ...state, tokens: dropToken(state.tokens) })
+    (tok, dropToken(state))
   } else {
     print("expected: " ++ Lexer.tokenKindToString(expected) )
     let str = "Parse error: unexpected token " ++ Lexer.tokenKindToString(tok.kind)
@@ -73,7 +78,7 @@ let expectName = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.LitName(name) =>
-      (name, tok, { ...state, tokens: dropToken(state.tokens) }),
+      (name, tok, dropToken(state)),
     _ => {
       print(tok.kind)
       Panic.panic("Parse error: expected identifier, tok: " ++ Lexer.tokenKindToString(tok.kind))
@@ -86,7 +91,7 @@ let expectConstructor = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.ConstructorTok(name) =>
-      (name, tok, { ...state, tokens: dropToken(state.tokens) }),
+      (name, tok, dropToken(state)),
     _ => {
       print(tok.kind)
       Panic.panic("Parse error: expected identifier, tok: " ++ Lexer.tokenKindToString(tok.kind))
@@ -99,7 +104,7 @@ let expectKeyword = (keyword: String, state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.LitName(name) when name == keyword =>
-      (tok, { ...state, tokens: dropToken(state.tokens) }),
+      (tok,dropToken(state)),
     _ => {
       print(tok.kind)
       Panic.panic("Parse error: expected keyword")
@@ -160,6 +165,7 @@ and parseTerm = (state: ParseState) => {
     _ => parsePrimary(state),
   }
 }
+//must support inner code
 and parseBlock = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (_, state2) = expectSimple(Lexer.LBrace, state1)
@@ -178,22 +184,22 @@ and parsePrimary = (state: ParseState) => {
 
   match (tok.kind) {
     Lexer.LitNum(value) => {
-      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let state2 = dropToken(state1)
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.IntLit(value) }
       (expr, state2)
     },
     Lexer.LitString(value) => {
-      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let state2 = dropToken(state1)
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.StrLit(value) }
       (expr, state2)
     },
     Lexer.LitChar(value) => {
-      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let state2 = dropToken(state1)
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.CharLit(value) }
       (expr, state2)
     },
     Lexer.LitName(name) => {
-      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let state2 = dropToken(state1)
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Ident(name) }
       (expr, state2)
     },
@@ -232,9 +238,35 @@ and parsePrimary = (state: ParseState) => {
       }
     },
     Lexer.Question => {
-      let state2 = { ...state1, tokens: dropToken(state1.tokens) }
+      let state2 = dropToken(state1)
       let expr: Ast.Expr = { id, span: tok.span, kind: Ast.Unknown }
       (expr, state2)
+    },
+    Lexer.DotBrace => {
+      let (_, state2) = expectSimple(Lexer.DotBrace, state1)
+      let mut fields = []
+      let mut currentState = state2
+      while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
+        if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+          // Skip leading/trailing commas
+          let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
+          currentState = state_temp
+        } else {
+          let (fieldName, _, state_temp) = expectName(currentState)
+          let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
+          let (fieldExpr, state_temp3) = parseExpr(state_temp2)
+          fields = [(fieldName, fieldExpr), ...fields]
+          currentState = state_temp3
+          if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+            let (_, state_temp4) = expectSimple(Lexer.Comma, currentState)
+            currentState = state_temp4
+          }
+        }
+      }
+      let (rbraceTok, state3) = expectSimple(Lexer.RBrace, currentState)
+      let span = spanFromTokens(tok.span, rbraceTok.span)
+      let expr: Ast.Expr = { id, span, kind: Ast.RecordLit(List.reverse(fields)) }
+      (expr, state3)
     },
     _ => Panic.panic("Parse error: expected expression"),
   }
@@ -242,12 +274,12 @@ and parsePrimary = (state: ParseState) => {
 
 let rec parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
-  print(tok)
+  //print(tok)
   match (tok.kind) {
     Lexer.EOF => ([], state),
     Lexer.SemiColon => {
       // Skip semicolons
-      let state1 = { ...state, tokens: dropToken(state.tokens) }
+      let state1 = dropToken(state)
       parseTopLevels(state1)
     },
     Lexer.LitName(name) when name == "let" => {
@@ -263,7 +295,7 @@ let rec parseTopLevels = (state: ParseState) => {
       ([topLevel, ...rest], state3)
     },
     Lexer.LitName(name) when name == "export" => {
-      let state1 = { ...state, tokens: dropToken(state.tokens) }
+      let state1 = dropToken(state)
       let (inner, state2) = parseTopLevels(state1)
       match (inner) {
         [tl, ...rest] => {
@@ -290,7 +322,7 @@ and parseBinding = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (letTok, state2): (Lexer.Token, ParseState) = expectKeyword("let", state1)
   let (name, litName, state3) = expectName(state2)
-  // NEW: Optionally parse type annotation after ':'
+  //Optionally parse type annotation after ':'
   let (typeOpt, state4) = if (kindIs(currentToken(state3).kind, Lexer.Colon)) {
     let (_, state_temp) = expectSimple(Lexer.Colon, state3)
     // Parse type tokens until '=' (approximate, like TypeDef)
@@ -299,7 +331,7 @@ and parseBinding = (state: ParseState) => {
       if (kindIs(tok.kind, Lexer.Eq)) {
         (Some(accumulator), state)
       } else {
-        parseType(accumulator ++ " " ++ toString(tok.kind), { ...state, tokens: dropToken(state.tokens) })
+        parseType(accumulator ++ " " ++ toString(tok.kind), dropToken(state))
       }
     }
     parseType("", state_temp)
@@ -321,9 +353,9 @@ and parseTypeDef = (state: ParseState) => {
   let rec parseDef = (accumulator, state) => {
     let tok = currentToken(state)
     match (tok.kind) {
-      Lexer.SemiColon => (accumulator, { ...state, tokens: dropToken(state.tokens) }),
+      Lexer.SemiColon => (accumulator, dropToken(state) ),
       Lexer.EOF => (accumulator, state),
-      _ => parseDef(accumulator ++ " " ++ toString(tok.kind), { ...state, tokens: dropToken(state.tokens) }), // approximate
+      _ => parseDef(accumulator ++ " " ++ toString(tok.kind), dropToken(state)), // approximate
     }
   }
   let (def, state5) = parseDef("", state4)
@@ -344,9 +376,9 @@ and parseRecordDef = (state: ParseState) => {
   let rec parseDef = (accumulator, state) => {
     let tok = currentToken(state)
     match (tok.kind) {
-      Lexer.SemiColon => (accumulator, { ...state, tokens: dropToken(state.tokens) }),
+      Lexer.SemiColon => (accumulator, dropToken(state)),
       Lexer.EOF => (accumulator, state),
-      _ => parseDef(accumulator ++ " " ++ toString(tok.kind), { ...state, tokens: dropToken(state.tokens) }), // approximate
+      _ => parseDef(accumulator ++ " " ++ toString(tok.kind), dropToken(state)), // approximate
     }
   }
   let (def, state5) = parseDef("", state4)
