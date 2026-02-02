@@ -2,50 +2,285 @@ module Ast
 
 from "./source.gr" include Source
 
-provide enum Op {
-  OpFatArrow,
+provide record rec Node {
+  id: Number,
+  span: Source.Span,
+} 
+and provide enum HoleOrigin {
+  UserTyped,      // user wrote `?`
+  Inferred       // lsp inserted `?`
 }
+and provide record Hole {
+  node: Node,
+  kind: HoleKind,
+  origin: HoleOrigin
+}
+and provide enum HoleKind { 
+  ExprHole, 
+  TypeHole, 
+  PatternHole, 
+  NameHole 
+}
+and provide record Name {
+  node: Node,
+  text: String,
+  // maybe also: kind: NameKind (ValueName | TypeName | OpName)
+}
+and provide enum AtomLiteral {
+  Int(Number),
+  Bool(Bool),
+  Char(Char),
+  Str(String),
+  Byte(Number),
+  Unit,
+}
+//#region trivia
+and provide enum TriviaPlacement {
+  // Anchored between printed tokens mechanically:
+  Gap,        // between token A and token B (exact boundary)
+  
+  // A structural island (block-scale):
+  Island,     // prints as a block; can contain newlines freely
+}
+and provide record Trivia {
+  node: Node,
+  kind: TriviaKind,
+  placement: TriviaPlacement,
+}
+and provide enum TriviaKind {
+  LineComment(String),   // -- or //
+  BlockComment(String),  // optional future
+  Opaque(String),        // unsafe fragment
+}
+and provide record Attachments {
+  leading: List<Trivia>,
+  trailing: List<Trivia>,
+  dangling: List<Trivia>,
+}
+//#endregion
+
 
 provide enum rec ExprKind {
-  IntLit(Number),
-  StrLit(String),
-  CharLit(Char),
-  Ident(String),
-  Lambda(Option<String>, Expr),
-  Infix(Op, Expr, Expr),
-  Block(Expr),
+  Lit(AtomLiteral),
+  Ident(Name),
+  Lambda(Pattern, Block),
+  InfixChain(InfixChain),
+  Postfix(Postfix),
+  Block(Block),
   Paren(Expr),
   Tuple(List<Expr>),
-  Unit,
-  Unknown,
+  RecordLit(List<RecordItem>),
+  Hole(Hole),
 }
-and provide record Expr {
-  id: Number,
-  span: Source.Span,
-  kind: ExprKind,
+and provide enum RecordItem {
+  Field(Name, Expr),
+  Spread(Expr),
 }
-
-provide record Binding {
-  id: Number,
-  span: Source.Span,
-  nameSpan: Source.Span,
-  name: String,
-  xtype: Option<String>, 
+and provide enum ListItem {
+  Elem(Expr),
+  Spread(Expr),
+}
+and provide record Expr { 
+  node: Node, kind: ExprKind, 
+  attach: Attachments
+}
+and provide record AssignStmt {
+  target: Expr,
   value: Expr,
 }
+and provide enum StmtKind {
+  Let(LetBinding),
+  Assign(AssignStmt),
+  Expr(Expr),            // expression statement (void)
+}
+and provide record Stmt { 
+  node: Node, 
+  kind: StmtKind, 
+  attach: Attachments
+}
+and provide enum PostfixSegment {
+  Call(List<Expr>),
+  Project(Name),    // .field
+  Index(Expr),      // [expr]
+}
+and provide record Postfix {
+  target: Expr,
+  segments: List<PostfixSegment>,
+}
+and provide record InfixChain { 
+  first: Expr, 
+  rest: List<(Name /*op*/, Expr)> 
+}
+and provide record Block {
+  node: Node,
+  items: List<BlockItem>,
+  result: Option<Expr>,
+}
+and provide enum BlockItem {
+  Stmt(Stmt),
+  TriviaItem(Trivia),    // includes comments AND islands
+  Directive(Directive)
+}
+and provide record Directive {
+  name: Name,
+  args: List<Expr>,
+}
+and provide enum PatternKind {
+  Hole(Hole),
 
-provide record rec TopLevel {
-  id: Number,
-  span: Source.Span,
-  kind: TopLevelKind,
-  exported: Bool,
+  Wildcard,
+  Var(Name),           // introduces binding (in match)
+  Pin(Name),           // refers to existing binding (in match)
+  Lit(AtomLiteral),
+  Constructor(Name, List<Pattern>),
+  Tuple(List<Pattern>),
+  List(List<Pattern>, Option<Pattern>), // rest pattern for `.. pat`
+  AllErrors,
+}
+and provide record Pattern { 
+  node: Node, 
+  kind: PatternKind, 
+  attach: Attachments
+}
+and provide record Match {
+  node: Node,
+  scrutinee: Option<List<Expr>>,   // match expr: Some([...]); match bundle literal: None
+  arms: List<MatchArm>,
+}
+and provide enum MatchArm {
+  PatternArm(Pattern, Option<Expr> /*when*/, Block),
+  BundleRef(Name),
+  Trivia(Trivia)
+}
+and provide enum TypeExprKind {
+  Hole(Hole),
+
+  Var(Name),
+  Ref(Name, List<TypeExpr>),      // Foo<T,U>
+  Tuple(List<TypeExpr>),
+  Record(List<(Name, TypeExpr)>),
+
+  Arrow(List<TypeExpr>, TypeExpr), // params => result
+  Ptr(TypeExpr, Option<Name>),     // Ptr<T, state?>
+  EffectRow(List<EffectCase>, Bool /*has_tail_wildcard*/),
+  UnitType,                        // Void
+}
+and provide record TypeExpr {
+  node: Node, 
+  kind: TypeExprKind, 
+  attach: Attachments
+}
+and provide record EffectCase {
+  node: Node,
+  name: Name,
+  payload: Option<TypeExpr>,
+}
+// top level
+
+and provide enum Decl {
+  LetDecl(LetDecl),
+  TypeDecl(TypeDecl),
+  RecordDecl(RecordDecl),
+  InfixDecl(InfixDecl),
+  PrefixDecl(PrefixDecl),
+  // Rule decls later
 } 
-
-and provide enum TopLevelKind {
-  LetBinding(Binding),
-  TypeDef(String, String), // name, def
+and provide record LetDecl {
+  node: Node,
+  bindings: List<LetBinding>,  // if you want to keep `and` inside; else group holds list
+}
+and provide record LetBinding {
+  node: Node,
+  name: Pattern,                // allow pattern binding (per manual)
+  annotation: Option<TypeExpr>, // `: Type`
+  value: Expr,
+}
+// export type rec infectious domain x = 
+and provide record TypeDecl {
+  node: Node,
+  name: Name,
+  infection: Option<Name>,
+  typeParams: List<Name>,
+  body: TypeDeclBody,
+}
+and provide type Annotation = String
+and provide enum TypeDeclBody {
+  Alias(TypeExpr),
+  Variant(List<(Name, Option<TypeExpr>, Option<Annotation>)>), // enum-like
+}
+and provide record RecordDecl {
+  node: Node,
+  name: Name,
+  typeParams: List<Name>,
+  fields: List<(Name, TypeExpr)>,
+}
+and provide record InfixDecl {
+  node: Node,
+  name: Name,
+  precedence: Number,
+  associativity: InfixAssociativity,
+}
+and provide enum InfixAssociativity {
+  Left,
+  Right,
+  NonAssoc,
+}
+and provide record PrefixDecl {
+  node: Node,
+  name: Name,
 }
 
-provide record Program {
-  topLevels: List<TopLevel>,
+record ImportDecl {
+  node: Node,
+  modulePath: String,
+  alias: Option<Name>,
+}
+record ReexportDecl {
+  node: Node,
+  modulePath: String,
+}
+
+record rec DeclGroup {
+  node: Node,
+  exported: Bool,
+  kind: DeclGroupKind,
+  decls: List<Decl>, // all share the group header modifiers
+}
+and enum DeclGroupKind {
+  LetGroup(LetGroupMods),
+  TypeGroup(TypeGroupMods),
+  RecordGroup(RecordGroupMods),
+  OpGroup,            // infix/prefix declarations
+  RuleGroup(RuleKind),// infectious/domain/policy/op/annotate if you want
+}
+and type Rec = Bool
+and enum LetGroupMods {
+  Rec,
+  Mut
+}
+and enum TypeGroupMods {
+  Rec,
+}
+and enum RecordGroupMods {
+  Rec,
+}
+and enum RuleKind {
+  Domain,
+  Policy,
+  Op,
+  Annotate,
+}
+
+enum TopItem {
+  Directive(Directive),
+  Import(ImportDecl),
+  Reexport(ReexportDecl),
+  DeclGroup(DeclGroup),
+  //can be raw region
+  Trivia(Trivia)
+}
+
+record Program {
+  items: List<TopItem>,
+  core: Bool
 }
