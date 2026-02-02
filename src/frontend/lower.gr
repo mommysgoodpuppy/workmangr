@@ -3,19 +3,55 @@ module Lower
 from "../core/ast.gr" include Ast
 use Ast.*
 from "list" include List
+from "runtime/unsafe/panic" include Panic
+use Panic.{ panic }
 
 // Transform => infix expressions into lambdas
 let rec lowerExpr = (expr: Ast.Expr) => {
   match (expr.kind) {
-    Ast.Infix(Ast.OpFatArrow, param, body) => {
-      // Transform 'param => body' into a lambda
-      // For now, extract parameter name from simple cases
-      let paramName = extractParamName(param)
-      let loweredBody = lowerExpr(body)
-      { ...expr, kind: Ast.Lambda(paramName, loweredBody) }
+    Ast.InfixChain(chain) => {
+      match (chain) {
+        {
+          first: { node: _, kind: Ast.MatchApply(ma), attach: _ },
+          rest: [(op, body)],
+        } when op.text == "=>" => {
+          let bundle = match (body.kind) {
+            Ast.Bundle(b) => b,
+            _ => panic("match => expects bundle"),
+          }
+          let matchApply = Ast.MatchApply({ ...ma, bundle })
+          { ...expr, kind: Ast.Lambda(None, { ...expr, kind: matchApply }) }
+        },
+        { first, rest: [(op, body)] } when op.text == "=>" => {
+          // Normal param => body
+          let param = first
+          let pattern = extractParam(param)
+          let loweredBody = lowerExpr(body)
+          let lambda = match (pattern) {
+            Some(p) => Ast.Lambda(Some(p), loweredBody),
+            None => panic("unsupported param"),
+          }
+          { ...expr, kind: lambda }
+        },
+        _ => {
+          // General infix chain
+          let loweredFirst = lowerExpr(chain.first)
+          let loweredRest = List.map(
+            ((op, e)) => (op, lowerExpr(e)),
+            chain.rest
+          )
+          {
+            ...expr,
+            kind: Ast.InfixChain({ first: loweredFirst, rest: loweredRest }),
+          }
+        },
+      }
     },
     Ast.Block(inner) => {
-      { ...expr, kind: Ast.Block(lowerExpr(inner)) }
+      {
+        ...expr,
+        kind: Ast.Block({ ...inner, result: List.map(lowerExpr, inner.result) }),
+      }
     },
     Ast.Paren(inner) => {
       { ...expr, kind: Ast.Paren(lowerExpr(inner)) }
@@ -23,37 +59,51 @@ let rec lowerExpr = (expr: Ast.Expr) => {
     Ast.Tuple(exprs) => {
       { ...expr, kind: Ast.Tuple(List.map(lowerExpr, exprs)) }
     },
-    Ast.Infix(op, left, right) => {
-      // Handle other infix operators
-      let loweredLeft = lowerExpr(left)
-      let loweredRight = lowerExpr(right)
-      { ...expr, kind: Ast.Infix(op, loweredLeft, loweredRight) }
+    Ast.Lambda(optPat, body) => {
+      { ...expr, kind: Ast.Lambda(optPat, lowerExpr(body)) }
     },
     // Other cases remain unchanged
     _ => expr,
   }
 }
-and extractParamName = (param: Ast.Expr) => {
+and extractParam = (param: Ast.Expr) => {
   match (param.kind) {
-    Ast.Ident(name) => Some(name),
+    Ast.Ident(name) =>
+      Some({ node: param.node, kind: Var(name), attach: param.attach }),
     Ast.Paren(inner) => match (inner.kind) {
-      Ast.Ident(name) => Some(name),
+      Ast.Ident(name) =>
+        Some({ node: inner.node, kind: Var(name), attach: inner.attach }),
       _ => None, // Complex parameter patterns not supported yet
     },
     _ => None, // Complex parameter patterns not supported yet
   }
 }
-let lowerBinding = (binding: Ast.Binding) => {
+let lowerBinding = (binding: Ast.LetBinding) => {
   { ...binding, value: lowerExpr(binding.value) }
 }
 
-let rec lowerTopLevel = (tl: Ast.TopLevel) => {
-  match (tl.kind) {
-    Ast.LetBinding(b) => { ...tl, kind: Ast.LetBinding(lowerBinding(b)) },
-    Ast.TypeDef(_, _) => tl,
+let lowerLetDecl = (ld: Ast.LetDecl) => {
+  { ...ld, bindings: List.map(lowerBinding, ld.bindings) }
+}
+
+let lowerDecl = (d: Ast.Decl) => {
+  match (d) {
+    Ast.LetDecl(ld) => Ast.LetDecl(lowerLetDecl(ld)),
+    _ => d,
+  }
+}
+
+let lowerDeclGroup = (dg: Ast.DeclGroup) => {
+  { ...dg, decls: List.map(lowerDecl, dg.decls) }
+}
+
+let lowerTopItem = (ti: Ast.TopItem) => {
+  match (ti) {
+    Ast.DeclGroup(dg) => Ast.DeclGroup(lowerDeclGroup(dg)),
+    _ => ti,
   }
 }
 
 provide let lowerProgram = (program: Ast.Program) => {
-  { topLevels: List.map(lowerTopLevel, program.topLevels), }
+  { ...program, items: List.map(lowerTopItem, program.items) }
 }

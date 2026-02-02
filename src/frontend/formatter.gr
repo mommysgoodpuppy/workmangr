@@ -20,8 +20,8 @@ let rec formatExpr = (expr: Ast.Expr) => {
     Ast.Ident(name) => name,
     Ast.Lambda(param, body) => {
       let paramStr = match (param) {
-        Some(p) => p,
-        None => "_",
+        Some(p) => formatPattern(p),
+        None => "()",
       }
       paramStr ++ " => " ++ formatExpr(body)
     },

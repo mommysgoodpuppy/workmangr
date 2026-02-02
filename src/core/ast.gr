@@ -5,21 +5,21 @@ from "./source.gr" include Source
 provide record rec Node {
   id: Number,
   span: Source.Span,
-} 
+}
 and provide enum HoleOrigin {
-  UserTyped,      // user wrote `?`
-  Inferred       // lsp inserted `?`
+  UserTyped, // user wrote `?`
+  Inferred, // lsp inserted `?`
 }
 and provide record Hole {
   node: Node,
   kind: HoleKind,
-  origin: HoleOrigin
+  origin: HoleOrigin,
 }
-and provide enum HoleKind { 
-  ExprHole, 
-  TypeHole, 
-  PatternHole, 
-  NameHole 
+and provide enum HoleKind {
+  ExprHole,
+  TypeHole,
+  PatternHole,
+  NameHole,
 }
 and provide record Name {
   node: Node,
@@ -37,10 +37,10 @@ and provide enum AtomLiteral {
 //#region trivia
 and provide enum TriviaPlacement {
   // Anchored between printed tokens mechanically:
-  Gap,        // between token A and token B (exact boundary)
-  
+  Gap, // between token A and token B (exact boundary)
+
   // A structural island (block-scale):
-  Island,     // prints as a block; can contain newlines freely
+  Island, // prints as a block; can contain newlines freely
 }
 and provide record Trivia {
   node: Node,
@@ -48,9 +48,9 @@ and provide record Trivia {
   placement: TriviaPlacement,
 }
 and provide enum TriviaKind {
-  LineComment(String),   // -- or //
-  BlockComment(String),  // optional future
-  Opaque(String),        // unsafe fragment
+  LineComment(String), // -- or //
+  BlockComment(String), // optional future
+  Opaque(String), // unsafe fragment
 }
 and provide record Attachments {
   leading: List<Trivia>,
@@ -59,11 +59,10 @@ and provide record Attachments {
 }
 //#endregion
 
-
 provide enum rec ExprKind {
   Lit(AtomLiteral),
   Ident(Name),
-  Lambda(Pattern, Block),
+  Lambda(Option<Pattern>, Expr),
   InfixChain(InfixChain),
   Postfix(Postfix),
   Block(Block),
@@ -83,10 +82,10 @@ and provide enum ListItem {
   Elem(Expr),
   Spread(Expr),
 }
-and provide record Expr { 
-  node: Node, 
-  kind: ExprKind, 
-  attach: Attachments
+and provide record Expr {
+  node: Node,
+  kind: ExprKind,
+  attach: Attachments,
 }
 and provide record AssignStmt {
   target: Expr,
@@ -95,25 +94,25 @@ and provide record AssignStmt {
 and provide enum StmtKind {
   Let(LetBinding),
   Assign(AssignStmt),
-  Expr(Expr),            // expression statement (void)
+  Expr(Expr), // expression statement (void)
 }
-and provide record Stmt { 
-  node: Node, 
-  kind: StmtKind, 
-  attach: Attachments
+and provide record Stmt {
+  node: Node,
+  kind: StmtKind,
+  attach: Attachments,
 }
 and provide enum PostfixSegment {
   Call(List<Expr>),
-  Project(Name),    // .field
-  Index(Expr),      // [expr]
+  Project(Name), // .field
+  Index(Expr), // [expr]
 }
 and provide record Postfix {
   target: Expr,
   segments: List<PostfixSegment>,
 }
-and provide record InfixChain { 
-  first: Expr, 
-  rest: List<(Name /*op*/, Expr)> 
+and provide record InfixChain {
+  first: Expr,
+  rest: List<(Name, /*op*/ Expr)>,
 }
 and provide record Block {
   node: Node,
@@ -122,8 +121,8 @@ and provide record Block {
 }
 and provide enum BlockItem {
   Stmt(Stmt),
-  TriviaItem(Trivia),    // includes comments AND islands
-  Directive(Directive)
+  TriviaItem(Trivia), // includes comments AND islands
+  Directive(Directive),
 }
 and provide record Directive {
   name: Name,
@@ -131,45 +130,44 @@ and provide record Directive {
 }
 and provide enum PatternKind {
   Hole(Hole),
-
   Wildcard,
-  Var(Name),           // introduces binding (in match)
-  Pin(Name),           // refers to existing binding (in match)
+  Var(Name), // introduces binding (in match)
+  Pin(Name), // refers to existing binding (in match)
   Lit(AtomLiteral),
   Constructor(Name, List<Pattern>),
   Tuple(List<Pattern>),
   List(List<Pattern>, Option<Pattern>), // rest pattern for `.. pat`
   AllErrors,
 }
-and provide record Pattern { 
-  node: Node, 
-  kind: PatternKind, 
-  attach: Attachments
+and provide record Pattern {
+  node: Node,
+  kind: PatternKind,
+  attach: Attachments,
 }
-and provide enum BundleItemKind { 
-  Case(Pattern, Option<Expr>, Block), 
-  Trivia(Trivia) 
+and provide enum BundleItemKind {
+  Case(Pattern, Option<Expr>, Block),
+  Trivia(Trivia),
 }
 and provide record BundleItem {
   node: Node,
   kind: BundleItemKind,
-  attach: Attachments
+  attach: Attachments,
 }
 and provide record BundleLiteral {
   node: Node,
-  items: List<BundleItem>
+  items: List<BundleItem>,
 }
 and provide enum BundleExprKind {
   Literal(BundleLiteral),
   Ref(Name),
   Compose(List<BundleExpr>),
   Hole(Hole),
-  Paren(BundleExpr)
+  Paren(BundleExpr),
 }
-and provide record BundleExpr { 
-  node: Node, 
-  kind: BundleExprKind, 
-  attach: Attachments
+and provide record BundleExpr {
+  node: Node,
+  kind: BundleExprKind,
+  attach: Attachments,
 }
 and provide record MatchApply {
   node: Node,
@@ -178,21 +176,19 @@ and provide record MatchApply {
 }
 and provide enum TypeExprKind {
   Hole(Hole),
-
   Var(Name),
-  Ref(Name, List<TypeExpr>),      // Foo<T,U>
+  Ref(Name, List<TypeExpr>), // Foo<T,U>
   Tuple(List<TypeExpr>),
   Record(List<(Name, TypeExpr)>),
-
   Arrow(List<TypeExpr>, TypeExpr), // params => result
-  Ptr(TypeExpr, Option<Name>),     // Ptr<T, state?>
+  Ptr(TypeExpr, Option<Name>), // Ptr<T, state?>
   EffectRow(List<EffectCase>, Bool /*has_tail_wildcard*/),
-  UnitType,                        // Void
+  UnitType, // Void
 }
 and provide record TypeExpr {
-  node: Node, 
-  kind: TypeExprKind, 
-  attach: Attachments
+  node: Node,
+  kind: TypeExprKind,
+  attach: Attachments,
 }
 and provide record EffectCase {
   node: Node,
@@ -208,18 +204,18 @@ and provide enum Decl {
   InfixDecl(InfixDecl),
   PrefixDecl(PrefixDecl),
   // Rule decls later
-} 
+}
 and provide record LetDecl {
   node: Node,
-  bindings: List<LetBinding>,  // if you want to keep `and` inside; else group holds list
+  bindings: List<LetBinding>, // if you want to keep `and` inside; else group holds list
 }
 and provide record LetBinding {
   node: Node,
-  name: Pattern,                // allow pattern binding (per manual)
+  name: Pattern, // allow pattern binding (per manual)
   annotation: Option<TypeExpr>, // `: Type`
   value: Expr,
 }
-// export type rec infectious domain x = 
+// export type rec infectious domain x =
 and provide record TypeDecl {
   node: Node,
   name: Name,
@@ -254,7 +250,7 @@ and provide record PrefixDecl {
   name: Name,
 }
 
-provide record rec ImportDecl  {
+provide record rec ImportDecl {
   node: Node,
   modulePath: String,
   alias: Option<Name>,
@@ -263,7 +259,6 @@ and provide record ReexportDecl {
   node: Node,
   modulePath: String,
 }
-
 and provide record DeclGroup {
   node: Node,
   exported: Bool,
@@ -274,13 +269,13 @@ and provide enum DeclGroupKind {
   LetGroup(LetGroupMods),
   TypeGroup(TypeGroupMods),
   RecordGroup(RecordGroupMods),
-  OpGroup,            // infix/prefix declarations
-  RuleGroup(RuleKind),// infectious/domain/policy/op/annotate if you want
+  OpGroup, // infix/prefix declarations
+  RuleGroup(RuleKind), // infectious/domain/policy/op/annotate if you want
 }
 and provide type Rec = Bool
 and provide enum LetGroupMods {
   Rec,
-  Mut
+  Mut,
 }
 and provide enum TypeGroupMods {
   Rec,
@@ -294,17 +289,15 @@ and provide enum RuleKind {
   Op,
   Annotate,
 }
-
 and provide enum TopItem {
   Directive(Directive),
   Import(ImportDecl),
   Reexport(ReexportDecl),
   DeclGroup(DeclGroup),
   //can be raw region
-  Trivia(Trivia)
+  Trivia(Trivia),
 }
-
 and provide record Program {
   items: List<TopItem>,
-  core: Bool
+  core: Bool,
 }
