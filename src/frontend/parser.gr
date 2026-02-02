@@ -19,6 +19,8 @@ record ParseState {
   allTokens: List<Lexer.Token>,
 }
 
+type Parser<a> = ParseState => (a, ParseState)
+
 let makeExpr: (Number, Source.Span, Ast.ExprKind) => Ast.Expr = (id, span, kind) => {
   let node = { id, span }
   let attach = { leading: [], trailing: [], dangling: [] }
@@ -150,7 +152,7 @@ let spanFromEnd = (state: ParseState, endTok: Lexer.Token) => {
 }
 
 //parse
-let rec parseExpr = (state: ParseState) => {
+let rec parseExpr: Parser<Ast.Expr> = state => {
   let (expr: Ast.Expr, state1) = parseInfix(state)
   match (currentToken(state1).kind) {
     Lexer.FatArrow => {
@@ -184,8 +186,8 @@ let rec parseExpr = (state: ParseState) => {
     _ => (expr, state1),
   }
 }
-and parseInfix = (state: ParseState) => {
-  let (expr:Expr, state1) = parseTerm(state)
+and parseInfix: Parser<Ast.Expr> = state => {
+  let (expr: Expr, state1) = parseTerm(state)
   match (currentToken(state1).kind) {
     Lexer.Plus => {
       let (id, stateAfterId) = freshId(state1)
@@ -211,6 +213,20 @@ and parseInfix = (state: ParseState) => {
         span,
         InfixChain(
           { first: expr, rest: [({ node: { id, span }, text: "-" }, rhs)] },
+        )
+      )
+      (node, state3)
+    },
+    Lexer.Arrow => {
+      let (id, stateAfterId) = freshId(state1)
+      let (_, state2) = expectSimple(Lexer.Arrow, stateAfterId)
+      let (rhs, state3) = parseInfix(state2)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
+          { first: expr, rest: [({ node: { id, span }, text: ">" }, rhs)] },
         )
       )
       (node, state3)
@@ -265,7 +281,7 @@ and parsePostfix = (
     },
   }
 }
-and parseTerm = (state: ParseState) => {
+and parseTerm: Parser<Ast.Expr> = state => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.LBrace => parseBlock(state),
@@ -276,7 +292,7 @@ and parseTerm = (state: ParseState) => {
   }
 }
 //must support inner code
-and parseBlock = (state: ParseState) => {
+and parseBlock: Parser<Ast.Expr> = state => {
   let (id, state1) = freshId(state)
   let (_, state2) = expectSimple(Lexer.LBrace, state1)
   let (items, result, state3) = parseStatements(state2)
@@ -285,7 +301,7 @@ and parseBlock = (state: ParseState) => {
   let expr = makeExpr(id, span, Block({ node: { id, span }, items, result }))
   (expr, state4)
 }
-and parsePrimary = (state: ParseState) => {
+and parsePrimary: Parser<Ast.Expr> = state => {
   let (id, state1) = freshId(state)
   let tok = currentToken(state1)
 
@@ -494,22 +510,9 @@ and parseTopLevels = (state: ParseState) => {
       parseTopLevels(state1)
     },
     Lexer.LitName(name) when name == "let" => {
-      let (binding, state1): (Ast.LetBinding, ParseState) = parseBinding(state)
-      let (id, state2) = freshId(state1)
-      let topLevel: Ast.TopItem = DeclGroup(
-        {
-          node: { id, span: binding.node.span },
-          exported: false,
-          kind: LetGroup(Rec),
-          decls: [
-            LetDecl(
-              { node: { id, span: binding.node.span }, bindings: [binding] },
-            ),
-          ],
-        },
-      )
-      let (rest, state3) = parseTopLevels(state2)
-      ([topLevel, ...rest], state3)
+      let (group, state1) = parseLetGroup(state)
+      let (rest, state2) = parseTopLevels(state1)
+      ([group, ...rest], state2)
     },
     Lexer.LitName(name) when name == "export" => {
       let state1 = dropToken(state)
@@ -541,11 +544,10 @@ and parseTopLevels = (state: ParseState) => {
 }
 and parseBinding = (state: ParseState) => {
   let (id, state1) = freshId(state)
-  let (letTok, state2): (Lexer.Token, ParseState) = expectKeyword("let", state1)
-  let (name, litName, state3) = expectName(state2)
+  let (pattern, state2) = parsePattern(state1)
   //Optionally parse type annotation after ':'
-  let (typeOpt, state4) = if (kindIs(currentToken(state3).kind, Lexer.Colon)) {
-    let (_, state_temp) = expectSimple(Lexer.Colon, state3)
+  let (typeOpt, state3) = if (kindIs(currentToken(state2).kind, Lexer.Colon)) {
+    let (_, state_temp) = expectSimple(Lexer.Colon, state2)
     // Parse type tokens until '=' (approximate, like TypeDef)
     let rec parseType = (accumulator, state) => {
       let tok = currentToken(state)
@@ -557,22 +559,59 @@ and parseBinding = (state: ParseState) => {
     }
     parseType("", state_temp)
   } else {
-    (None, state3)
+    (None, state2)
   }
-  let (_, state5) = expectSimple(Lexer.Eq, state4)
-  let (value, state6): (Ast.Expr, ParseState) = parseExpr(state5)
-  let span = spanFromTokens(letTok.span, value.node.span)
+  let (_, state4) = expectSimple(Lexer.Eq, state3)
+  let (value, state5): (Ast.Expr, ParseState) = parseExpr(state4)
+  let span = spanFromTokens(pattern.node.span, value.node.span)
   let binding: Ast.LetBinding = {
     node: { id, span },
-    name: {
-      node: { id, span: litName.span },
-      kind: Var({ node: { id, span: litName.span }, text: name }),
-      attach: { leading: [], trailing: [], dangling: [] },
-    },
+    name: pattern,
     annotation: None,
     value,
   }
-  (binding, state6)
+  (binding, state5)
+}
+and parseLetMods: ParseState => (Ast.LetGroupMods, ParseState) = state => {
+  let tok = currentToken(state)
+  if (kindIs(tok.kind, Lexer.LitName("rec"))) {
+    let state1 = dropToken(state)
+    (Ast.Rec, state1)
+  } else if (kindIs(tok.kind, Lexer.LitName("mut"))) {
+    let state1 = dropToken(state)
+    (Ast.Mut, state1)
+  } else {
+    (Ast.Rec, state)
+  }
+}
+and parseLetGroup: ParseState => (Ast.TopItem, ParseState) = state => {
+  let (id, state1) = freshId(state)
+  let (letTok, state2) = expectKeyword("let", state1)
+  let (mods, state3) = parseLetMods(state2)
+  let (firstBinding, state4) = parseBinding(state3)
+  let mut bindings = [firstBinding]
+  let mut currentState = state4
+  while (kindIs(currentToken(currentState).kind, Lexer.LitName("and"))) {
+    let (_, state_temp) = expectKeyword("and", currentState)
+    let (binding, state_temp2) = parseBinding(state_temp)
+    bindings = [binding, ...bindings]
+    currentState = state_temp2
+  }
+  let reversedBindings = List.reverse(bindings)
+  let lastBinding = match (List.head(reversedBindings)) {
+    Some(b) => b,
+    None => panic("Bindings list should not be empty"),
+  }
+  let span = spanFromTokens(letTok.span, lastBinding.node.span)
+  let topLevel = DeclGroup(
+    {
+      node: { id, span },
+      exported: false,
+      kind: LetGroup(mods),
+      decls: [LetDecl({ node: { id, span }, bindings: reversedBindings })],
+    },
+  )
+  (topLevel, currentState)
 }
 and parseTypeDef: ParseState => (Ast.TopItem, ParseState) = state => {
   let (id, state1) = freshId(state)
@@ -661,7 +700,8 @@ and parseStatements = (state: ParseState) => {
     Lexer.RBrace => ([], None, state),
     Lexer.SemiColon => parseStatements(dropToken(state)),
     Lexer.LitName("let") => {
-      let (binding, state1) = parseBinding(state)
+      let (_, state_temp) = expectKeyword("let", state)
+      let (binding, state1) = parseBinding(state_temp)
       let (id, state2) = freshId(state1)
       let stmt = {
         node: { id, span: binding.node.span },
@@ -682,7 +722,7 @@ and parseStatements = (state: ParseState) => {
     },
   }
 }
-and parsePattern = (state: ParseState) => {
+and parsePattern: Parser<Ast.Pattern> = state => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.LitName("_") => {
