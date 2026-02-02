@@ -71,7 +71,6 @@ provide enum rec ExprKind {
   Tuple(List<Expr>),
   RecordLit(List<RecordItem>),
   MatchApply(MatchApply),
-  MatchFn(MatchFn),
   Bundle(BundleExpr),
   Hole(Hole),
 }
@@ -147,7 +146,6 @@ and provide record Pattern {
 }
 and provide enum BundleItemKind { 
   Case(Pattern, Option<Expr>, Block), 
-  Include(Name), 
   Trivia(Trivia) 
 }
 and provide record BundleItem {
@@ -174,11 +172,6 @@ and provide record BundleExpr {
 and provide record MatchApply {
   node: Node,
   scrutinees: List<Expr>,
-  bundle: BundleExpr,
-}
-and provide record MatchFn {
-  node: Node,
-  params: List<Pattern>,
   bundle: BundleExpr,
 }
 and provide enum TypeExprKind {
