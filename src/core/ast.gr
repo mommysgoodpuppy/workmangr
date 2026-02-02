@@ -73,6 +73,7 @@ provide enum rec ExprKind {
   MatchApply(MatchApply),
   Bundle(BundleExpr),
   Hole(Hole),
+  If(Expr, Expr, Option<Expr>),
 }
 and provide enum RecordItem {
   Field(Name, Expr),
@@ -117,7 +118,7 @@ and provide record InfixChain {
 and provide record Block {
   node: Node,
   items: List<BlockItem>,
-  result: Option<Expr>,
+  result: List<Expr>,
 }
 and provide enum BlockItem {
   Stmt(Stmt),

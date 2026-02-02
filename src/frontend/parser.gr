@@ -226,6 +226,20 @@ and parseInfix: Parser<Ast.Expr> = state => {
         id,
         span,
         InfixChain(
+          { first: expr, rest: [({ node: { id, span }, text: "->" }, rhs)] },
+        )
+      )
+      (node, state3)
+    },
+    Lexer.Arrow => {
+      let (id, stateAfterId) = freshId(state1)
+      let (_, state2) = expectSimple(Lexer.Arrow, stateAfterId)
+      let (rhs, state3) = parseInfix(state2)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
           { first: expr, rest: [({ node: { id, span }, text: ">" }, rhs)] },
         )
       )
@@ -324,6 +338,8 @@ and parsePrimary: Parser<Ast.Expr> = state => {
     Lexer.LitName(name) => {
       if (name == "match") {
         parseMatch(state1)
+      } else if (name == "if") {
+        parseIf(state1)
       } else {
         let state2 = dropToken(state1)
         let expr: Ast.Expr = makeExpr(
@@ -490,6 +506,22 @@ and parsePrimary: Parser<Ast.Expr> = state => {
       let expr: Ast.Expr = makeExpr(id, span, RecordLit(fieldItems))
       (expr, state3)
     },
+    Lexer.FatArrow => {
+      let state2 = dropToken(state1)
+      let (bodyExpr, state3) = parseExpr(state2)
+      let body = match (bodyExpr.kind) {
+        Block(b) => b,
+        _ => panic("lambda body must be block"),
+      }
+      let span = spanFromTokens(tok.span, bodyExpr.node.span)
+      let pat = {
+        node: { id, span: tok.span },
+        kind: Wildcard,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }: Ast.Pattern 
+      let expr = makeExpr(id, span, Lambda(pat, body))
+      (expr, state3)
+    },
     _ => {
       print(tok.kind)
       Panic.panic(
@@ -498,6 +530,28 @@ and parsePrimary: Parser<Ast.Expr> = state => {
       )
     },
   }
+}
+and parseIf = (state: ParseState) => {
+  let (id, state1) = freshId(state)
+  let (ifTok, state2) = expectKeyword("if", state)
+  let (cond, state3) = parseExpr(state2)
+  let (thenExpr, state4) = parseExpr(state3)
+  let (elseExpr, state5) = if (
+    kindIs(currentToken(state4).kind, Lexer.LitName("else"))
+  ) {
+    let (_, state_temp) = expectKeyword("else", state4)
+    let (expr, state_temp2) = parseExpr(state_temp)
+    (Some(expr), state_temp2)
+  } else {
+    (None, state4)
+  }
+  let endSpan = match (elseExpr) {
+    Some(e) => e.node.span,
+    None => thenExpr.node.span,
+  }
+  let span = spanFromTokens(ifTok.span, endSpan)
+  let expr = makeExpr(id, span, Ast.If(cond, thenExpr, elseExpr))
+  (expr, state5)
 }
 and parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
@@ -697,7 +751,7 @@ and parseRecordDef = (state: ParseState) => {
 and parseStatements = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
-    Lexer.RBrace => ([], None, state),
+    Lexer.RBrace => ([], [], state),
     Lexer.SemiColon => parseStatements(dropToken(state)),
     Lexer.LitName("let") => {
       let (_, state_temp) = expectKeyword("let", state)
@@ -714,11 +768,8 @@ and parseStatements = (state: ParseState) => {
     },
     _ => {
       let (expr, state1) = parseExpr(state)
-      let (restItems, result, state2) = parseStatements(state1)
-      if (result != None) {
-        panic("Multiple result expressions in block")
-      }
-      (restItems, Some(expr), state2)
+      let (restItems, restResult, state2) = parseStatements(state1)
+      ([], [expr, ...restResult], state2)
     },
   }
 }
