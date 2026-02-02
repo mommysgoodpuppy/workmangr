@@ -167,9 +167,9 @@ let rec parseExpr = (state: ParseState) => {
       )
       (node, state3)
     },
-    Lexer.ColonGt => {
+    Lexer.PipeArrow => {
       let (id, stateAfterId) = freshId(state1)
-      let (_, state2) = expectSimple(Lexer.ColonGt, stateAfterId)
+      let (_, state2) = expectSimple(Lexer.PipeArrow, stateAfterId)
       let (rhs, state3) = parseExpr(state2)
       let span = spanFromTokens(expr.node.span, rhs.node.span)
       let node = makeExpr(
