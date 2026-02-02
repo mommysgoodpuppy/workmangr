@@ -151,7 +151,7 @@ let spanFromEnd = (state: ParseState, endTok: Lexer.Token) => {
 
 //parse
 let rec parseExpr = (state: ParseState) => {
-  let (expr: Ast.Expr, state1) = parseTerm(state)
+  let (expr: Ast.Expr, state1) = parseInfix(state)
   match (currentToken(state1).kind) {
     Lexer.FatArrow => {
       let (id, stateAfterId) = freshId(state1)
@@ -184,36 +184,94 @@ let rec parseExpr = (state: ParseState) => {
     _ => (expr, state1),
   }
 }
+and parseInfix = (state: ParseState) => {
+  let (expr:Expr, state1) = parseTerm(state)
+  match (currentToken(state1).kind) {
+    Lexer.Plus => {
+      let (id, stateAfterId) = freshId(state1)
+      let (_, state2) = expectSimple(Lexer.Plus, stateAfterId)
+      let (rhs, state3) = parseInfix(state2)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
+          { first: expr, rest: [({ node: { id, span }, text: "+" }, rhs)] },
+        )
+      )
+      (node, state3)
+    },
+    Lexer.Dash => {
+      let (id, stateAfterId) = freshId(state1)
+      let (_, state2) = expectSimple(Lexer.Dash, stateAfterId)
+      let (rhs, state3) = parseInfix(state2)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
+          { first: expr, rest: [({ node: { id, span }, text: "-" }, rhs)] },
+        )
+      )
+      (node, state3)
+    },
+    _ => (expr, state1),
+  }
+}
+and parsePostfix = (
+  target: Ast.Expr,
+  segments: List<Ast.PostfixSegment>,
+  state: ParseState,
+) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LParen => {
+      let (_, state1) = expectSimple(Lexer.LParen, state)
+      let mut args = []
+      let mut currentState = state1
+      if (!kindIs(currentToken(currentState).kind, Lexer.RParen)) {
+        let (arg, state_temp) = parseExpr(currentState)
+        args = [arg, ...args]
+        currentState = state_temp
+        while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+          let (_, state_temp2) = expectSimple(Lexer.Comma, currentState)
+          let (nextArg, state_temp3) = parseExpr(state_temp2)
+          args = [nextArg, ...args]
+          currentState = state_temp3
+        }
+      }
+      let (rparenTok, state2) = expectSimple(Lexer.RParen, currentState)
+      let segment = Call(List.reverse(args))
+      let newSegments = [segment, ...segments]
+      parsePostfix(target, newSegments, state2)
+    },
+    Lexer.Period => {
+      let (_, state1) = expectSimple(Lexer.Period, state)
+      let (name, nameTok, state2) = expectName(state1)
+      let segment = Project(
+        { node: { id: target.node.id, span: nameTok.span }, text: name },
+      )
+      let newSegments = [segment, ...segments]
+      parsePostfix(target, newSegments, state2)
+    },
+    _ => {
+      if (List.length(segments) == 0) {
+        (target, state)
+      } else {
+        let postfix = Postfix({ target, segments: List.reverse(segments) })
+        let newExpr = makeExpr(target.node.id, target.node.span, postfix)
+        (newExpr, state)
+      }
+    },
+  }
+}
 and parseTerm = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.LBrace => parseBlock(state),
     _ => {
       let (expr, state1) = parsePrimary(state)
-      let tok2 = currentToken(state1)
-      match (tok2.kind) {
-        Lexer.Period => {
-          let (_, state2) = expectSimple(Lexer.Period, state1)
-          let (name, nameTok, state3) = expectName(state2)
-          let postfix = Postfix(
-            {
-              target: expr,
-              segments: [
-                Project(
-                  { node: { id: expr.node.id, span: nameTok.span }, text: name },
-                ),
-              ],
-            },
-          )
-          let newExpr = makeExpr(
-            expr.node.id,
-            spanFromTokens(expr.node.span, nameTok.span),
-            postfix
-          )
-          (newExpr, state3)
-        },
-        _ => (expr, state1),
-      }
+      parsePostfix(expr, [], state1)
     },
   }
 }
@@ -248,13 +306,79 @@ and parsePrimary = (state: ParseState) => {
       (expr, state2)
     },
     Lexer.LitName(name) => {
-      let state2 = dropToken(state1)
-      let expr: Ast.Expr = makeExpr(
-        id,
-        tok.span,
-        Ident({ node: { id, span: tok.span }, text: name })
-      )
-      (expr, state2)
+      if (name == "match") {
+        parseMatch(state1)
+      } else {
+        let state2 = dropToken(state1)
+        let expr: Ast.Expr = makeExpr(
+          id,
+          tok.span,
+          Ident({ node: { id, span: tok.span }, text: name })
+        )
+        (expr, state2)
+      }
+    },
+    Lexer.ConstructorTok(name) => {
+      let state1 = dropToken(state1)
+      if (kindIs(currentToken(state1).kind, Lexer.LBrace)) {
+        let (_, state2) = expectSimple(Lexer.LBrace, state1)
+        let mut fields = []
+        let mut currentState = state2
+        while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
+          if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+            let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
+            currentState = state_temp
+          } else {
+            let (fieldName, nameTok, state_temp) = expectName(currentState)
+            let (fieldExpr, state_temp3) = if (
+              kindIs(currentToken(state_temp).kind, Lexer.Eq)
+            ) {
+              let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
+              parseExpr(state_temp2)
+            } else {
+              (
+                makeExpr(
+                  id,
+                  nameTok.span,
+                  Ident({ node: { id, span: nameTok.span }, text: fieldName })
+                ),
+                state_temp,
+              )
+            }
+            fields = [(fieldName, nameTok, fieldExpr), ...fields]
+            currentState = state_temp3
+            if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+              let (_, state_temp4) = expectSimple(Lexer.Comma, currentState)
+              currentState = state_temp4
+            }
+          }
+        }
+        let (rbraceTok, state3) = expectSimple(Lexer.RBrace, currentState)
+        let span = spanFromTokens(tok.span, rbraceTok.span)
+        let reversedFields = List.reverse(fields)
+        let rec buildFieldItems: (List<(String, Lexer.Token, Ast.Expr)>, Number) => List<
+          Ast.RecordItem
+        > = (items, currentId) => match (items) {
+          [] => [],
+          [(name, tok, expr), ...rest] => {
+            let field = Field(
+              { node: { id: currentId, span: tok.span }, text: name },
+              expr,
+            )
+            [field, ...buildFieldItems(rest, currentId + 1)]
+          },
+        }
+        let fieldItems = buildFieldItems(reversedFields, id + 1)
+        let expr: Ast.Expr = makeExpr(id, span, RecordLit(fieldItems))
+        (expr, state3)
+      } else {
+        let expr: Ast.Expr = makeExpr(
+          id,
+          tok.span,
+          Ident({ node: { id, span: tok.span }, text: name })
+        )
+        (expr, state1)
+      }
     },
     Lexer.LParen => {
       let (_, state2) = expectSimple(Lexer.LParen, state1)
@@ -308,8 +432,21 @@ and parsePrimary = (state: ParseState) => {
           currentState = state_temp
         } else {
           let (fieldName, nameTok, state_temp) = expectName(currentState)
-          let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
-          let (fieldExpr, state_temp3) = parseExpr(state_temp2)
+          let (fieldExpr, state_temp3) = if (
+            kindIs(currentToken(state_temp).kind, Lexer.Eq)
+          ) {
+            let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
+            parseExpr(state_temp2)
+          } else {
+            (
+              makeExpr(
+                id,
+                nameTok.span,
+                Ident({ node: { id, span: nameTok.span }, text: fieldName })
+              ),
+              state_temp,
+            )
+          }
           fields = [(fieldName, nameTok, fieldExpr), ...fields]
           currentState = state_temp3
           if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
@@ -337,7 +474,13 @@ and parsePrimary = (state: ParseState) => {
       let expr: Ast.Expr = makeExpr(id, span, RecordLit(fieldItems))
       (expr, state3)
     },
-    _ => Panic.panic("Parse error: expected expression"),
+    _ => {
+      print(tok.kind)
+      Panic.panic(
+        "Parse error: expected expression, tok: "
+          ++ Lexer.tokenKindToString(tok.kind)
+      )
+    },
   }
 }
 and parseTopLevels = (state: ParseState) => {
@@ -538,6 +681,137 @@ and parseStatements = (state: ParseState) => {
       (restItems, Some(expr), state2)
     },
   }
+}
+and parsePattern = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LitName("_") => {
+      let state1 = dropToken(state)
+      let node = { id: 0, span: tok.span }
+      let attach = { leading: [], trailing: [], dangling: [] }
+      let kind: Ast.PatternKind = Ast.Wildcard
+      let pat: Ast.Pattern = { node, kind, attach }
+      (pat, state1)
+    },
+    Lexer.LitName(name) => {
+      let state1 = dropToken(state)
+      let node = { id: 0, span: tok.span }
+      let attach = { leading: [], trailing: [], dangling: [] }
+      let nameNode = { node: { id: 0, span: tok.span }, text: name }
+      let kind: Ast.PatternKind = Ast.Var(nameNode)
+      let pat: Ast.Pattern = { node, kind, attach }
+      (pat, state1)
+    },
+    Lexer.ConstructorTok(name) => {
+      let state1 = dropToken(state)
+      if (kindIs(currentToken(state1).kind, Lexer.LParen)) {
+        let (_, state2) = expectSimple(Lexer.LParen, state1)
+        let mut args = []
+        let mut currentState = state2
+        if (!kindIs(currentToken(currentState).kind, Lexer.RParen)) {
+          let (arg, state_temp) = parsePattern(currentState)
+          args = [arg, ...args]
+          currentState = state_temp
+          while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+            let (_, state_temp2) = expectSimple(Lexer.Comma, currentState)
+            let (nextArg, state_temp3) = parsePattern(state_temp2)
+            args = [nextArg, ...args]
+            currentState = state_temp3
+          }
+        }
+        let (_, state3) = expectSimple(Lexer.RParen, currentState)
+        let node = { id: 0, span: tok.span }
+        let attach = { leading: [], trailing: [], dangling: [] }
+        let nameNode = { node: { id: 0, span: tok.span }, text: name }
+        let kind: Ast.PatternKind = Ast.Constructor(
+          nameNode,
+          List.reverse(args),
+        )
+        let pat: Ast.Pattern = { node, kind, attach }
+        (pat, state3)
+      } else {
+        let node = { id: 0, span: tok.span }
+        let attach = { leading: [], trailing: [], dangling: [] }
+        let nameNode = { node: { id: 0, span: tok.span }, text: name }
+        let kind: Ast.PatternKind = Ast.Constructor(nameNode, [])
+        let pat: Ast.Pattern = { node, kind, attach }
+        (pat, state1)
+      }
+    },
+    Lexer.LParen => {
+      let (_, state1) = expectSimple(Lexer.LParen, state)
+      let (innerPat, state2) = parsePattern(state1)
+      if (kindIs(currentToken(state2).kind, Lexer.Comma)) {
+        let mut pats = [innerPat]
+        let mut currentState = state2
+        while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+          let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
+          let (nextPat, state_next) = parsePattern(state_temp)
+          pats = [nextPat, ...pats]
+          currentState = state_next
+        }
+        let (_, state3) = expectSimple(Lexer.RParen, currentState)
+        let node = { id: 0, span: Source.makeSpan(0, 0, 0, 0) } // fix span
+        let attach = { leading: [], trailing: [], dangling: [] }
+        let kind: Ast.PatternKind = Ast.Tuple(List.reverse(pats))
+        let pat: Ast.Pattern = { node, kind, attach }
+        (pat, state3)
+      } else {
+        let (_, state3) = expectSimple(Lexer.RParen, state2)
+        (innerPat, state3)
+      }
+    },
+    _ => panic("expected pattern"),
+  }
+}
+and parseMatch = (state: ParseState) => {
+  let (id, state1) = freshId(state)
+  let (matchTok, state2) = expectKeyword("match", state)
+  let (scrutinee, state3) = parseExpr(state2)
+  let (_, state4) = expectSimple(Lexer.LBrace, state3)
+  let mut items: List<Ast.BundleItem> = []
+  let mut currentState = state4
+  while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
+    let (pat, state_temp) = parsePattern(currentState)
+    let (_, state_temp2) = expectSimple(Lexer.FatArrow, state_temp)
+    let (blockExpr, state_temp3) = parseBlock(state_temp2)
+    let block: Ast.Block = match (blockExpr.kind) {
+      Block(b) => b,
+      _ => panic("Expected block after =>"),
+    }
+    let caseKind: Ast.BundleItemKind = Ast.Case(pat, None, block)
+    let caseItem: Ast.BundleItem = {
+      node: { id: 0, span: Source.makeSpan(0, 0, 0, 0) },
+      kind: caseKind,
+      attach: { leading: [], trailing: [], dangling: [] },
+    }
+    items = [caseItem, ...items]
+    if (kindIs(currentToken(state_temp3).kind, Lexer.Comma)) {
+      let (_, state_temp4) = expectSimple(Lexer.Comma, state_temp3)
+      currentState = state_temp4
+    } else {
+      currentState = state_temp3
+    }
+  }
+  let (rbraceTok, state5) = expectSimple(Lexer.RBrace, currentState)
+  let bundleLit = {
+    node: { id, span: Source.makeSpan(0, 0, 0, 0) },
+    items: List.reverse(items),
+  }
+  let bundleKind: Ast.BundleExprKind = Ast.Literal(bundleLit)
+  let bundle: Ast.BundleExpr = {
+    node: { id, span: Source.makeSpan(0, 0, 0, 0) },
+    kind: bundleKind,
+    attach: { leading: [], trailing: [], dangling: [] },
+  }
+  let matchApply = {
+    node: { id, span: Source.makeSpan(0, 0, 0, 0) },
+    scrutinees: [scrutinee],
+    bundle,
+  }
+  let span = spanFromTokens(matchTok.span, rbraceTok.span)
+  let expr = makeExpr(id, span, MatchApply(matchApply))
+  (expr, state5)
 }
 
 provide let parse = (source: String) => {
