@@ -190,7 +190,7 @@ and parseBlock = (state: ParseState) => {
   let expr: Ast.Expr = makeExpr(
     id,
     span,
-    Ast.Block({ node: { id, span }, items: [], result: Some(inner) })
+    Block({ node: { id, span }, items: [], result: Some(inner) })
   )
   (expr, state4)
 }
@@ -201,17 +201,17 @@ and parsePrimary = (state: ParseState) => {
   match (tok.kind) {
     Lexer.LitNum(value) => {
       let state2 = dropToken(state1)
-      let expr: Ast.Expr = makeExpr(id, tok.span, Ast.Lit(Ast.Int(value)))
+      let expr: Ast.Expr = makeExpr(id, tok.span, Lit(Ast.Int(value)))
       (expr, state2)
     },
     Lexer.LitString(value) => {
       let state2 = dropToken(state1)
-      let expr: Ast.Expr = makeExpr(id, tok.span, Ast.Lit(Ast.Str(value)))
+      let expr: Ast.Expr = makeExpr(id, tok.span, Lit(Ast.Str(value)))
       (expr, state2)
     },
     Lexer.LitChar(value) => {
       let state2 = dropToken(state1)
-      let expr: Ast.Expr = makeExpr(id, tok.span, Ast.Lit(Ast.Char(value)))
+      let expr: Ast.Expr = makeExpr(id, tok.span, Lit(Ast.Char(value)))
       (expr, state2)
     },
     Lexer.LitName(name) => {
@@ -219,7 +219,7 @@ and parsePrimary = (state: ParseState) => {
       let expr: Ast.Expr = makeExpr(
         id,
         tok.span,
-        Ast.Ident({ node: { id, span: tok.span }, text: name })
+        Ident({ node: { id, span: tok.span }, text: name })
       )
       (expr, state2)
     },
@@ -228,7 +228,7 @@ and parsePrimary = (state: ParseState) => {
       if (kindIs(currentToken(state2).kind, Lexer.RParen)) {
         let (rparenTok, state3) = expectSimple(Lexer.RParen, state2)
         let span = spanFromTokens(tok.span, rparenTok.span)
-        let expr: Ast.Expr = makeExpr(id, span, Ast.Lit(Ast.Unit))
+        let expr: Ast.Expr = makeExpr(id, span, Lit(Ast.Unit))
         (expr, state3)
       } else {
         let (inner, state3) = parseExpr(state2)
@@ -243,16 +243,12 @@ and parsePrimary = (state: ParseState) => {
           }
           let (rparenTok, state4) = expectSimple(Lexer.RParen, currentState)
           let span = spanFromTokens(tok.span, rparenTok.span)
-          let expr: Ast.Expr = makeExpr(
-            id,
-            span,
-            Ast.Tuple(List.reverse(exprs))
-          )
+          let expr: Ast.Expr = makeExpr(id, span, Tuple(List.reverse(exprs)))
           (expr, state4)
         } else {
           let (rparenTok, state4) = expectSimple(Lexer.RParen, state3)
           let span = spanFromTokens(tok.span, rparenTok.span)
-          let expr: Ast.Expr = makeExpr(id, span, Ast.Paren(inner))
+          let expr: Ast.Expr = makeExpr(id, span, Paren(inner))
           (expr, state4)
         }
       }
@@ -262,7 +258,7 @@ and parsePrimary = (state: ParseState) => {
       let expr: Ast.Expr = makeExpr(
         id,
         tok.span,
-        Ast.Hole(
+        Hole(
           { node: { id, span: tok.span }, kind: ExprHole, origin: UserTyped },
         )
       )
@@ -305,7 +301,7 @@ and parsePrimary = (state: ParseState) => {
         },
       }
       let fieldItems = buildFieldItems(reversedFields, id + 1)
-      let expr: Ast.Expr = makeExpr(id, span, Ast.RecordLit(fieldItems))
+      let expr: Ast.Expr = makeExpr(id, span, RecordLit(fieldItems))
       (expr, state3)
     },
     _ => Panic.panic("Parse error: expected expression"),
@@ -349,6 +345,7 @@ let rec parseTopLevels = (state: ParseState) => {
           ([DeclGroup(exportedDg), ...rest], state2)
         },
         [] => panic("Expected something after export"),
+        [first, ...rest] => panic("Export can only be applied to declarations"),
       }
     },
     Lexer.LitName(name) when name == "type" => {
@@ -392,9 +389,9 @@ and parseBinding = (state: ParseState) => {
   let span = spanFromTokens(letTok.span, value.node.span)
   let binding: Ast.LetBinding = {
     node: { id, span },
-    name: Ast.Pattern{
+    name: {
       node: { id, span: litName.span },
-      kind: Ast.Pattern.Var({ node: { id, span: litName.span }, text: name }),
+      kind: Var({ node: { id, span: litName.span }, text: name }),
       attach: { leading: [], trailing: [], dangling: [] },
     },
     annotation: None,
@@ -402,7 +399,7 @@ and parseBinding = (state: ParseState) => {
   }
   (binding, state6)
 }
-and parseTypeDef: ParseState => TopItem = state => {
+and parseTypeDef: ParseState => (Ast.TopItem, ParseState) = state => {
   let (id, state1) = freshId(state)
   let (typeTok, state2) = expectKeyword("type", state1)
   let (name, _, state3) = expectConstructor(state2)
@@ -417,30 +414,30 @@ and parseTypeDef: ParseState => TopItem = state => {
     }
   }
   let (def, state5) = parseDef("", state4)
-  let topLevel = Ast.TopItem.DeclGroup(
+  let topLevel = DeclGroup(
     {
       node: { id, span: typeTok.span },
       exported: false,
-      kind: Ast.DeclGroupKind.TypeGroup(Ast.TypeGroupMods.Rec),
+      kind: TypeGroup(Rec),
       decls: [
-        Ast.Decl.TypeDecl(
+        TypeDecl(
           {
             node: { id, span: typeTok.span },
             name: { node: { id, span: typeTok.span }, text: name },
             infection: None,
             typeParams: [],
-            body: Ast.TypeDeclBody.Alias(
+            body: Alias(
               {
                 node: { id, span: typeTok.span },
-                kind: Ast.TypeExpr.Hole(
+                kind: Hole(
                   {
                     node: { id, span: typeTok.span },
-                    kind: Ast.HoleKind.TypeHole,
-                    origin: Ast.HoleOrigin.UserTyped,
+                    kind: TypeHole,
+                    origin: UserTyped,
                   },
                 ),
                 attach: { leading: [], trailing: [], dangling: [] },
-              },
+              }: TypeExpr,
             ),
           },
         ),
@@ -464,13 +461,13 @@ and parseRecordDef = (state: ParseState) => {
     }
   }
   let (def, state5) = parseDef("", state4)
-  let topLevel = Ast.TopItem.DeclGroup(
+  let topLevel = DeclGroup(
     {
       node: { id, span: recordTok.span },
       exported: false,
-      kind: Ast.DeclGroupKind.RecordGroup(Ast.RecordGroupMods.Rec),
+      kind: RecordGroup(Rec),
       decls: [
-        Ast.Decl.RecordDecl(
+        RecordDecl(
           {
             node: { id, span: recordTok.span },
             name: { node: { id, span: recordTok.span }, text: name },
@@ -491,3 +488,5 @@ provide let parse = (source: String) => {
   let program: Ast.Program = { items: topLevels, core: false }
   program
 }
+
+parse(testStr)
