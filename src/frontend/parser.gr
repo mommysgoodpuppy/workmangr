@@ -188,7 +188,33 @@ and parseTerm = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.LBrace => parseBlock(state),
-    _ => parsePrimary(state),
+    _ => {
+      let (expr, state1) = parsePrimary(state)
+      let tok2 = currentToken(state1)
+      match (tok2.kind) {
+        Lexer.Period => {
+          let (_, state2) = expectSimple(Lexer.Period, state1)
+          let (name, nameTok, state3) = expectName(state2)
+          let postfix = Postfix(
+            {
+              target: expr,
+              segments: [
+                Project(
+                  { node: { id: expr.node.id, span: nameTok.span }, text: name },
+                ),
+              ],
+            },
+          )
+          let newExpr = makeExpr(
+            expr.node.id,
+            spanFromTokens(expr.node.span, nameTok.span),
+            postfix
+          )
+          (newExpr, state3)
+        },
+        _ => (expr, state1),
+      }
+    },
   }
 }
 //must support inner code
@@ -498,7 +524,7 @@ and parseStatements = (state: ParseState) => {
         node: { id, span: binding.node.span },
         kind: Let(binding),
         attach: { leading: [], trailing: [], dangling: [] },
-      }:Stmt
+      }: Stmt
       let item = Stmt(stmt)
       let (restItems, result, state3) = parseStatements(state2)
       ([item, ...restItems], result, state3)
