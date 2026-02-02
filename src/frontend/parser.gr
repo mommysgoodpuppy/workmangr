@@ -167,6 +167,20 @@ let rec parseExpr = (state: ParseState) => {
       )
       (node, state3)
     },
+    Lexer.ColonGt => {
+      let (id, stateAfterId) = freshId(state1)
+      let (_, state2) = expectSimple(Lexer.ColonGt, stateAfterId)
+      let (rhs, state3) = parseExpr(state2)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
+          { first: expr, rest: [({ node: { id, span }, text: ":>" }, rhs)] },
+        )
+      )
+      (node, state3)
+    },
     _ => (expr, state1),
   }
 }
@@ -181,17 +195,10 @@ and parseTerm = (state: ParseState) => {
 and parseBlock = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (_, state2) = expectSimple(Lexer.LBrace, state1)
-  let (inner, state3): (Ast.Expr, ParseState) = parseExpr(state2)
-  let (rbraceTok, state4): (Lexer.Token, ParseState) = expectSimple(
-    Lexer.RBrace,
-    state3
-  )
+  let (items, result, state3) = parseStatements(state2)
+  let (rbraceTok, state4) = expectSimple(Lexer.RBrace, state3)
   let span = spanFromEnd(state4, rbraceTok)
-  let expr: Ast.Expr = makeExpr(
-    id,
-    span,
-    Block({ node: { id, span }, items: [], result: Some(inner) })
-  )
+  let expr = makeExpr(id, span, Block({ node: { id, span }, items, result }))
   (expr, state4)
 }
 and parsePrimary = (state: ParseState) => {
@@ -307,8 +314,7 @@ and parsePrimary = (state: ParseState) => {
     _ => Panic.panic("Parse error: expected expression"),
   }
 }
-
-let rec parseTopLevels = (state: ParseState) => {
+and parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
   //print(tok)
   match (tok.kind) {
@@ -479,6 +485,33 @@ and parseRecordDef = (state: ParseState) => {
     },
   )
   (topLevel, state5)
+}
+and parseStatements = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.RBrace => ([], None, state),
+    Lexer.SemiColon => parseStatements(dropToken(state)),
+    Lexer.LitName("let") => {
+      let (binding, state1) = parseBinding(state)
+      let (id, state2) = freshId(state1)
+      let stmt = {
+        node: { id, span: binding.node.span },
+        kind: Let(binding),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }:Stmt
+      let item = Stmt(stmt)
+      let (restItems, result, state3) = parseStatements(state2)
+      ([item, ...restItems], result, state3)
+    },
+    _ => {
+      let (expr, state1) = parseExpr(state)
+      let (restItems, result, state2) = parseStatements(state1)
+      if (result != None) {
+        panic("Multiple result expressions in block")
+      }
+      (restItems, Some(expr), state2)
+    },
+  }
 }
 
 provide let parse = (source: String) => {

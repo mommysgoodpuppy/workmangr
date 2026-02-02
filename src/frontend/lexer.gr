@@ -35,10 +35,12 @@ provide enum TokenKind {
   SemiColon, // ;
   Comma, // ,
   Colon, // :
+  PipeArrow, // :>
   Slash, // /
   DSlash, // //
   Arrow, // >
   Period, // .
+  DotBrace, // .{
   DPeriod, // ..
   //operators
   Eq, // =
@@ -59,7 +61,7 @@ provide record Token {
   mate: Option<Number>, //index
 }
 
-provide let tokenKindToString = (kind) => match (kind) {
+provide let tokenKindToString = kind => match (kind) {
   KwVar => "Var",
   KwAllErrors => "AllErrors",
   LitName(name) => name,
@@ -83,10 +85,12 @@ provide let tokenKindToString = (kind) => match (kind) {
   SemiColon => ";",
   Comma => ",",
   Colon => ":",
+  PipeArrow => ":>",
   Slash => "/",
   DSlash => "//",
   Arrow => ">",
   Period => ".",
+  DotBrace => ".{",
   DPeriod => "..",
   Eq => "=",
   EqEq => "==",
@@ -523,18 +527,36 @@ provide let lex = source => {
             pos = advancePosition(pos, ch)
           },
           ':' => {
-            tokens = [
-              makeToken(
-                Colon,
-                pos.line,
-                pos.col,
-                pos.index,
-                pos.index + 1,
-                None
-              ),
-              ...tokens
-            ]
-            pos = advancePosition(pos, ch)
+            match (peek(pos.index + 1)) {
+              Some('>') => {
+                tokens = [
+                  makeToken(
+                    PipeArrow,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '>')
+              },
+              _ => {
+                tokens = [
+                  makeToken(
+                    Colon,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
           },
           ',' => {
             tokens = [
@@ -631,6 +653,21 @@ provide let lex = source => {
           },
           '.' => {
             match (peek(pos.index + 1)) {
+              Some('{') => {
+                tokens = [
+                  makeToken(
+                    DotBrace,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
+                  ...tokens
+                ]
+                braceStack = [pos.index, ...braceStack]
+                pos = advancePosition(advancePosition(pos, ch), '{')
+              },
               Some('.') => {
                 tokens = [
                   makeToken(

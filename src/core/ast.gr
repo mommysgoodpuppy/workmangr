@@ -83,7 +83,8 @@ and provide enum ListItem {
   Spread(Expr),
 }
 and provide record Expr { 
-  node: Node, kind: ExprKind, 
+  node: Node, 
+  kind: ExprKind, 
   attach: Attachments
 }
 and provide record AssignStmt {
@@ -252,48 +253,48 @@ and provide record PrefixDecl {
   name: Name,
 }
 
-record ImportDecl {
+provide record rec ImportDecl  {
   node: Node,
   modulePath: String,
   alias: Option<Name>,
 }
-record ReexportDecl {
+and provide record ReexportDecl {
   node: Node,
   modulePath: String,
 }
 
-record rec DeclGroup {
+and provide record DeclGroup {
   node: Node,
   exported: Bool,
   kind: DeclGroupKind,
   decls: List<Decl>, // all share the group header modifiers
 }
-and enum DeclGroupKind {
+and provide enum DeclGroupKind {
   LetGroup(LetGroupMods),
   TypeGroup(TypeGroupMods),
   RecordGroup(RecordGroupMods),
   OpGroup,            // infix/prefix declarations
   RuleGroup(RuleKind),// infectious/domain/policy/op/annotate if you want
 }
-and type Rec = Bool
-and enum LetGroupMods {
+and provide type Rec = Bool
+and provide enum LetGroupMods {
   Rec,
   Mut
 }
-and enum TypeGroupMods {
+and provide enum TypeGroupMods {
   Rec,
 }
-and enum RecordGroupMods {
+and provide enum RecordGroupMods {
   Rec,
 }
-and enum RuleKind {
+and provide enum RuleKind {
   Domain,
   Policy,
   Op,
   Annotate,
 }
 
-enum TopItem {
+and provide enum TopItem {
   Directive(Directive),
   Import(ImportDecl),
   Reexport(ReexportDecl),
@@ -302,7 +303,7 @@ enum TopItem {
   Trivia(Trivia)
 }
 
-record Program {
+and provide record Program {
   items: List<TopItem>,
   core: Bool
 }
