@@ -99,7 +99,7 @@ language.
 Directives are lexically scoped annotations that precede declarations or appear
 as the first entries inside a block. Canonical v1 only specifies `@core;`.
 
-```
+```ebnf
 directive        := "@" identifier directive_args? ";"
 directive_args   := "(" directive_arg ("," directive_arg)* ")"
 directive_arg    := string_literal | number_literal | identifier
@@ -153,7 +153,7 @@ Notes:
 
 Top-level syntax:
 
-```
+```ebnf
 module          := top_level* EOF
 top_level       := directive* top_level_decl
 top_level_decl  := import_decl
@@ -178,7 +178,7 @@ following declaration group.
 
 ### Imports and re-exports
 
-```
+```ebnf
 import_decl     := "from" string_literal "import" import_clause ";"
 import_clause   := "{" import_spec ("," import_spec)* (","?) "}"
                 |  "*" "as" identifier
@@ -192,7 +192,7 @@ type_reexport   := constructor ("(" ".."? ")")?
 
 ### Value declarations
 
-```
+```ebnf
 value_decl      := export_modifier? "let" let_modifiers? let_binding
                     ("and" let_binding)* ";"
 let_modifiers   := ("rec" | "mut")*
@@ -219,7 +219,7 @@ Rules:
 
 ### Type declarations
 
-```
+```ebnf
 type_decl       := export_modifier? "type" "rec"? type_body
                     ("and" (type_body | record_body))* ";"
 type_body       := constructor type_params?
@@ -238,7 +238,7 @@ defines a sum type without requiring a leading `|`.
 
 ### Record declarations
 
-```
+```ebnf
 record_decl     := export_modifier? "record" "rec"? record_body
                     ("and" (record_body | type_body))* ";"
 record_body     := constructor type_params?
@@ -261,7 +261,7 @@ Field forms:
 Canonical Workman prefers Grain-style bindings, but current tooling still
 accepts explicit operator declarations for precedence registration:
 
-```
+```ebnf
 operator_decl   := infix_decl | prefix_decl
 infix_decl      := export_modifier? ("infix" | "infixl" | "infixr")
                     number_literal operator_token "=" identifier ";"
@@ -276,7 +276,7 @@ literal specifies precedence.
 These mirror existing surface forms and will be refined in the infection
 chapter.
 
-```
+```ebnf
 infectious_decl := export_modifier? "infectious" identifier infectious_body ";"
 infectious_body := "type" constructor type_params? "=" type_members
                 |  constructor type_params  -- legacy form
@@ -293,7 +293,7 @@ recognises their surface structure.
 
 ### Export modifiers
 
-```
+```ebnf
 export_modifier := "export"
 ```
 
@@ -303,7 +303,7 @@ When present, the modifier applies to the whole mutually-recursive group.
 
 ## Blocks and Statements
 
-```
+```ebnf
 block           := "{" directive* block_item* block_result? "}"
 block_item      := let_statement
                 |  pattern_let_statement
@@ -339,7 +339,7 @@ Rules:
 
 Top-level production:
 
-```
+```ebnf
 expr            := if_expr
                 |  match_expr
                 |  lambda_expr
@@ -356,7 +356,7 @@ left-to-right.
 
 ### Conditionals
 
-```
+```ebnf
 if_expr         := "if" "(" expr ")" block "else" block
 ```
 
@@ -364,7 +364,7 @@ if_expr         := "if" "(" expr ")" block "else" block
 
 ### Match expressions and bundles
 
-```
+```ebnf
 match_expr      := "match" match_scrutinee match_body
                 |  match_bundle_literal
                 |  "match" "(" expr ("," expr)* ")" "=>" block
@@ -390,14 +390,14 @@ guard_clause    := "when" expr
 
 ### Lambda expressions
 
-```
+```ebnf
 lambda_expr     := parameter_list "=>" block
                 |  "=>" block              -- zero-arg CoffeeScript form
 ```
 
 ### Binary expressions / postfix chain
 
-```
+```ebnf
 call_expr       := postfix_expr
 postfix_expr    := primary_expr postfix_segment*
 postfix_segment := call_suffix | projection_suffix | index_suffix
@@ -411,7 +411,7 @@ parses the greedy chain of calls, record projections, and index accesses.
 
 ### Primary expressions
 
-```
+```ebnf
 primary_expr    := literal
                 |  identifier
                 |  constructor_call
@@ -452,7 +452,7 @@ ambiguity with punning.
 
 ## Patterns
 
-```
+```ebnf
 pattern         := wildcard_pattern
                 |  identifier_pattern
                 |  literal_pattern
@@ -490,7 +490,7 @@ total, as specified in the pattern-matching chapter.
 
 ## Type Expressions
 
-```
+```ebnf
 type_expr       := type_arrow
 type_arrow      := type_primary ("=>" type_expr)?
 
@@ -524,7 +524,7 @@ the constructor token whose lexeme is exactly `Void`.
 
 ## Literals
 
-```
+```ebnf
 literal         := number_literal
                 |  bool_literal
                 |  char_literal
