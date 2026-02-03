@@ -28,8 +28,8 @@ provide record NodeStore {
   mut roots: List<Number>,
 }
 
-// Create empty store
-provide let empty: NodeStore = {
+// Create empty store (fresh instance)
+provide let empty = () => {
   nodes: Map.make(),
   roots: []
 }

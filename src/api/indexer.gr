@@ -249,7 +249,7 @@ let visitTopItem = (store: NS.NodeStore, item: Ast.TopItem) => {
 
 // Index an entire program
 provide let indexProgram = (program: Ast.Program) => {
-  let store = NS.empty
+  let store = NS.empty()
   
   // Visit all items and collect root binding IDs
   let store = List.reduce((s, item) => {
