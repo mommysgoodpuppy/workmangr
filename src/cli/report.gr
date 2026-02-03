@@ -31,36 +31,16 @@ let getLineText = (source: String, line: Number) => {
 }
 
 let summarizeNode = (source: String, node: Ast.Expr, analysis: Analysis.Analysis) => {
-  match (Map.get(node.id, analysis.infer.nodeTypes)) {
+  match (Map.get(node.node.id, analysis.infer.nodeTypes)) {
     None => None,
     Some(nodeType) => {
-      let pos = Source.offsetToLineCol(source, node.span.start)
-      let excerpt = Source.slice(source, node.span)
+      let pos = Source.offsetToLineCol(source, node.node.span.start)
+      let excerpt = Source.slice(source, node.node.span)
       let appliedType = Types.applySubstType(analysis.infer.subst, nodeType)
       let typeStr = Types.typeToString(appliedType)
       Some({
-        id: node.id,
-        span: node.span,
-        line: pos.line,
-        col: pos.col,
-        excerpt,
-        typeStr,
-      })
-    },
-  }
-}
-
-let summarizeBinding = (source: String, binding: Ast.Binding, analysis: Analysis.Analysis) => {
-  match (Map.get(binding.name, analysis.infer.topBindings)) {
-    None => None,
-    Some(scheme) => {
-      let pos = Source.offsetToLineCol(source, binding.nameSpan.start)
-      let excerpt = Source.slice(source, binding.nameSpan)
-      let appliedType = Types.applySubstType(analysis.infer.subst, scheme.ty)
-      let typeStr = Types.typeToString(appliedType)
-      Some({
-        id: binding.id,
-        span: binding.nameSpan,
+        id: node.node.id,
+        span: node.node.span,
         line: pos.line,
         col: pos.col,
         excerpt,
@@ -72,33 +52,55 @@ let summarizeBinding = (source: String, binding: Ast.Binding, analysis: Analysis
 
 let rec collectExprs = (expr: Ast.Expr) =>
   match (expr.kind) {
-    Ast.IntLit(_) => [expr],
+    Ast.Lit(_) => [expr],
     Ast.Ident(_) => [expr],
-    Ast.Unknown => [expr],
-    Ast.Block(inner) => [expr, ...collectExprs(inner)],
+    Ast.Hole(_) => [expr],
+    Ast.Block(block) => {
+      let resultExprs = match (block.result) {
+        [] => [],
+        [e, ..._] => collectExprs(e)
+      }
+      [expr, ...resultExprs]
+    },
     Ast.Lambda(_, body) => [expr, ...collectExprs(body)],
+    Ast.Paren(inner) => [expr, ...collectExprs(inner)],
+    _ => [expr]
   }
 
-let collectAllExprs = (program: Ast.Program) => {
-  let rec loop = (bindings: List<Ast.Binding>) =>
-    match (bindings) {
-      [] => [],
-      [binding, ...rest] => List.append(collectExprs(binding.value), loop(rest)),
-    }
-  loop(program.bindings)
-}
-
-let collectBindingSummaries = (source: String, program: Ast.Program, analysis: Analysis.Analysis) => {
-  let rec loop = (bindings: List<Ast.Binding>, acc: List<NodeSummary>) =>
-    match (bindings) {
-      [] => acc,
-      [binding, ...rest] =>
-        match (summarizeBinding(source, binding, analysis)) {
-          None => loop(rest, acc),
-          Some(summary) => loop(rest, [summary, ...acc]),
+let rec collectAllExprs = (items: List<Ast.TopItem>) => {
+  match (items) {
+    [] => [],
+    [item, ...rest] => {
+      let itemExprs = match (item) {
+        Ast.DeclGroup(dg) => {
+          let rec collectFromDecls = (decls: List<Ast.Decl>) => {
+            match (decls) {
+              [] => [],
+              [decl, ...restDecls] => {
+                let declExprs = match (decl) {
+                  Ast.LetDecl(ld) => {
+                    let rec collectFromBindings = (bindings: List<Ast.LetBinding>) => {
+                      match (bindings) {
+                        [] => [],
+                        [b, ...restBindings] => 
+                          List.append(collectExprs(b.value), collectFromBindings(restBindings))
+                      }
+                    }
+                    collectFromBindings(ld.bindings)
+                  },
+                  _ => []
+                }
+                List.append(declExprs, collectFromDecls(restDecls))
+              }
+            }
+          }
+          collectFromDecls(dg.decls)
         },
+        _ => []
+      }
+      List.append(itemExprs, collectAllExprs(rest))
     }
-  List.reverse(loop(program.bindings, []))
+  }
 }
 
 let groupByLine = (summaries: List<NodeSummary>) => {
@@ -178,16 +180,12 @@ let printTopBindings = (analysis: Analysis.Analysis) => {
   )
 }
 
-let report = (source: String, analysis: Analysis.Analysis) => {
-  let exprs = collectAllExprs(analysis.program)
+provide let report = (source: String, analysis: Analysis.Analysis) => {
+  let exprs = collectAllExprs(analysis.program.items)
   let maybeSummaries = List.map((expr) => summarizeNode(source, expr, analysis), exprs)
   let summaries = List.filterMap((x) => x, maybeSummaries)
 
-  let bindingSummaries = collectBindingSummaries(source, analysis.program, analysis)
-  let allSummaries = List.append(bindingSummaries, summaries)
-  let groups = groupByLine(allSummaries)
+  let groups = groupByLine(summaries)
   printLineSummaries(source, groups)
   printTopBindings(analysis)
 }
-
-provide { report }

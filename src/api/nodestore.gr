@@ -1,0 +1,157 @@
+module NodeStore
+
+from "map" include Map
+from "list" include List
+from "option" include Option
+from "string" include String
+from "../core/ast.gr" include Ast
+from "../core/source.gr" include Source
+
+// Edge from parent to child with field name
+provide record ChildEdge {
+  field: String,
+  id: Number,
+}
+
+// Universal node view for any AST node
+provide record NodeInfo {
+  id: Number,
+  kind: String,
+  span: Source.Span,
+  preview: Option<String>,
+  children: List<ChildEdge>,
+}
+
+// The indexed store
+provide record NodeStore {
+  nodes: Map.Map<Number, NodeInfo>,
+  mut roots: List<Number>,
+}
+
+// Create empty store
+provide let empty: NodeStore = {
+  nodes: Map.make(),
+  roots: []
+}
+
+// Add a node to the store
+provide let putNode = (store, info) => {
+  Map.set(info.id, info, store.nodes)
+  store
+}
+
+// Add a child edge from parent to child
+provide let addChild = (store, parentId, field, childId) => {
+  match (Map.get(parentId, store.nodes)) {
+    None => void,
+    Some(parent) => {
+      let edge = { field, id: childId }
+      // Append to end to maintain order
+      let newChildren = List.append(parent.children, [edge])
+      let updated = { id: parent.id, kind: parent.kind, span: parent.span, preview: parent.preview, children: newChildren }
+      Map.set(parentId, updated, store.nodes)
+    }
+  }
+  store
+}
+
+// Update node kind
+provide let updateKind = (store, id, kind) => {
+  match (Map.get(id, store.nodes)) {
+    None => void,
+    Some(info) => {
+      let updated = { id: info.id, kind, span: info.span, preview: info.preview, children: info.children }
+      Map.set(id, updated, store.nodes)
+    }
+  }
+  store
+}
+
+// Update node preview
+provide let updatePreview = (store, id, preview) => {
+  match (Map.get(id, store.nodes)) {
+    None => void,
+    Some(info) => {
+      let updated = { id: info.id, kind: info.kind, span: info.span, preview: Some(preview), children: info.children }
+      Map.set(id, updated, store.nodes)
+    }
+  }
+  store
+}
+
+// Add a root node
+provide let addRoot = (store, id) => {
+  store.roots = [id, ...store.roots]
+  store
+}
+
+// Get node by ID
+provide let getNode = (store, id) => {
+  Map.get(id, store.nodes)
+}
+
+// Get all roots
+provide let getRoots = (store) => {
+  store.roots
+}
+
+// JSON serialization helpers
+let escapeJson = (s: String) => {
+  // Basic JSON string escaping
+  let s = String.replaceAll("\\", "\\\\", s)
+  let s = String.replaceAll("\"", "\\\"", s)
+  let s = String.replaceAll("\n", "\\n", s)
+  let s = String.replaceAll("\r", "\\r", s)
+  let s = String.replaceAll("\t", "\\t", s)
+  s
+}
+
+let childEdgeToJson = (edge: ChildEdge) => {
+  "{\"field\":\"" ++ escapeJson(edge.field) ++ "\",\"id\":" ++ toString(edge.id) ++ "}"
+}
+
+let joinStrings = (sep: String, strs: List<String>) => {
+  match (strs) {
+    [] => "",
+    [first, ...rest] => {
+      List.reduce((acc, s) => acc ++ sep ++ s, first, rest)
+    }
+  }
+}
+
+provide let nodeInfoToJson = (info: NodeInfo) => {
+  let childrenJson = match (info.children) {
+    [] => "[]",
+    edges => {
+      let edgeJsons = List.map(childEdgeToJson, edges)
+      "[" ++ joinStrings(",", edgeJsons) ++ "]"
+    }
+  }
+  
+  let previewJson = match (info.preview) {
+    None => "null",
+    Some(p) => "\"" ++ escapeJson(p) ++ "\""
+  }
+  
+  "{\"id\":" ++ toString(info.id) ++
+  ",\"kind\":\"" ++ escapeJson(info.kind) ++ "\"" ++
+  ",\"span\":{\"start\":" ++ toString(info.span.start) ++ ",\"end\":" ++ toString(info.span.end) ++ "}" ++
+  ",\"preview\":" ++ previewJson ++
+  ",\"children\":" ++ childrenJson ++ "}"
+}
+
+// Serialize all nodes in the store to JSON with a nodes map
+provide let storeToJson = (store: NodeStore) => {
+  // Reverse roots so first code item appears first in tree
+  let reversedRoots = List.reverse(store.roots)
+  let rootsJson = "[" ++ joinStrings(",", List.map(toString, reversedRoots)) ++ "]"
+  
+  // Convert Map to list of (id, node) pairs and serialize
+  let nodePairs = Map.toList(store.nodes)
+  let nodeEntries = List.map(((id, node)) => {
+    "\"" ++ toString(id) ++ "\":" ++ nodeInfoToJson(node)
+  }, nodePairs)
+  let nodesJson = "{" ++ joinStrings(",", nodeEntries) ++ "}"
+  
+  "{\"roots\":" ++ rootsJson ++ ",\"nodes\":" ++ nodesJson ++ "}"
+}

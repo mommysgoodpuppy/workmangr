@@ -21,7 +21,7 @@ provide type Env = Map.Map<String, Scheme>
 let emptySubst = () => Map.make()
 let emptyEnv = () => Map.make()
 
-let rec typeToString = (t: Type) =>
+provide let rec typeToString = (t: Type) =>
   match (t) {
     TNumber => "Number",
     TVoid => "Void",
@@ -157,11 +157,10 @@ let instantiate = (scheme: Scheme, nextVarStart: Number) => {
 provide {
   emptySubst,
   emptyEnv,
-  typeToString,
-  containsVar,
   freeVars,
   applySubstType,
   applySubstEnv,
-  generalize,
   instantiate,
+  generalize,
+  containsVar,
 }

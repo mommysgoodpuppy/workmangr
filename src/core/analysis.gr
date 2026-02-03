@@ -10,17 +10,8 @@ provide record Analysis {
   infer: Infer.InferState,
 }
 
-let analyze = (source: String) => {
+provide let analyze = (source: String) => {
   let loweredProgram = Frontend.parseAndLower(source)
   let infer = Infer.inferProgram(loweredProgram)
   { program: loweredProgram, infer }
 }
-
-provide let testLambda = () => {
-  let source = "let id = (x) => {x};"
-  let result = analyze(source)
-  print("Analysis result:")
-  print(result)
-}
-
-testLambda()

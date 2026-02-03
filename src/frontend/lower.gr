@@ -5,6 +5,7 @@ use Ast.*
 from "list" include List
 from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
+from "../core/error.gr" include Error
 
 // Transform => infix expressions into lambdas
 let rec lowerExpr = (expr: Ast.Expr) => {
@@ -17,7 +18,7 @@ let rec lowerExpr = (expr: Ast.Expr) => {
         } when op.text == "=>" => {
           let bundle = match (body.kind) {
             Ast.Bundle(b) => b,
-            _ => panic("match => expects bundle"),
+            _ => Error.createError(Error.Lowering, body.node.span, "Match arrow expects bundle", [Error.Received("non-bundle expression"), Error.Note("match => must be followed by a bundle of cases")]),
           }
           let matchApply = Ast.MatchApply({ ...ma, bundle })
           { ...expr, kind: Ast.Lambda(None, { ...expr, kind: matchApply }) }
@@ -29,7 +30,7 @@ let rec lowerExpr = (expr: Ast.Expr) => {
           let loweredBody = lowerExpr(body)
           let lambda = match (pattern) {
             Some(p) => Ast.Lambda(Some(p), loweredBody),
-            None => panic("unsupported param"),
+            None => Error.createError(Error.Lowering, expr.node.span, "Unsupported parameter", [Error.Note("lambda parameter pattern not yet supported in lowering"), Error.Hint("this AST node type needs to be implemented")]),
           }
           { ...expr, kind: lambda }
         },
@@ -70,12 +71,30 @@ and extractParam = (param: Ast.Expr) => {
   match (param.kind) {
     Ast.Ident(name) =>
       Some({ node: param.node, kind: Var(name), attach: param.attach }),
-    Ast.Paren(inner) => match (inner.kind) {
-      Ast.Ident(name) =>
-        Some({ node: inner.node, kind: Var(name), attach: inner.attach }),
-      _ => None, // Complex parameter patterns not supported yet
+    Ast.Paren(inner) => extractParam(inner), // Recursively extract from parenthesized expression
+    Ast.Tuple(exprs) => {
+      // Convert tuple expression to tuple pattern
+      // Each element of the tuple should be convertible to a pattern
+      let rec convertAll = (es: List<Ast.Expr>) => {
+        match (es) {
+          [] => Some([]),
+          [h, ...t] => {
+            match (extractParam(h)) {
+              Some(pat) => match (convertAll(t)) {
+                Some(pats) => Some([pat, ...pats]),
+                None => None,
+              },
+              None => None,
+            }
+          },
+        }
+      }
+      match (convertAll(exprs)) {
+        Some(patterns) => Some({ node: param.node, kind: Tuple(patterns), attach: param.attach }),
+        None => None,
+      }
     },
-    _ => None, // Complex parameter patterns not supported yet
+    _ => None, // Other parameter patterns not supported yet
   }
 }
 let lowerBinding = (binding: Ast.LetBinding) => {

@@ -11,6 +11,7 @@ from "../util.gr" include Util
 use Util.{ testStr }
 
 from "../core/source.gr" include Source
+from "../core/error.gr" include Error
 
 provide enum TokenKind {
   //special keywords
@@ -265,7 +266,10 @@ provide let lex = source => {
                 )
                 loop(newPos, newAcc)
               },
-              None => panic("Unclosed escape sequence"),
+              None => {
+                let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, currentPos.index)
+                Error.createError(Error.Lexing, span, "Unclosed escape sequence in string", [Error.Note("check for matching quotes and valid escape sequences")])
+              },
             }
           } else {
             let charStr = String.slice(
@@ -278,7 +282,10 @@ provide let lex = source => {
             loop(newPos, newAcc)
           }
         },
-        None => panic("Unclosed string literal"),
+        None => {
+          let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, currentPos.index)
+          Error.createError(Error.Lexing, span, "Unclosed string literal", [Error.Expected("closing quote")])
+        },
       }
     }
     loop(startPosition, "")
@@ -289,7 +296,8 @@ provide let lex = source => {
     match (peek(startPosition.index)) {
       Some(ch) => {
         if (ch == '\'') {
-          panic("Empty char literal")
+          let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, startPosition.index + 1)
+          Error.createError(Error.Lexing, span, "Empty character literal", [Error.Note("character literals must contain exactly one character")])
         } else {
           let char = ch
           let afterChar = advancePosition(startPosition, ch)
@@ -300,11 +308,17 @@ provide let lex = source => {
                 position: advancePosition(afterChar, '\''),
               }
             },
-            _ => panic("Unclosed char literal"),
+            _ => {
+              let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, afterChar.index)
+              Error.createError(Error.Lexing, span, "Unclosed character literal", [Error.Expected("closing single quote")])
+            },
           }
         }
       },
-      None => panic("Unclosed char literal"),
+      None => {
+        let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, startPosition.index)
+        Error.createError(Error.Lexing, span, "Unclosed character literal", [Error.Expected("character and closing quote")])
+      },
     }
   }
 
@@ -339,7 +353,10 @@ provide let lex = source => {
         let res = readName(pos)
         let ident = match (res.value) {
           StringVal(s) => s,
-          _ => panic("WTF"),
+          _ => {
+            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
+            Error.createError(Error.Lexing, span, "Invalid identifier", [Error.Note("internal error: expected string value from name reader")])
+          },
         }
         let kind = tokenKindFromName(ident)
         tokens = [
@@ -362,7 +379,8 @@ provide let lex = source => {
             ident
           },
           _ => {
-            panic("WTF")
+            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
+            Error.createError(Error.Lexing, span, "Invalid constructor", [Error.Note("internal error: expected string value from constructor reader")])
           },
         }
         tokens = [
@@ -382,7 +400,10 @@ provide let lex = source => {
         let res = readString(advancePosition(pos, ch))
         let str = match (res.value) {
           StringVal(s) => s,
-          _ => panic("Unexpected value type"),
+          _ => {
+            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
+            Error.createError(Error.Lexing, span, "Invalid string literal", [Error.Note("internal error: expected string value from string reader")])
+          },
         }
         tokens = [
           makeToken(
@@ -401,7 +422,10 @@ provide let lex = source => {
         let res = readChar(advancePosition(pos, ch))
         let chr = match (res.value) {
           CharVal(c) => c,
-          _ => panic("Unexpected value type"),
+          _ => {
+            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
+            Error.createError(Error.Lexing, span, "Invalid character literal", [Error.Note("internal error: expected character value from char reader")])
+          },
         }
         tokens = [
           makeToken(
@@ -435,15 +459,22 @@ provide let lex = source => {
           },
           ')' => {
             if (List.isEmpty(parenStack)) {
-              panic("Unmatched )")
+              let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+              Error.createError(Error.Lexing, span, "Unmatched closing parenthesis", [Error.Received(")"), Error.Note("no matching opening parenthesis found")])
             }
             let mateIndex = match (List.head(parenStack)) {
               Some(idx) => idx,
-              None => panic("Should not happen"),
+              None => {
+                let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+                Error.createError(Error.Lexing, span, "Internal error", [Error.Note("empty paren stack after check")])
+              },
             }
             parenStack = match (List.tail(parenStack)) {
               Some(tail) => tail,
-              None => panic("Should not happen"),
+              None => {
+                let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+                Error.createError(Error.Lexing, span, "Internal error", [Error.Note("cannot get tail of paren stack")])
+              },
             }
             tokens = [
               makeToken(
@@ -475,15 +506,22 @@ provide let lex = source => {
           },
           '}' => {
             if (List.isEmpty(braceStack)) {
-              panic("Unmatched }")
+              let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+              Error.createError(Error.Lexing, span, "Unmatched closing brace", [Error.Received("}"), Error.Note("no matching opening brace found")])
             }
             let mateIndex = match (List.head(braceStack)) {
               Some(idx) => idx,
-              None => panic("Should not happen"),
+              None => {
+                let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+                Error.createError(Error.Lexing, span, "Internal error", [Error.Note("empty brace stack after check")])
+              },
             }
             braceStack = match (List.tail(braceStack)) {
               Some(tail) => tail,
-              None => panic("Should not happen"),
+              None => {
+                let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+                Error.createError(Error.Lexing, span, "Internal error", [Error.Note("cannot get tail of brace stack")])
+              },
             }
             tokens = [
               makeToken(
@@ -809,18 +847,33 @@ provide let lex = source => {
             }
           },
           _ => {
-            let msg = "unknown tok: \"" ++ Char.toString(ch) ++ "\""
-            panic(msg)
+            let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
+            Error.createError(
+              Error.Lexing,
+              span,
+              "Unknown token",
+              [Error.Received(Char.toString(ch)), Error.Hint("check for invalid characters or syntax errors")]
+            )
           },
         }
       },
     }
   }
   if (!List.isEmpty(parenStack)) {
-    panic("Unmatched (")
+    let lastIdx = match (List.head(parenStack)) {
+      Some(idx) => idx,
+      None => 0,
+    }
+    let span = Source.makeSpan(1, 1, lastIdx, lastIdx + 1)
+    Error.createError(Error.Lexing, span, "Unclosed opening parenthesis", [Error.Expected("closing parenthesis")])
   }
   if (!List.isEmpty(braceStack)) {
-    panic("Unmatched {")
+    let lastIdx = match (List.head(braceStack)) {
+      Some(idx) => idx,
+      None => 0,
+    }
+    let span = Source.makeSpan(1, 1, lastIdx, lastIdx + 1)
+    Error.createError(Error.Lexing, span, "Unclosed opening brace", [Error.Expected("closing brace")])
   }
   tokens = [
     makeToken(EOF, pos.line, pos.col, pos.index, pos.index, None),

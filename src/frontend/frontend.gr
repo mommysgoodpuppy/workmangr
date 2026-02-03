@@ -2,8 +2,12 @@ module Frontend
 
 from "./parser.gr" include Parser
 from "./lower.gr" include Lower
+from "../util.gr" include Util
+use Util.{ testStr }
 
 provide let parseAndLower = (source: String) => {
   let parsed = Parser.parse(source)
   Lower.lowerProgram(parsed)
 }
+
+parseAndLower(testStr)

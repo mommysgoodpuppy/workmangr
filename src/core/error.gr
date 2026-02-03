@@ -1,0 +1,87 @@
+module Error
+
+from "list" include List
+from "string" include String
+from "runtime/unsafe/panic" include Panic
+from "../core/source.gr" include Source
+
+use Panic.{ panic }
+
+// Compilation stage where error occurred
+provide enum Stage {
+  Lexing,
+  Parsing,
+  Lowering,
+  TypeInference,
+}
+
+// Error clues provide context about what went wrong
+provide enum ErrorClue {
+  Expected(String),
+  Received(String),
+  Incomplete(String),
+  Note(String),
+  Hint(String),
+}
+
+// Compiler error with location and context
+provide record CompilerError {
+  stage: Stage,
+  message: String,
+  span: Source.Span,
+  clues: List<ErrorClue>,
+}
+
+let clueToString = (clue: ErrorClue) => {
+  match (clue) {
+    Expected(s) => "  expected: " ++ s,
+    Received(s) => "  received: " ++ s,
+    Incomplete(s) => "  incomplete: " ++ s,
+    Note(s) => "  note: " ++ s,
+    Hint(s) => "  hint: " ++ s,
+  }
+}
+
+let joinStrings = (sep: String, strings: List<String>) => {
+  let rec loop = (acc: String, remaining: List<String>) => {
+    match (remaining) {
+      [] => acc,
+      [h] => acc ++ h,
+      [h, ...t] => loop(acc ++ h ++ sep, t),
+    }
+  }
+  match (strings) {
+    [] => "",
+    [h, ...t] => loop(h, t),
+  }
+}
+
+let stageToString = (stage: Stage) => {
+  match (stage) {
+    Lexing => "Lexing",
+    Parsing => "Parsing",
+    Lowering => "Lowering",
+    TypeInference => "Type Inference",
+  }
+}
+
+provide let errorToString = (error: CompilerError) => {
+  let cluesStr = match (error.clues) {
+    [] => "",
+    clues => {
+      "\n" ++ joinStrings("\n", List.map(clueToString, clues))
+    },
+  }
+  
+  let location = "at line " ++ toString(error.span.line) ++ 
+                 ", col " ++ toString(error.span.col)
+  
+  let stageInfo = "[" ++ stageToString(error.stage) ++ "] "
+  
+  stageInfo ++ error.message ++ " " ++ location ++ cluesStr
+}
+
+provide let createError = (stage: Stage, span: Source.Span, message: String, clues: List<ErrorClue>) => {
+  let error: CompilerError = { stage, message, span, clues }
+  panic(errorToString(error))
+}

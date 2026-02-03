@@ -9,6 +9,7 @@ from "../core/ast.gr" include Ast
 use Ast.*
 from "./lexer.gr" include Lexer
 from "../core/source.gr" include Source
+from "../core/error.gr" include Error
 
 from "../util.gr" include Util
 use Util.{ testStr }
@@ -41,9 +42,6 @@ let currentToken = (state: ParseState) => match (state.tokens) {
 
 // drop 1 token from the list
 let dropToken = (state: ParseState) => {
-  let tok = currentToken(state)
-  //print(tok)
-  print("Processed token: " ++ Lexer.tokenKindToString(tok.kind))
   match (state.tokens) {
     [_head, ...tail] => { ...state, tokens: tail },
     [] => { ...state, tokens: [] },
@@ -75,10 +73,12 @@ let expectSimple = (expected, state: ParseState) => {
   if (kindIs(tok.kind, expected)) {
     (tok, dropToken(state))
   } else {
-    print("expected: " ++ Lexer.tokenKindToString(expected))
-    let str = "Parse error: unexpected token "
-      ++ Lexer.tokenKindToString(tok.kind)
-    Panic.panic(str)
+    Error.createError(
+      Error.Parsing,
+      tok.span,
+      "Unexpected token",
+      [Error.Expected(Lexer.tokenKindToString(expected)), Error.Received(Lexer.tokenKindToString(tok.kind))]
+    )
   }
 }
 
@@ -88,10 +88,11 @@ let expectName = (state: ParseState) => {
   match (tok.kind) {
     Lexer.LitName(name) => (name, tok, dropToken(state)),
     _ => {
-      print(tok.kind)
-      Panic.panic(
-        "Parse error: expected identifier, tok: "
-          ++ Lexer.tokenKindToString(tok.kind)
+      Error.createError(
+        Error.Parsing,
+        tok.span,
+        "Expected identifier",
+        [Error.Received(Lexer.tokenKindToString(tok.kind))]
       )
     },
   }
@@ -103,10 +104,11 @@ let expectConstructor = (state: ParseState) => {
   match (tok.kind) {
     Lexer.ConstructorTok(name) => (name, tok, dropToken(state)),
     _ => {
-      print(tok.kind)
-      Panic.panic(
-        "Parse error: expected identifier, tok: "
-          ++ Lexer.tokenKindToString(tok.kind)
+      Error.createError(
+        Error.Parsing,
+        tok.span,
+        "Expected constructor",
+        [Error.Received(Lexer.tokenKindToString(tok.kind))]
       )
     },
   }
@@ -118,8 +120,12 @@ let expectKeyword = (keyword: String, state: ParseState) => {
   match (tok.kind) {
     Lexer.LitName(name) when name == keyword => (tok, dropToken(state)),
     _ => {
-      print(tok.kind)
-      Panic.panic("Parse error: expected keyword")
+      Error.createError(
+        Error.Parsing,
+        tok.span,
+        "Expected keyword",
+        [Error.Expected(keyword), Error.Received(Lexer.tokenKindToString(tok.kind))]
+      )
     },
   }
 }
@@ -129,7 +135,7 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
   match (tok.mate) {
     Some(mateIndex) => {
       let rec find = (ts: List<Lexer.Token>) => match (ts) {
-        [] => panic("Mate not found"),
+        [] => Error.createError(Error.Parsing, tok.span, "Internal error", [Error.Note("matching delimiter not found")]),
         [h, ...t] => if (h.span.start == mateIndex) {
           h
         } else {
@@ -138,7 +144,7 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
       }
       find(state.allTokens)
     },
-    None => panic("No mate"),
+    None => Error.createError(Error.Parsing, tok.span, "Internal error", [Error.Note("token has no mate")]),
   }
 }
 
@@ -157,28 +163,32 @@ let rec parseExpr: Parser<Ast.Expr> = state => {
   match (currentToken(state1).kind) {
     Lexer.FatArrow => {
       let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.FatArrow, stateAfterId)
-      let (rhs, state3): (Ast.Expr, ParseState) = parseExpr(state2)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3): (Ast.Expr, ParseState) = parseExpr(state2b)
       let span = spanFromTokens(expr.node.span, rhs.node.span)
       let node: Ast.Expr = makeExpr(
         id,
         span,
         InfixChain(
-          { first: expr, rest: [({ node: { id, span }, text: "=>" }, rhs)] },
+          { first: expr, rest: [({ node: { id: opId, span: opTok.span }, text: "=>" }, rhs)] },
         )
       )
       (node, state3)
     },
     Lexer.PipeArrow => {
       let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.PipeArrow, stateAfterId)
-      let (rhs, state3) = parseExpr(state2)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3) = parseExpr(state2b)
       let span = spanFromTokens(expr.node.span, rhs.node.span)
       let node = makeExpr(
         id,
         span,
         InfixChain(
-          { first: expr, rest: [({ node: { id, span }, text: ":>" }, rhs)] },
+          { first: expr, rest: [({ node: { id: opId, span: opTok.span }, text: ":>" }, rhs)] },
         )
       )
       (node, state3)
@@ -191,56 +201,48 @@ and parseInfix: Parser<Ast.Expr> = state => {
   match (currentToken(state1).kind) {
     Lexer.Plus => {
       let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.Plus, stateAfterId)
-      let (rhs, state3) = parseInfix(state2)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3) = parseInfix(state2b)
       let span = spanFromTokens(expr.node.span, rhs.node.span)
       let node = makeExpr(
         id,
         span,
         InfixChain(
-          { first: expr, rest: [({ node: { id, span }, text: "+" }, rhs)] },
+          { first: expr, rest: [({ node: { id: opId, span: opTok.span }, text: "+" }, rhs)] },
         )
       )
       (node, state3)
     },
     Lexer.Dash => {
       let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.Dash, stateAfterId)
-      let (rhs, state3) = parseInfix(state2)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3) = parseInfix(state2b)
       let span = spanFromTokens(expr.node.span, rhs.node.span)
       let node = makeExpr(
         id,
         span,
         InfixChain(
-          { first: expr, rest: [({ node: { id, span }, text: "-" }, rhs)] },
+          { first: expr, rest: [({ node: { id: opId, span: opTok.span }, text: "-" }, rhs)] },
         )
       )
       (node, state3)
     },
     Lexer.Arrow => {
       let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.Arrow, stateAfterId)
-      let (rhs, state3) = parseInfix(state2)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3) = parseInfix(state2b)
       let span = spanFromTokens(expr.node.span, rhs.node.span)
       let node = makeExpr(
         id,
         span,
         InfixChain(
-          { first: expr, rest: [({ node: { id, span }, text: "->" }, rhs)] },
-        )
-      )
-      (node, state3)
-    },
-    Lexer.Arrow => {
-      let (id, stateAfterId) = freshId(state1)
-      let (_, state2) = expectSimple(Lexer.Arrow, stateAfterId)
-      let (rhs, state3) = parseInfix(state2)
-      let span = spanFromTokens(expr.node.span, rhs.node.span)
-      let node = makeExpr(
-        id,
-        span,
-        InfixChain(
-          { first: expr, rest: [({ node: { id, span }, text: ">" }, rhs)] },
+          { first: expr, rest: [({ node: { id: opId, span: opTok.span }, text: "->" }, rhs)] },
         )
       )
       (node, state3)
@@ -342,12 +344,13 @@ and parsePrimary: Parser<Ast.Expr> = state => {
         parseIf(state1)
       } else {
         let state2 = dropToken(state1)
+        let (nameId, state3) = freshId(state2)
         let expr: Ast.Expr = makeExpr(
           id,
           tok.span,
-          Ident({ node: { id, span: tok.span }, text: name })
+          Ident({ node: { id: nameId, span: tok.span }, text: name })
         )
-        (expr, state2)
+        (expr, state3)
       }
     },
     Lexer.ConstructorTok(name) => {
@@ -519,10 +522,11 @@ and parsePrimary: Parser<Ast.Expr> = state => {
       (expr, state3)
     },
     _ => {
-      print(tok.kind)
-      Panic.panic(
-        "Parse error: expected expression, tok: "
-          ++ Lexer.tokenKindToString(tok.kind)
+      Error.createError(
+        Error.Parsing,
+        tok.span,
+        "Expected expression",
+        [Error.Received(Lexer.tokenKindToString(tok.kind))]
       )
     },
   }
@@ -565,15 +569,20 @@ and parseTopLevels = (state: ParseState) => {
       ([group, ...rest], state2)
     },
     Lexer.LitName(name) when name == "export" => {
+      let exportTok = tok
       let state1 = dropToken(state)
-      let (inner, state2) = parseTopLevels(state1)
+      let (exportId, state1b) = freshId(state1)
+      let (inner, state2) = parseTopLevels(state1b)
       match (inner) {
         [DeclGroup(dg), ...rest] => {
+          // Create Export node for the export keyword
+          let exportNode = Export({ node: { id: exportId, span: exportTok.span } })
+          // Mark DeclGroup as exported
           let exportedDg = { ...dg, exported: true }
-          ([DeclGroup(exportedDg), ...rest], state2)
+          ([exportNode, DeclGroup(exportedDg), ...rest], state2)
         },
-        [] => panic("Expected something after export"),
-        [first, ...rest] => panic("Export can only be applied to declarations"),
+        [] => Error.createError(Error.Parsing, tok.span, "Expected declaration after export", [Error.Note("export must be followed by a declaration")]),
+        [first, ...rest] => Error.createError(Error.Parsing, tok.span, "Invalid export", [Error.Note("export can only be applied to declarations")]),
       }
     },
     Lexer.LitName(name) when name == "type" => {
@@ -587,12 +596,15 @@ and parseTopLevels = (state: ParseState) => {
       ([typeDef, ...rest], state2)
     },
     _ =>
-      panic(
-        "Unknown top-level construct: " ++ Lexer.tokenKindToString(tok.kind)
+      Error.createError(
+        Error.Parsing,
+        tok.span,
+        "Unknown top-level construct",
+        [Error.Received(Lexer.tokenKindToString(tok.kind)), Error.Hint("expected type, let, or export")]
       ),
   }
 }
-and parseBinding = (state: ParseState) => {
+and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
   let (id, state1) = freshId(state)
   let (pattern, state2) = parsePattern(state1)
   //Optionally parse type annotation after ':'
@@ -613,7 +625,11 @@ and parseBinding = (state: ParseState) => {
   }
   let (_, state4) = expectSimple(Lexer.Eq, state3)
   let (value, state5): (Ast.Expr, ParseState) = parseExpr(state4)
-  let span = spanFromTokens(pattern.node.span, value.node.span)
+  // Use startSpan if provided (for 'let' keyword), otherwise start from pattern
+  let span = match (startSpanOpt) {
+    Some(startSpan) => spanFromTokens(startSpan, value.node.span),
+    None => spanFromTokens(pattern.node.span, value.node.span)
+  }
   let binding: Ast.LetBinding = {
     node: { id, span },
     name: pattern,
@@ -638,19 +654,19 @@ and parseLetGroup: ParseState => (Ast.TopItem, ParseState) = state => {
   let (id, state1) = freshId(state)
   let (letTok, state2) = expectKeyword("let", state1)
   let (mods, state3) = parseLetMods(state2)
-  let (firstBinding, state4) = parseBinding(state3)
+  let (firstBinding, state4) = parseBinding(state3, Some(letTok.span))
   let mut bindings = [firstBinding]
   let mut currentState = state4
   while (kindIs(currentToken(currentState).kind, Lexer.LitName("and"))) {
-    let (_, state_temp) = expectKeyword("and", currentState)
-    let (binding, state_temp2) = parseBinding(state_temp)
+    let (andTok, state_temp) = expectKeyword("and", currentState)
+    let (binding, state_temp2) = parseBinding(state_temp, Some(andTok.span))
     bindings = [binding, ...bindings]
     currentState = state_temp2
   }
   let reversedBindings = List.reverse(bindings)
   let lastBinding = match (List.head(reversedBindings)) {
     Some(b) => b,
-    None => panic("Bindings list should not be empty"),
+    None => Error.createError(Error.Parsing, letTok.span, "Internal error", [Error.Note("bindings list should not be empty")]),
   }
   let span = spanFromTokens(letTok.span, lastBinding.node.span)
   let topLevel = DeclGroup(
@@ -666,36 +682,42 @@ and parseLetGroup: ParseState => (Ast.TopItem, ParseState) = state => {
 and parseTypeDef: ParseState => (Ast.TopItem, ParseState) = state => {
   let (id, state1) = freshId(state)
   let (typeTok, state2) = expectKeyword("type", state1)
-  let (name, _, state3) = expectConstructor(state2)
+  let (name, nameTok, state3) = expectConstructor(state2)
   let (_, state4) = expectSimple(Lexer.Eq, state3)
   // Simple: parse until ;
-  let rec parseDef = (accumulator, state) => {
+  let rec parseDef = (accumulator, lastSpan, state) => {
     let tok = currentToken(state)
     match (tok.kind) {
-      Lexer.SemiColon => (accumulator, dropToken(state)),
-      Lexer.EOF => (accumulator, state),
-      _ => parseDef(accumulator ++ " " ++ toString(tok.kind), dropToken(state)), // approximate
+      Lexer.SemiColon => (accumulator, lastSpan, dropToken(state)),
+      Lexer.EOF => (accumulator, lastSpan, state),
+      _ => {
+        let nextState = dropToken(state)
+        parseDef(accumulator ++ " " ++ toString(tok.kind), tok.span, nextState)
+      }
     }
   }
-  let (def, state5) = parseDef("", state4)
+  let (def, endSpan, state5) = parseDef("", nameTok.span, state4)
+  let fullSpan = spanFromTokens(typeTok.span, endSpan)
+  let (typeDeclId, state6) = freshId(state5)
+  let (nameId, state7) = freshId(state6)
   let topLevel = DeclGroup(
     {
-      node: { id, span: typeTok.span },
+      node: { id, span: fullSpan },
       exported: false,
       kind: TypeGroup(Rec),
       decls: [
         TypeDecl(
           {
-            node: { id, span: typeTok.span },
-            name: { node: { id, span: typeTok.span }, text: name },
+            node: { id: typeDeclId, span: fullSpan },
+            name: { node: { id: nameId, span: nameTok.span }, text: name },
             infection: None,
             typeParams: [],
             body: Alias(
               {
-                node: { id, span: typeTok.span },
+                node: { id, span: fullSpan },
                 kind: Hole(
                   {
-                    node: { id, span: typeTok.span },
+                    node: { id, span: fullSpan },
                     kind: TypeHole,
                     origin: UserTyped,
                   },
@@ -708,33 +730,39 @@ and parseTypeDef: ParseState => (Ast.TopItem, ParseState) = state => {
       ],
     },
   )
-  (topLevel, state5)
+  (topLevel, state7)
 }
 and parseRecordDef = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (recordTok, state2) = expectKeyword("record", state1) // Expect "record" keyword
-  let (name, _, state3) = expectConstructor(state2) // Expect the record name (e.g., MyRecord)
+  let (name, nameTok, state3) = expectConstructor(state2) // Expect the record name (e.g., MyRecord)
   let (_, state4) = expectSimple(Lexer.Eq, state3) // Expect =
   // Simple: parse until ; (same as type for now; customize if record syntax differs)
-  let rec parseDef = (accumulator, state) => {
+  let rec parseDef = (accumulator, lastSpan, state) => {
     let tok = currentToken(state)
     match (tok.kind) {
-      Lexer.SemiColon => (accumulator, dropToken(state)),
-      Lexer.EOF => (accumulator, state),
-      _ => parseDef(accumulator ++ " " ++ toString(tok.kind), dropToken(state)), // approximate
+      Lexer.SemiColon => (accumulator, lastSpan, dropToken(state)),
+      Lexer.EOF => (accumulator, lastSpan, state),
+      _ => {
+        let nextState = dropToken(state)
+        parseDef(accumulator ++ " " ++ toString(tok.kind), tok.span, nextState)
+      }
     }
   }
-  let (def, state5) = parseDef("", state4)
+  let (def, endSpan, state5) = parseDef("", nameTok.span, state4)
+  let fullSpan = spanFromTokens(recordTok.span, endSpan)
+  let (recordDeclId, state6) = freshId(state5)
+  let (nameId, state7) = freshId(state6)
   let topLevel = DeclGroup(
     {
-      node: { id, span: recordTok.span },
+      node: { id, span: fullSpan },
       exported: false,
       kind: RecordGroup(Rec),
       decls: [
         RecordDecl(
           {
-            node: { id, span: recordTok.span },
-            name: { node: { id, span: recordTok.span }, text: name },
+            node: { id: recordDeclId, span: fullSpan },
+            name: { node: { id: nameId, span: nameTok.span }, text: name },
             typeParams: [],
             fields: [],
           },
@@ -742,7 +770,7 @@ and parseRecordDef = (state: ParseState) => {
       ],
     },
   )
-  (topLevel, state5)
+  (topLevel, state7)
 }
 and parseStatements = (state: ParseState) => {
   let tok = currentToken(state)
@@ -750,8 +778,8 @@ and parseStatements = (state: ParseState) => {
     Lexer.RBrace => ([], [], state),
     Lexer.SemiColon => parseStatements(dropToken(state)),
     Lexer.LitName("let") => {
-      let (_, state_temp) = expectKeyword("let", state)
-      let (binding, state1) = parseBinding(state_temp)
+      let (letTok, state_temp) = expectKeyword("let", state)
+      let (binding, state1) = parseBinding(state_temp, Some(letTok.span))
       let (id, state2) = freshId(state1)
       let stmt = {
         node: { id, span: binding.node.span },
@@ -774,20 +802,23 @@ and parsePattern: Parser<Ast.Pattern> = state => {
   match (tok.kind) {
     Lexer.LitName("_") => {
       let state1 = dropToken(state)
-      let node = { id: 0, span: tok.span }
+      let (id, state2) = freshId(state1)
+      let node = { id, span: tok.span }
       let attach = { leading: [], trailing: [], dangling: [] }
       let kind: Ast.PatternKind = Ast.Wildcard
       let pat: Ast.Pattern = { node, kind, attach }
-      (pat, state1)
+      (pat, state2)
     },
     Lexer.LitName(name) => {
       let state1 = dropToken(state)
-      let node = { id: 0, span: tok.span }
+      let (patId, state2) = freshId(state1)
+      let (nameId, state3) = freshId(state2)
+      let node = { id: patId, span: tok.span }
       let attach = { leading: [], trailing: [], dangling: [] }
-      let nameNode = { node: { id: 0, span: tok.span }, text: name }
+      let nameNode = { node: { id: nameId, span: tok.span }, text: name }
       let kind: Ast.PatternKind = Ast.Var(nameNode)
       let pat: Ast.Pattern = { node, kind, attach }
-      (pat, state1)
+      (pat, state3)
     },
     Lexer.ConstructorTok(name) => {
       let state1 = dropToken(state)
@@ -807,22 +838,26 @@ and parsePattern: Parser<Ast.Pattern> = state => {
           }
         }
         let (_, state3) = expectSimple(Lexer.RParen, currentState)
-        let node = { id: 0, span: tok.span }
+        let (patId, state4) = freshId(state3)
+        let (nameId, state5) = freshId(state4)
+        let node = { id: patId, span: tok.span }
         let attach = { leading: [], trailing: [], dangling: [] }
-        let nameNode = { node: { id: 0, span: tok.span }, text: name }
+        let nameNode = { node: { id: nameId, span: tok.span }, text: name }
         let kind: Ast.PatternKind = Ast.Constructor(
           nameNode,
           List.reverse(args),
         )
         let pat: Ast.Pattern = { node, kind, attach }
-        (pat, state3)
+        (pat, state5)
       } else {
-        let node = { id: 0, span: tok.span }
+        let (patId, state2) = freshId(state1)
+        let (nameId, state3) = freshId(state2)
+        let node = { id: patId, span: tok.span }
         let attach = { leading: [], trailing: [], dangling: [] }
-        let nameNode = { node: { id: 0, span: tok.span }, text: name }
+        let nameNode = { node: { id: nameId, span: tok.span }, text: name }
         let kind: Ast.PatternKind = Ast.Constructor(nameNode, [])
         let pat: Ast.Pattern = { node, kind, attach }
-        (pat, state1)
+        (pat, state3)
       }
     },
     Lexer.LParen => {
@@ -838,17 +873,18 @@ and parsePattern: Parser<Ast.Pattern> = state => {
           currentState = state_next
         }
         let (_, state3) = expectSimple(Lexer.RParen, currentState)
-        let node = { id: 0, span: Source.makeSpan(0, 0, 0, 0) } // fix span
+        let (id, state4) = freshId(state3)
+        let node = { id, span: Source.makeSpan(0, 0, 0, 0) } // fix span
         let attach = { leading: [], trailing: [], dangling: [] }
         let kind: Ast.PatternKind = Ast.Tuple(List.reverse(pats))
         let pat: Ast.Pattern = { node, kind, attach }
-        (pat, state3)
+        (pat, state4)
       } else {
         let (_, state3) = expectSimple(Lexer.RParen, state2)
         (innerPat, state3)
       }
     },
-    _ => panic("expected pattern"),
+    _ => Error.createError(Error.Parsing, tok.span, "Expected pattern", [Error.Received(Lexer.tokenKindToString(tok.kind))]),
   }
 }
 and parseMatch = (state: ParseState) => {
@@ -864,7 +900,7 @@ and parseMatch = (state: ParseState) => {
     let (blockExpr, state_temp3) = parseBlock(state_temp2)
     let block: Ast.Block = match (blockExpr.kind) {
       Block(b) => b,
-      _ => panic("Expected block after =>"),
+      _ => Error.createError(Error.Parsing, blockExpr.node.span, "Expected block after =>", [Error.Received("non-block expression")]),
     }
     let caseKind: Ast.BundleItemKind = Ast.Case(pat, None, block)
     let caseItem: Ast.BundleItem = {
@@ -908,5 +944,3 @@ provide let parse = (source: String) => {
   let program: Ast.Program = { items: topLevels, core: false }
   program
 }
-
-parse(testStr)

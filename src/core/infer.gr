@@ -98,33 +98,44 @@ let withBinding = (
 
 let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
   match (expr.kind) {
-    Ast.IntLit(_value) => {
-      let t = recordNodeType(expr.id, Types.TNumber, state)
+    Ast.Lit(Ast.Int(_value)) => {
+      let t = recordNodeType(expr.node.id, Types.TNumber, state)
+      (t, state)
+    },
+    Ast.Lit(_) => {
+      let t = recordNodeType(expr.node.id, Types.TNumber, state)
       (t, state)
     },
     Ast.Ident(name) => {
-      let (t, state1) = lookupEnv(name, state)
-      let tRecorded = recordNodeType(expr.id, t, state1)
+      let (t, state1) = lookupEnv(name.text, state)
+      let tRecorded = recordNodeType(expr.node.id, t, state1)
       (tRecorded, state1)
     },
-    Ast.Unknown => {
+    Ast.Hole(_) => {
       let (t, state1) = freshVar(state)
-      let tRecorded = recordNodeType(expr.id, t, state1)
+      let tRecorded = recordNodeType(expr.node.id, t, state1)
       (tRecorded, state1)
     },
-    Ast.Block(inner) => {
-      let (tInner, state1) = inferExpr(inner, state)
-      let t = recordNodeType(expr.id, tInner, state1)
+    Ast.Block(block) => {
+      let (tInner, state1) = match (block.result) {
+        [] => (Types.TVoid, state),
+        [expr, ..._] => inferExpr(expr, state)
+      }
+      let t = recordNodeType(expr.node.id, tInner, state1)
       (t, state1)
     },
     Ast.Lambda(paramOpt, body) => match (paramOpt) {
       None => {
         let (tBody, state1) = inferExpr(body, state)
         let fnType = Types.TFun(Types.TVoid, tBody)
-        let t = recordNodeType(expr.id, fnType, state1)
+        let t = recordNodeType(expr.node.id, fnType, state1)
         (t, state1)
       },
-      Some(paramName) => {
+      Some(pattern) => {
+        let paramName = match (pattern.kind) {
+          Ast.Var(name) => name.text,
+          _ => "_"
+        }
         let (paramType, state1) = freshVar(state)
         let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
         let (fnType, stFn) = withBinding(
@@ -136,39 +147,25 @@ let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
             (Types.TFun(paramType, tBody), stBody)
           }
         )
-        let tRecorded = recordNodeType(expr.id, fnType, stFn)
+        let tRecorded = recordNodeType(expr.node.id, fnType, stFn)
         (tRecorded, stFn)
       },
     },
-    Ast.StrLit(_value) => {
-      let t = recordNodeType(expr.id, Types.TNumber, state) // Placeholder
-      (t, state)
-    },
-    Ast.CharLit(_value) => {
-      let t = recordNodeType(expr.id, Types.TNumber, state) // Placeholder
-      (t, state)
-    },
     Ast.Paren(inner) => {
       let (tInner, state1) = inferExpr(inner, state)
-      let t = recordNodeType(expr.id, tInner, state1)
+      let t = recordNodeType(expr.node.id, tInner, state1)
       (t, state1)
     },
     Ast.Tuple(exprs) => {
       let (types, state1) = inferExprList(exprs, state)
-      let t = recordNodeType(expr.id, Types.TNumber, state1) // Placeholder
+      let t = recordNodeType(expr.node.id, Types.TNumber, state1)
       (t, state1)
     },
-    Ast.Unit => {
-      let t = recordNodeType(expr.id, Types.TVoid, state)
-      (t, state)
-    },
-    Ast.Infix(op, left, right) => {
-      // For now, just handle the operands - this will be replaced by lowering
-      let (tLeft, state1) = inferExpr(left, state)
-      let (tRight, state2) = inferExpr(right, state1)
-      let t = recordNodeType(expr.id, Types.TNumber, state2) // Placeholder
-      (t, state2)
-    },
+    _ => {
+      let (t, state1) = freshVar(state)
+      let tRecorded = recordNodeType(expr.node.id, t, state1)
+      (tRecorded, state1)
+    }
   }
 }
 and inferExprList = (exprs: List<Ast.Expr>, state: InferState) => {
@@ -182,26 +179,57 @@ and inferExprList = (exprs: List<Ast.Expr>, state: InferState) => {
   }
 }
 
-let inferBinding = (binding: Ast.Binding, state: InferState) => {
+let inferLetBinding = (binding: Ast.LetBinding, state: InferState) => {
   let (tValue, state1) = inferExpr(binding.value, state)
   Types.applySubstEnv(state1.subst, state1.env)
   let scheme = Types.generalize(state1.env, state1.subst, tValue)
-  Map.set(binding.name, scheme, state1.env)
-  Map.set(binding.name, scheme, state1.topBindings)
+  let bindingName = match (binding.name.kind) {
+    Ast.Var(name) => name.text,
+    _ => "_"
+  }
+  Map.set(bindingName, scheme, state1.env)
+  Map.set(bindingName, scheme, state1.topBindings)
   state1
 }
 
-let inferProgram = (program: Ast.Program) => {
-  let state = makeInitialState()
-  let rec loop = (bindings: List<Ast.Binding>, st: InferState) =>
-    match (bindings) {
-      [] => st,
-      [b, ...rest] => loop(rest, inferBinding(b, st)),
+let rec inferTopItems = (items: List<Ast.TopItem>, state: InferState) => {
+  match (items) {
+    [] => state,
+    [item, ...rest] => {
+      let state1 = match (item) {
+        Ast.DeclGroup(dg) => {
+          let rec inferDecls = (decls: List<Ast.Decl>, st: InferState) => {
+            match (decls) {
+              [] => st,
+              [decl, ...restDecls] => {
+                let st1 = match (decl) {
+                  Ast.LetDecl(ld) => {
+                    let rec inferBindings = (bindings: List<Ast.LetBinding>, s: InferState) => {
+                      match (bindings) {
+                        [] => s,
+                        [b, ...restBindings] => inferBindings(restBindings, inferLetBinding(b, s))
+                      }
+                    }
+                    inferBindings(ld.bindings, st)
+                  },
+                  _ => st
+                }
+                inferDecls(restDecls, st1)
+              }
+            }
+          }
+          inferDecls(dg.decls, state)
+        },
+        _ => state
+      }
+      inferTopItems(rest, state1)
     }
+  }
+}
 
-  let finalState = loop(program.bindings, state)
+provide let inferProgram = (program: Ast.Program) => {
+  let state = makeInitialState()
+  let finalState = inferTopItems(program.items, state)
   Types.applySubstEnv(finalState.subst, finalState.env)
   finalState
 }
-
-provide { inferProgram }

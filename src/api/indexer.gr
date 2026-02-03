@@ -1,0 +1,291 @@
+module Indexer
+
+from "list" include List
+from "option" include Option
+from "string" include String
+from "../core/ast.gr" include Ast
+from "./nodestore.gr" include NodeStore as NS
+
+// Visit a Name node - just add it to the store
+let visitName = (store: NS.NodeStore, name: Ast.Name) => {
+  let info: NS.NodeInfo = {
+    id: name.node.id,
+    kind: "Name",
+    span: name.node.span,
+    preview: Some(name.text),
+    children: [],
+  }
+  let store = NS.putNode(store, info)
+  store
+}
+
+// Visit an expression
+let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
+  // Insert base node
+  let store = NS.putNode(store, {
+    id: expr.node.id,
+    kind: "Expr",
+    span: expr.node.span,
+    preview: None,
+    children: [],
+  })
+
+  // Handle based on kind
+  match (expr.kind) {
+    Ast.Lit(lit) => {
+      let preview = match (lit) {
+        Ast.Int(n) => "Lit: Int(" ++ toString(n) ++ ")",
+        Ast.Bool(b) => "Lit: Bool(" ++ (if (b) { "true" } else { "false" }) ++ ")",
+        Ast.Str(s) => "Lit: Str",
+        Ast.Char(_) => "Lit: Char",
+        Ast.Unit => "Lit: Unit",
+        Ast.Byte(n) => "Lit: Byte(" ++ toString(n) ++ ")",
+      }
+      NS.updatePreview(store, expr.node.id, preview)
+    },
+
+    Ast.Ident(name) => {
+      let store = NS.updatePreview(store, expr.node.id, "Ident")
+      let store = visitName(store, name)
+      NS.addChild(store, expr.node.id, "name", name.node.id)
+    },
+
+    Ast.Lambda(patOpt, body) => {
+      let store = NS.updatePreview(store, expr.node.id, "Lambda")
+      let store = match (patOpt) {
+        None => store,
+        Some(pat) => {
+          let store = visitPattern(store, pat)
+          NS.addChild(store, expr.node.id, "param", pat.node.id)
+        }
+      }
+      let store = visitExpr(store, body)
+      NS.addChild(store, expr.node.id, "body", body.node.id)
+    },
+
+    Ast.InfixChain(chain) => {
+      let store = NS.updatePreview(store, expr.node.id, "InfixChain")
+      let store = visitExpr(store, chain.first)
+      let store = NS.addChild(store, expr.node.id, "first", chain.first.node.id)
+      let store = List.reduce((s, pair) => {
+        let (op, e) = pair
+        let s = visitName(s, op)
+        let s = NS.addChild(s, expr.node.id, "rest.op", op.node.id)
+        let s = visitExpr(s, e)
+        NS.addChild(s, expr.node.id, "rest.expr", e.node.id)
+      }, store, chain.rest)
+      store
+    },
+
+    Ast.Postfix(pf) => {
+      let store = NS.updatePreview(store, expr.node.id, "Postfix")
+      let store = visitExpr(store, pf.target)
+      NS.addChild(store, expr.node.id, "target", pf.target.node.id)
+    },
+
+    Ast.Block(block) => {
+      let store = NS.updatePreview(store, expr.node.id, "Block")
+      let store = List.reduce((s, item) => {
+        match (item) {
+          Ast.Stmt(stmt) => {
+            let s = visitStmt(s, stmt)
+            NS.addChild(s, expr.node.id, "stmt", stmt.node.id)
+          },
+          _ => s
+        }
+      }, store, block.items)
+      let store = List.reduce((s, e) => {
+        let s = visitExpr(s, e)
+        NS.addChild(s, expr.node.id, "result", e.node.id)
+      }, store, block.result)
+      store
+    },
+
+    Ast.Paren(inner) => {
+      let store = NS.updatePreview(store, expr.node.id, "Paren")
+      let store = visitExpr(store, inner)
+      NS.addChild(store, expr.node.id, "inner", inner.node.id)
+    },
+
+    Ast.Tuple(exprs) => {
+      let store = NS.updatePreview(store, expr.node.id, "Tuple")
+      List.reduce((s, e) => {
+        let s = visitExpr(s, e)
+        NS.addChild(s, expr.node.id, "item", e.node.id)
+      }, store, exprs)
+    },
+
+    Ast.If(cond, thenE, elseOpt) => {
+      let store = NS.updatePreview(store, expr.node.id, "If")
+      let store = visitExpr(store, cond)
+      let store = NS.addChild(store, expr.node.id, "cond", cond.node.id)
+      let store = visitExpr(store, thenE)
+      let store = NS.addChild(store, expr.node.id, "then", thenE.node.id)
+      match (elseOpt) {
+        None => store,
+        Some(elseE) => {
+          let store = visitExpr(store, elseE)
+          NS.addChild(store, expr.node.id, "else", elseE.node.id)
+        }
+      }
+    },
+
+    _ => store
+  }
+}
+
+and visitPattern = (store: NS.NodeStore, pat: Ast.Pattern) => {
+  let store = NS.putNode(store, {
+    id: pat.node.id,
+    kind: "Pattern",
+    span: pat.node.span,
+    preview: None,
+    children: [],
+  })
+
+  match (pat.kind) {
+    Ast.Var(name) => {
+      let store = NS.updateKind(store, pat.node.id, "PatVar")
+      let store = visitName(store, name)
+      NS.addChild(store, pat.node.id, "name", name.node.id)
+    },
+    _ => store
+  }
+}
+
+and visitStmt = (store: NS.NodeStore, stmt: Ast.Stmt) => {
+  // Create the Stmt node first
+  let store = NS.putNode(store, {
+    id: stmt.node.id,
+    kind: "Stmt",
+    span: stmt.node.span,
+    preview: None,
+    children: [],
+  })
+  
+  // Visit the statement contents and add as child
+  match (stmt.kind) {
+    Ast.Expr(e) => {
+      let store = visitExpr(store, e)
+      let store = NS.updateKind(store, stmt.node.id, "ExprStmt")
+      NS.addChild(store, stmt.node.id, "expr", e.node.id)
+    },
+    Ast.Let(binding) => {
+      let store = visitLetBinding(store, binding)
+      let store = NS.updateKind(store, stmt.node.id, "LetStmt")
+      NS.addChild(store, stmt.node.id, "binding", binding.node.id)
+    },
+    _ => store
+  }
+}
+
+and visitLetBinding = (store: NS.NodeStore, binding: Ast.LetBinding) => {
+  let store = NS.putNode(store, {
+    id: binding.node.id,
+    kind: "LetBinding",
+    span: binding.node.span,
+    preview: None,
+    children: [],
+  })
+  let store = visitPattern(store, binding.name)
+  let store = NS.addChild(store, binding.node.id, "name", binding.name.node.id)
+  let store = visitExpr(store, binding.value)
+  NS.addChild(store, binding.node.id, "value", binding.value.node.id)
+}
+
+// Visit a declaration
+let visitDecl = (store: NS.NodeStore, decl: Ast.Decl) => {
+  match (decl) {
+    Ast.LetDecl(ld) => {
+      List.reduce((s, binding) => visitLetBinding(s, binding), store, ld.bindings)
+    },
+    Ast.TypeDecl(td) => {
+      let store = NS.putNode(store, {
+        id: td.node.id,
+        kind: "TypeDecl",
+        span: td.node.span,
+        preview: Some(td.name.text),
+        children: [],
+      })
+      let store = visitName(store, td.name)
+      NS.addChild(store, td.node.id, "name", td.name.node.id)
+    },
+    Ast.RecordDecl(rd) => {
+      let store = NS.putNode(store, {
+        id: rd.node.id,
+        kind: "RecordDecl",
+        span: rd.node.span,
+        preview: Some(rd.name.text),
+        children: [],
+      })
+      let store = visitName(store, rd.name)
+      NS.addChild(store, rd.node.id, "name", rd.name.node.id)
+    },
+    _ => store
+  }
+}
+
+// Visit an Export node
+let visitExport = (store: NS.NodeStore, exp: Ast.Export) => {
+  NS.putNode(store, {
+    id: exp.node.id,
+    kind: "Export",
+    span: exp.node.span,
+    preview: Some("export"),
+    children: [],
+  })
+}
+
+// Visit a top-level item
+let visitTopItem = (store: NS.NodeStore, item: Ast.TopItem) => {
+  match (item) {
+    Ast.Export(exp) => visitExport(store, exp),
+    Ast.DeclGroup(dg) => {
+      List.reduce((s, decl) => visitDecl(s, decl), store, dg.decls)
+    },
+    _ => store
+  }
+}
+
+// Index an entire program
+provide let indexProgram = (program: Ast.Program) => {
+  let store = NS.empty
+  
+  // Visit all items and collect root binding IDs
+  let store = List.reduce((s, item) => {
+    match (item) {
+      Ast.Export(exp) => {
+        let s = visitExport(s, exp)
+        NS.addRoot(s, exp.node.id)
+      },
+      Ast.DeclGroup(dg) => {
+        // Visit declarations and add binding IDs as roots
+        List.reduce((s2, decl) => {
+          match (decl) {
+            Ast.LetDecl(ld) => {
+              // Add each binding as a root
+              List.reduce((s3, binding) => {
+                let s3 = visitLetBinding(s3, binding)
+                NS.addRoot(s3, binding.node.id)
+              }, s2, ld.bindings)
+            },
+            Ast.TypeDecl(td) => {
+              let s3 = visitDecl(s2, decl)
+              let s4 = NS.addRoot(s3, td.node.id)
+              s4
+            },
+            Ast.RecordDecl(rd) => {
+              let s3 = visitDecl(s2, decl)
+              let s4 = NS.addRoot(s3, rd.node.id)
+              s4
+            },
+            _ => visitDecl(s2, decl)
+          }
+        }, s, dg.decls)
+      },
+      _ => visitTopItem(s, item)
+    }
+  }, store, program.items)
+  
+  store
+}

@@ -1,0 +1,172 @@
+module Serialize
+
+from "list" include List
+from "map" include Map
+from "string" include String
+from "array" include Array
+
+from "../core/ast.gr" include Ast
+from "../core/analysis.gr" include Analysis
+from "../core/types.gr" include Types
+from "../core/source.gr" include Source
+
+let escapeJson = (s: String) => {
+  let rec escape = (chars: List<Char>, acc: String) => {
+    match (chars) {
+      [] => acc,
+      [c, ...rest] => {
+        let escaped = if (c == '"') {
+          "\\\""
+        } else if (c == '\\') {
+          "\\\\"
+        } else if (c == '\n') {
+          "\\n"
+        } else if (c == '\r') {
+          "\\r"
+        } else if (c == '\t') {
+          "\\t"
+        } else {
+          String.concat([String.fromChar(c)])
+        }
+        escape(rest, acc ++ escaped)
+      }
+    }
+  }
+  escape(String.explode(s), "")
+}
+
+let spanToJson = (span: Source.Span) => {
+  "{\"line\":" ++ toString(span.line) ++ 
+  ",\"col\":" ++ toString(span.col) ++ 
+  ",\"start\":" ++ toString(span.start) ++ 
+  ",\"end\":" ++ toString(span.end) ++ "}"
+}
+
+let nodeToJson = (node: Ast.Node) => {
+  "{\"id\":" ++ toString(node.id) ++ 
+  ",\"span\":" ++ spanToJson(node.span) ++ "}"
+}
+
+let rec exprKindToString = (kind: Ast.ExprKind) => {
+  match (kind) {
+    Ast.Lit(Ast.Int(n)) => "Lit(Int(" ++ toString(n) ++ "))",
+    Ast.Lit(Ast.Bool(b)) => "Lit(Bool(" ++ toString(b) ++ "))",
+    Ast.Lit(Ast.Str(s)) => "Lit(Str(\"" ++ escapeJson(s) ++ "\"))",
+    Ast.Lit(Ast.Char(c)) => "Lit(Char('" ++ String.fromChar(c) ++ "'))",
+    Ast.Lit(Ast.Unit) => "Lit(Unit)",
+    Ast.Ident(name) => "Ident(" ++ name.text ++ ")",
+    Ast.Lambda(_, _) => "Lambda",
+    Ast.InfixChain(_) => "InfixChain",
+    Ast.Postfix(_) => "Postfix",
+    Ast.Block(_) => "Block",
+    Ast.Paren(_) => "Paren",
+    Ast.Tuple(_) => "Tuple",
+    Ast.RecordLit(_) => "RecordLit",
+    Ast.MatchApply(_) => "MatchApply",
+    Ast.Bundle(_) => "Bundle",
+    Ast.Hole(_) => "Hole",
+    Ast.If(_, _, _) => "If",
+    _ => "Unknown"
+  }
+}
+
+let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
+  if (depth > 10) {
+    "{\"kind\":\"MaxDepth\"}"
+  } else {
+    let kindStr = exprKindToString(expr.kind)
+    let childrenJson = match (expr.kind) {
+      Ast.Block(block) => {
+        let resultExprs = List.map((e) => exprToJson(e, depth + 1), block.result)
+        let resultJson = "[" ++ String.join(",", resultExprs) ++ "]"
+        ",\"children\":" ++ resultJson
+      },
+      Ast.Lambda(_, body) => ",\"children\":[" ++ exprToJson(body, depth + 1) ++ "]",
+      Ast.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
+      Ast.Tuple(exprs) => {
+        let items = List.map((e) => exprToJson(e, depth + 1), exprs)
+        ",\"children\":[" ++ String.join(",", items) ++ "]"
+      },
+      Ast.If(cond, thenE, elseE) => {
+        let condJson = exprToJson(cond, depth + 1)
+        let thenJson = exprToJson(thenE, depth + 1)
+        let elseJson = match (elseE) {
+          Some(e) => exprToJson(e, depth + 1),
+          None => "null"
+        }
+        ",\"children\":[" ++ condJson ++ "," ++ thenJson ++ "," ++ elseJson ++ "]"
+      },
+      _ => ""
+    }
+    "{\"node\":" ++ nodeToJson(expr.node) ++ 
+    ",\"kind\":\"" ++ kindStr ++ "\"" ++ childrenJson ++ "}"
+  }
+}
+
+let topItemToJson = (item: Ast.TopItem) => {
+  match (item) {
+    Ast.DeclGroup(dg) => {
+      let exported = if (dg.exported) { "true" } else { "false" }
+      let kindStr = match (dg.kind) {
+        Ast.LetGroup(_) => "LetGroup",
+        Ast.TypeGroup(_) => "TypeGroup",
+        Ast.RecordGroup(_) => "RecordGroup",
+        Ast.OpGroup => "OpGroup",
+        Ast.RuleGroup(_) => "RuleGroup"
+      }
+      "{\"type\":\"DeclGroup\",\"exported\":" ++ exported ++ 
+      ",\"kind\":\"" ++ kindStr ++ "\"}"
+    },
+    Ast.Import(_) => "{\"type\":\"Import\"}",
+    Ast.Reexport(_) => "{\"type\":\"Reexport\"}",
+    Ast.Directive(_) => "{\"type\":\"Directive\"}",
+    Ast.Trivia(_) => "{\"type\":\"Trivia\"}"
+  }
+}
+
+let programToJson = (program: Ast.Program) => {
+  let coreStr = if (program.core) { "true" } else { "false" }
+  let items = List.map(topItemToJson, program.items)
+  let itemsJson = "[" ++ String.join(",", items) ++ "]"
+  "{\"core\":" ++ coreStr ++ ",\"items\":" ++ itemsJson ++ "}"
+}
+
+let typeToJson = (ty: Types.Type) => {
+  let typeStr = Types.typeToString(ty)
+  "\"" ++ escapeJson(typeStr) ++ "\""
+}
+
+let nodeTypesToJson = (nodeTypes: Map.Map<Number, Types.Type>) => {
+  let pairs = Map.toList(nodeTypes)
+  let items = List.map(
+    ((id, ty)) => {
+      "{\"id\":" ++ toString(id) ++ ",\"type\":" ++ typeToJson(ty) ++ "}"
+    },
+    pairs
+  )
+  "[" ++ String.join(",", items) ++ "]"
+}
+
+let topBindingsToJson = (bindings: Map.Map<String, Types.Scheme>) => {
+  let pairs = Map.toList(bindings)
+  let items = List.map(
+    ((name, scheme)) => {
+      let typeStr = Types.typeToString(scheme.ty)
+      "{\"name\":\"" ++ escapeJson(name) ++ "\",\"type\":\"" ++ escapeJson(typeStr) ++ "\"}"
+    },
+    pairs
+  )
+  "[" ++ String.join(",", items) ++ "]"
+}
+
+let analysisToJson = (analysis: Analysis.Analysis) => {
+  let programJson = programToJson(analysis.program)
+  let nodeTypesJson = nodeTypesToJson(analysis.infer.nodeTypes)
+  let bindingsJson = topBindingsToJson(analysis.infer.topBindings)
+  
+  "{\"program\":" ++ programJson ++ 
+  ",\"nodeTypes\":" ++ nodeTypesJson ++ 
+  ",\"topBindings\":" ++ bindingsJson ++ "}"
+}
+
+provide { analysisToJson, programToJson, exprToJson }

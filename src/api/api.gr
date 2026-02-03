@@ -1,0 +1,316 @@
+module Api
+
+from "array" include Array
+from "list" include List
+from "map" include Map
+from "string" include String
+from "wasi/process" include Process
+from "fs" include Fs
+from "path" include Path
+
+from "../core/ast.gr" include Ast
+from "../core/analysis.gr" include Analysis
+from "../core/types.gr" include Types
+from "../core/source.gr" include Source
+from "../frontend/lexer.gr" include Lexer
+from "../frontend/lower.gr" include Lower
+from "../frontend/parser.gr" include Parser
+from "../frontend/lower.gr" include Lower
+from "../frontend/frontend.gr" include Frontend
+from "./nodestore.gr" include NodeStore as NS
+from "./indexer.gr" include Indexer
+
+let escapeJson = (s: String) => {
+  // Must escape backslashes FIRST to avoid double-escaping
+  let step1 = String.replaceAll("\\", "\\\\", s)
+  let step2 = String.replaceAll("\"", "\\\"", step1)
+  let step3 = String.replaceAll("\n", "\\n", step2)
+  let step4 = String.replaceAll("\r", "\\r", step3)
+  String.replaceAll("\t", "\\t", step4)
+}
+
+let tokenToJson = (tok: Lexer.Token) => {
+  // Get the actual token kind name from the lexer
+  let kindName = match (tok.kind) {
+    Lexer.LitName(_) => "LitName",
+    Lexer.ConstructorTok(_) => "ConstructorTok",
+    Lexer.LitNum(_) => "LitNum",
+    Lexer.LitString(_) => "LitString",
+    Lexer.LitChar(_) => "LitChar",
+    Lexer.LitBool(_) => "LitBool",
+    Lexer.KwVar => "KwVar",
+    Lexer.KwAllErrors => "KwAllErrors",
+    Lexer.LParen => "LParen",
+    Lexer.RParen => "RParen",
+    Lexer.LBrace => "LBrace",
+    Lexer.RBrace => "RBrace",
+    Lexer.FatArrow => "FatArrow",
+    Lexer.Question => "Question",
+    Lexer.Pipe => "Pipe",
+    Lexer.DPipe => "DPipe",
+    Lexer.SemiColon => "SemiColon",
+    Lexer.Comma => "Comma",
+    Lexer.Colon => "Colon",
+    Lexer.PipeArrow => "PipeArrow",
+    Lexer.Slash => "Slash",
+    Lexer.DSlash => "DSlash",
+    Lexer.Arrow => "Arrow",
+    Lexer.Period => "Period",
+    Lexer.DotBrace => "DotBrace",
+    Lexer.DPeriod => "DPeriod",
+    Lexer.Eq => "Eq",
+    Lexer.EqEq => "EqEq",
+    Lexer.Plus => "Plus",
+    Lexer.DPlus => "DPlus",
+    Lexer.Dash => "Dash",
+    Lexer.DDash => "DDash",
+    Lexer.Directive => "Directive",
+    Lexer.EOF => "EOF",
+  }
+  let kindStr = Lexer.tokenKindToString(tok.kind)
+  let spanJson = "{\"line\":" ++ toString(tok.span.line) ++ 
+                 ",\"col\":" ++ toString(tok.span.col) ++ 
+                 ",\"start\":" ++ toString(tok.span.start) ++ 
+                 ",\"end\":" ++ toString(tok.span.end) ++ "}"
+  let mateJson = match (tok.mate) {
+    None => "null",
+    Some(m) => toString(m),
+  }
+  "{\"kind\":\"" ++ escapeJson(kindName) ++ "\"," ++
+  "\"text\":\"" ++ escapeJson(kindStr) ++ "\"," ++
+  "\"span\":" ++ spanJson ++ "," ++
+  "\"mate\":" ++ mateJson ++ "}"
+}
+
+let rec joinStrings = (sep: String, items: List<String>) => {
+  match (items) {
+    [] => "",
+    [single] => single,
+    [first, ...rest] => first ++ sep ++ joinStrings(sep, rest)
+  }
+}
+
+let tokensToJson = (tokens: List<Lexer.Token>) => {
+  let items = List.map(tokenToJson, tokens)
+  "[" ++ joinStrings(",", items) ++ "]"
+}
+
+let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
+  if (depth > 8) {
+    "{\"kind\":\"MaxDepth\",\"id\":" ++ toString(expr.node.id) ++ "}"
+  } else {
+    let kindName = match (expr.kind) {
+      Ast.Lit(Ast.Int(n)) => "Lit(Int(" ++ toString(n) ++ "))",
+      Ast.Lit(Ast.Bool(b)) => "Lit(Bool(" ++ toString(b) ++ "))",
+      Ast.Lit(Ast.Str(s)) => "Lit(Str)",
+      Ast.Lit(Ast.Char(_)) => "Lit(Char)",
+      Ast.Lit(Ast.Unit) => "Lit(Unit)",
+      Ast.Lit(Ast.Byte(_)) => "Lit(Byte)",
+      Ast.Ident(name) => "Ident(" ++ escapeJson(name.text) ++ ")",
+      Ast.Lambda(_, _) => "Lambda",
+      Ast.InfixChain(_) => "InfixChain",
+      Ast.Postfix(_) => "Postfix",
+      Ast.Block(_) => "Block",
+      Ast.Paren(_) => "Paren",
+      Ast.Tuple(_) => "Tuple",
+      Ast.RecordLit(_) => "RecordLit",
+      Ast.MatchApply(_) => "MatchApply",
+      Ast.Bundle(_) => "Bundle",
+      Ast.Hole(_) => "Hole",
+      Ast.If(_, _, _) => "If"
+    }
+    
+    let childrenJson = match (expr.kind) {
+      Ast.Block(block) => {
+        // Serialize all items in the block
+        let itemJsons = List.map((item) => {
+          match (item) {
+            Ast.Stmt(stmt) => {
+              match (stmt.kind) {
+                Ast.Expr(e) => exprToJson(e, depth + 1),
+                Ast.Let(binding) => exprToJson(binding.value, depth + 1),
+                _ => "{\"kind\":\"OtherStmt\"}"
+              }
+            },
+            _ => "{\"kind\":\"OtherItem\"}"
+          }
+        }, block.items)
+        ",\"children\":[" ++ joinStrings(",", itemJsons) ++ "]"
+      },
+      Ast.Lambda(_, body) => ",\"children\":[" ++ exprToJson(body, depth + 1) ++ "]",
+      Ast.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
+      Ast.Tuple(exprs) => {
+        let tupleExprs = List.map((e) => exprToJson(e, depth + 1), exprs)
+        ",\"children\":[" ++ joinStrings(",", tupleExprs) ++ "]"
+      },
+      Ast.InfixChain(chain) => {
+        let firstJson = exprToJson(chain.first, depth + 1)
+        let restJsons = List.map(((_, e)) => exprToJson(e, depth + 1), chain.rest)
+        let allExprs = [firstJson, ...restJsons]
+        ",\"children\":[" ++ joinStrings(",", allExprs) ++ "]"
+      },
+      Ast.If(cond, thenE, elseE) => {
+        let condJson = exprToJson(cond, depth + 1)
+        let thenJson = exprToJson(thenE, depth + 1)
+        let elseJson = match (elseE) {
+          Some(e) => exprToJson(e, depth + 1),
+          None => "null"
+        }
+        ",\"children\":[" ++ condJson ++ "," ++ thenJson ++ "," ++ elseJson ++ "]"
+      },
+      _ => ""
+    }
+    
+    "{\"id\":" ++ toString(expr.node.id) ++ 
+    ",\"kind\":\"" ++ escapeJson(kindName) ++ "\"" ++ 
+    ",\"span\":{\"start\":" ++ toString(expr.node.span.start) ++ 
+    ",\"end\":" ++ toString(expr.node.span.end) ++ "}" ++
+    childrenJson ++ "}"
+  }
+}
+
+let topItemToJson = (item: Ast.TopItem) => {
+  match (item) {
+    Ast.DeclGroup(dg) => {
+      let kindStr = match (dg.kind) {
+        Ast.LetGroup(_) => "LetGroup",
+        Ast.TypeGroup(_) => "TypeGroup",
+        Ast.RecordGroup(_) => "RecordGroup",
+        Ast.OpGroup => "OpGroup",
+        Ast.RuleGroup(_) => "RuleGroup"
+      }
+      
+      // Serialize declarations with their bindings and expressions
+      let declsJson = match (dg.kind) {
+        Ast.LetGroup(_) => {
+          let declStrs = List.map((decl) => {
+            match (decl) {
+              Ast.LetDecl(ld) => {
+                let bindingStrs = List.map((b: Ast.LetBinding) => {
+                  let valueJson = exprToJson(b.value, 0)
+                  "{\"kind\":\"LetBinding\",\"id\":" ++ toString(b.node.id) ++ 
+                  ",\"span\":{\"start\":" ++ toString(b.node.span.start) ++ 
+                  ",\"end\":" ++ toString(b.node.span.end) ++ "},\"value\":" ++ valueJson ++ "}"
+                }, ld.bindings)
+                "{\"kind\":\"LetDecl\",\"bindings\":[" ++ joinStrings(",", bindingStrs) ++ "]}"
+              },
+              _ => "{}"
+            }
+          }, dg.decls)
+          ",\"decls\":[" ++ joinStrings(",", declStrs) ++ "]"
+        },
+        Ast.TypeGroup(_) | Ast.RecordGroup(_) => {
+          let declStrs = List.map((decl) => {
+            match (decl) {
+              Ast.TypeDecl(td) => 
+                "{\"kind\":\"TypeDecl\",\"id\":" ++ toString(td.node.id) ++ 
+                ",\"span\":{\"start\":" ++ toString(td.node.span.start) ++ 
+                ",\"end\":" ++ toString(td.node.span.end) ++ 
+                "},\"name\":\"" ++ escapeJson(td.name.text) ++ "\"}",
+              Ast.RecordDecl(rd) => 
+                "{\"kind\":\"RecordDecl\",\"id\":" ++ toString(rd.node.id) ++ 
+                ",\"span\":{\"start\":" ++ toString(rd.node.span.start) ++ 
+                ",\"end\":" ++ toString(rd.node.span.end) ++ 
+                "},\"name\":\"" ++ escapeJson(rd.name.text) ++ "\"}",
+              _ => "{}"
+            }
+          }, dg.decls)
+          ",\"decls\":[" ++ joinStrings(",", declStrs) ++ "]"
+        },
+        _ => ""
+      }
+      
+      "{\"type\":\"DeclGroup\",\"kind\":\"" ++ kindStr ++ "\"" ++ declsJson ++ "}"
+    },
+    _ => "{\"type\":\"Other\"}"
+  }
+}
+
+let programToJson = (program: Ast.Program) => {
+  let items = List.map(topItemToJson, program.items)
+  let itemsJson = "[" ++ joinStrings(",", items) ++ "]"
+  "{\"core\":" ++ (if (program.core) { "true" } else { "false" }) ++ 
+  ",\"items\":" ++ itemsJson ++ "}"
+}
+
+let nodeTypesToJson = (nodeTypes: Map.Map<Number, Types.Type>) => {
+  let pairs = Map.toList(nodeTypes)
+  let items = List.map(
+    ((id, ty)) => {
+      let typeStr = Types.typeToString(ty)
+      "{\"id\":" ++ toString(id) ++ ",\"type\":\"" ++ escapeJson(typeStr) ++ "\"}"
+    },
+    pairs
+  )
+  "[" ++ joinStrings(",", items) ++ "]"
+}
+
+let topBindingsToJson = (bindings: Map.Map<String, Types.Scheme>) => {
+  let pairs = Map.toList(bindings)
+  let items = List.map(
+    ((name, _scheme)) => {
+      "{\"name\":\"" ++ escapeJson(name) ++ "\",\"type\":\"<inferred>\"}"
+    },
+    pairs
+  )
+  "[" ++ joinStrings(",", items) ++ "]"
+}
+
+// Global store for the last compilation (for querying nodes by ID)
+let mut lastStore: Option<NS.NodeStore> = None
+
+provide let compileToJson = (source: String) => {
+  // Tokenize
+  let tokens = Lexer.lex(source)
+  let tokensJson = "[" ++ joinStrings(",", List.map(tokenToJson, tokens)) ++ "]"
+  
+  // Parse
+  let parsed = Parser.parse(source)
+  
+  // Index the parsed (surface) AST into a NodeStore
+  let surfaceStore = Indexer.indexProgram(parsed)
+  let surfaceStoreJson = NS.storeToJson(surfaceStore)
+  
+  // Lower
+  let lowered = Lower.lowerProgram(parsed)
+  
+  // Index the lowered AST into a NodeStore
+  let loweredStore = Indexer.indexProgram(lowered)
+  lastStore = Some(loweredStore)
+  let loweredStoreJson = NS.storeToJson(loweredStore)
+  
+  "{\"tokens\":" ++ tokensJson ++ ",\"surfaceNodeStore\":" ++ surfaceStoreJson ++ ",\"loweredNodeStore\":" ++ loweredStoreJson ++ "}"
+}
+
+// Query a node by ID from the last compilation
+provide let getNodeJson = (id: Number) => {
+  match (lastStore) {
+    None => "{\"error\":\"No compilation available\"}",
+    Some(store) => {
+      match (NS.getNode(store, id)) {
+        None => "{\"error\":\"Node not found\"}",
+        Some(node) => NS.nodeInfoToJson(node)
+      }
+    }
+  }
+}
+
+let main = () => {
+  match (Process.argv()) {
+    Err(_) => print("{\"success\":false,\"error\":\"Failed to read argv\"}"),
+    Ok(args) => {
+      let argCount = Array.length(args)
+      if (argCount < 2) {
+        print("{\"success\":false,\"error\":\"Usage: grain --include-dirs src src/api/api.gr -- <file.wm>\"}")
+      } else {
+        let filePath = Array.get(1, args)
+        match (Fs.Utf8.readFile(Path.fromString(filePath))) {
+          Err(_) => print("{\"success\":false,\"error\":\"Failed to read file: " ++ escapeJson(filePath) ++ "\"}"),
+          Ok(source) => print(compileToJson(source))
+        }
+      }
+    }
+  }
+}
+
+main()
