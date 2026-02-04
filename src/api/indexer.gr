@@ -52,7 +52,7 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
 
     Ast.Fn(fnExpr) => {
       let store = NS.updatePreview(store, expr.node.id, "Fn")
-      List.reduce((s, item) => {
+      List.reduce((s: NS.NodeStore, item: Ast.FnItem) => {
         match (item.kind) {
           Ast.Clause(clause) => {
             let s = visitPattern(s, clause.param)
@@ -68,6 +68,41 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
           _ => s,
         }
       }, store, fnExpr.items)
+    },
+
+    Ast.Match(m) => {
+      let store = NS.updatePreview(
+        store,
+        expr.node.id,
+        if (m.arrowSugar) { "MatchArrow" } else { "Match" },
+      )
+      let store = match (m.scrutinee) {
+        None => store,
+        Some(scrutinee) => {
+          let s = visitExpr(store, scrutinee)
+          NS.addChild(s, expr.node.id, "scrutinee", scrutinee.node.id)
+        }
+      }
+      List.reduce((s: NS.NodeStore, item: Ast.FnItem) => {
+        match (item.kind) {
+          Ast.Clause(clause) => {
+            let s = visitPattern(s, clause.param)
+            let s = NS.addChild(s, expr.node.id, "clause.param", clause.param.node.id)
+            let bodyExpr: Ast.Expr = {
+              node: clause.body.node,
+              kind: Ast.Block(clause.body),
+              attach: clause.attach,
+            }
+            let s = visitExpr(s, bodyExpr)
+            NS.addChild(s, expr.node.id, "clause.body", bodyExpr.node.id)
+          },
+          Ast.Include(name) => {
+            let s = visitName(s, name)
+            NS.addChild(s, expr.node.id, "include", name.node.id)
+          },
+          _ => s,
+        }
+      }, store, m.bundle.items)
     },
 
     Ast.Apply(callee, arg) => {

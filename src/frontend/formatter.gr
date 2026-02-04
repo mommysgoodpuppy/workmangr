@@ -2,8 +2,35 @@ module Formatter
 
 from "array" include Array
 from "list" include List
-from "../frontend/frontend.gr" include Frontend
+
 from "../core/ast.gr" include Ast
+from "./parser.gr" include Parser
+
+let join = (sep: String, xs: List<String>) => Array.join(sep, Array.fromList(xs))
+
+let rec formatPattern = (pat: Ast.Pattern) => {
+  match (pat.kind) {
+    Ast.Wildcard => "_",
+    Ast.Var(name) => name.text,
+    Ast.Pin(name) => name.text,
+    Ast.Lit(Ast.Int(n)) => toString(n),
+    Ast.Lit(Ast.Bool(b)) => if (b) { "true" } else { "false" },
+    Ast.Lit(Ast.Str(s)) => "\"" ++ s ++ "\"",
+    Ast.Lit(Ast.Char(c)) => "'" ++ toString(c) ++ "'",
+    Ast.Lit(Ast.Unit) => "()",
+    Ast.Lit(_) => "<lit>",
+    Ast.Tuple(items) => "(" ++ join(", ", List.map(formatPattern, items)) ++ ")",
+    Ast.Constructor(name, args) =>
+      if (List.length(args) == 0) {
+        name.text
+      } else {
+        name.text ++ "(" ++ join(", ", List.map(formatPattern, args)) ++ ")"
+      },
+    Ast.Hole(_) => "?",
+    Ast.List(items, _) => "[" ++ join(", ", List.map(formatPattern, items)) ++ "]",
+    Ast.AllErrors => "AllErrors",
+  }
+}
 
 let rec formatExpr = (expr: Ast.Expr) => {
   match (expr.kind) {
@@ -12,18 +39,28 @@ let rec formatExpr = (expr: Ast.Expr) => {
     Ast.Lit(Ast.Str(s)) => "\"" ++ s ++ "\"",
     Ast.Lit(Ast.Char(c)) => "'" ++ toString(c) ++ "'",
     Ast.Lit(Ast.Unit) => "()",
+    Ast.Lit(_) => "<lit>",
     Ast.Ident(name) => name.text,
     Ast.Paren(inner) => "(" ++ formatExpr(inner) ++ ")",
-    Ast.Tuple(items) => {
-      let rendered = List.map(formatExpr, items)
-      "(" ++ Array.join(", ", Array.fromList(rendered)) ++ ")"
-    },
-    Ast.Block(_) => "{ ... }",
-    Ast.Fn(_) => "<fn>",
-    Ast.Apply(callee, arg) => formatExpr(callee) ++ "(" ++ formatExpr(arg) ++ ")",
-    Ast.InfixChain(_) => "<infix>",
+    Ast.Tuple(items) => "(" ++ join(", ", List.map(formatExpr, items)) ++ ")",
+    Ast.Hole(_) => "?",
+    Ast.RecordLit(_) => ".{...}",
     Ast.Postfix(_) => "<postfix>",
-    Ast.RecordLit(_) => "{ ... }",
+    Ast.InfixChain(chain) => {
+      let parts = List.map(
+        (pair: (Ast.Name, Ast.Expr)) => {
+          let (op, rhs) = pair
+          " " ++ op.text ++ " " ++ formatExpr(rhs)
+        },
+        chain.rest,
+      )
+      formatExpr(chain.first) ++ join("", parts)
+    },
+    Ast.Apply(callee, arg) => formatExpr(callee) ++ "(" ++ formatExpr(arg) ++ ")",
+    Ast.Block(block) => {
+      let resultText = join("; ", List.map(formatExpr, block.result))
+      "{ " ++ resultText ++ " }"
+    },
     Ast.If(cond, thenExpr, elseExpr) => {
       let elsePart = match (elseExpr) {
         None => "",
@@ -31,36 +68,76 @@ let rec formatExpr = (expr: Ast.Expr) => {
       }
       "if " ++ formatExpr(cond) ++ " " ++ formatExpr(thenExpr) ++ elsePart
     },
-    Ast.Hole(_) => "?",
-    Ast.Lit(_) => "<lit>",
+    Ast.Fn(fnExpr) => {
+      let items = List.map(
+        (item: Ast.FnItem) =>
+          match (item.kind) {
+            Ast.Clause(clause) => formatPattern(clause.param) ++ " => " ++ formatExpr(
+              { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
+            ),
+            Ast.Include(name) => name.text,
+            Ast.Trivia(_) => "<trivia>",
+            Ast.Hole(_) => "?",
+          },
+        fnExpr.items
+      )
+      if (List.length(items) == 1) {
+        match (items) {
+          [single] => single,
+          _ => "match { " ++ join(", ", items) ++ " }",
+        }
+      } else {
+        "match { " ++ join(", ", items) ++ " }"
+      }
+    },
+    Ast.Match(m) => {
+      let items = List.map(
+        (item: Ast.FnItem) =>
+          match (item.kind) {
+            Ast.Clause(clause) => formatPattern(clause.param) ++ " => " ++ formatExpr(
+              { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
+            ),
+            Ast.Include(name) => name.text,
+            Ast.Trivia(_) => "<trivia>",
+            Ast.Hole(_) => "?",
+          },
+        m.bundle.items
+      )
+      let arms = "{ " ++ join(", ", items) ++ " }"
+      match ((m.scrutinee, m.arrowSugar)) {
+        (None, _) => "match " ++ arms,
+        (Some(scrutinee), false) => "match(" ++ formatExpr(scrutinee) ++ ") " ++ arms,
+        (Some(scrutinee), true) => "match(" ++ formatExpr(scrutinee) ++ ") => " ++ arms,
+      }
+    },
   }
 }
 
 let formatBinding = (b: Ast.LetBinding) => {
-  "let <pat> = " ++ formatExpr(b.value)
+  "let " ++ formatPattern(b.name) ++ " = " ++ formatExpr(b.value) ++ ";"
 }
 
 let formatTopItem = (item: Ast.TopItem) => {
   match (item) {
     Ast.DeclGroup(dg) => {
       match (dg.decls) {
-        [Ast.LetDecl(ld), ..._] => {
-          let bindings = List.map(formatBinding, ld.bindings)
-          Array.join("\n", Array.fromList(bindings))
-        },
+        [Ast.LetDecl(ld), ..._] => join("\n", List.map(formatBinding, ld.bindings)),
         _ => "<decl-group>",
       }
     },
-    _ => "<top-item>",
+    Ast.Import(_) => "<import>",
+    Ast.Reexport(_) => "<reexport>",
+    Ast.Export(_) => "<export>",
+    Ast.Directive(_) => "<directive>",
+    Ast.Trivia(_) => "<trivia>",
   }
 }
 
 let formatProgram = (program: Ast.Program) => {
-  let items = List.map(formatTopItem, program.items)
-  Array.join("\n\n", Array.fromList(items))
+  join("\n\n", List.map(formatTopItem, program.items))
 }
 
 provide let format = (source: String) => {
-  let program = Frontend.parseAndLower(source)
+  let program = Parser.parse(source)
   formatProgram(program)
 }

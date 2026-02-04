@@ -344,30 +344,34 @@ and parseTerm: Parser<Ast.Expr> = state => {
         Block(b) => b,
         _ => { node: body.node, items: [], result: [body] },
       }
+      let (patId, state4) = freshId(state3)
       let wildcardPat: Ast.Pattern = {
-        node: { id, span: tok.span },
+        node: { id: patId, span: tok.span },
         kind: Wildcard,
         attach: { leading: [], trailing: [], dangling: [] },
       }
+      let (clauseId, state5) = freshId(state4)
       let clause: Ast.FnClause = {
-        node: { id, span },
+        node: { id: clauseId, span },
         param: wildcardPat,
         guard: None,
         body: bodyBlock,
         attach: { leading: [], trailing: [], dangling: [] },
       }
+      let (itemId, state6) = freshId(state5)
       let item: Ast.FnItem = {
-        node: { id, span },
+        node: { id: itemId, span },
         kind: Ast.Clause(clause),
         attach: { leading: [], trailing: [], dangling: [] },
       }
+      let (fnExprId, state7) = freshId(state6)
       let fnExpr: Ast.FnExpr = {
-        node: { id, span },
+        node: { id: fnExprId, span },
         items: [item],
         attach: { leading: [], trailing: [], dangling: [] },
       }
       let expr = makeExpr(id, span, Fn(fnExpr))
-      (expr, state3)
+      (expr, state7)
     },
     _ => {
       let (expr, state1) = parsePrimary(state)
@@ -390,6 +394,16 @@ and parsePrimary: Parser<Ast.Expr> = state => {
   let tok = currentToken(state1)
 
   match (tok.kind) {
+    Lexer.Wildcard => {
+      let state2 = dropToken(state1)
+      let (nameId, state3) = freshId(state2)
+      let expr: Ast.Expr = makeExpr(
+        id,
+        tok.span,
+        Ident({ node: { id: nameId, span: tok.span }, text: "_" })
+      )
+      (expr, state3)
+    },
     Lexer.LitNum(value) => {
       let state2 = dropToken(state1)
       let expr: Ast.Expr = makeExpr(id, tok.span, Lit(Ast.Int(value)))
@@ -581,8 +595,9 @@ and parsePrimary: Parser<Ast.Expr> = state => {
       let state2 = dropToken(state1)
       let (bodyExpr, state3) = parseExpr(state2)
       let span = spanFromTokens(tok.span, bodyExpr.node.span)
+      let (patId, state4) = freshId(state3)
       let pat: Ast.Pattern = {
-        node: { id, span: tok.span },
+        node: { id: patId, span: tok.span },
         kind: Wildcard,
         attach: { leading: [], trailing: [], dangling: [] },
       }
@@ -590,25 +605,28 @@ and parsePrimary: Parser<Ast.Expr> = state => {
         Block(b) => b,
         _ => { node: bodyExpr.node, items: [], result: [bodyExpr] },
       }
+      let (clauseId, state5) = freshId(state4)
       let clause: Ast.FnClause = {
-        node: { id, span },
+        node: { id: clauseId, span },
         param: pat,
         guard: None,
         body: bodyBlock,
         attach: { leading: [], trailing: [], dangling: [] },
       }
+      let (itemId, state6) = freshId(state5)
       let item: Ast.FnItem = {
-        node: { id, span },
+        node: { id: itemId, span },
         kind: Ast.Clause(clause),
         attach: { leading: [], trailing: [], dangling: [] },
       }
+      let (fnExprId, state7) = freshId(state6)
       let fnExpr: Ast.FnExpr = {
-        node: { id, span },
+        node: { id: fnExprId, span },
         items: [item],
         attach: { leading: [], trailing: [], dangling: [] },
       }
       let expr = makeExpr(id, span, Fn(fnExpr))
-      (expr, state3)
+      (expr, state7)
     },
     _ => {
       Error.createError(
@@ -910,10 +928,10 @@ and parseStatements = (state: ParseState) => {
     },
   }
 }
-and parsePattern: Parser<Ast.Pattern> = state => {
+and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
   let tok = currentToken(state)
   match (tok.kind) {
-    Lexer.LitName("_") => {
+    Lexer.Wildcard => {
       let state1 = dropToken(state)
       let (id, state2) = freshId(state1)
       let node = { id, span: tok.span }
@@ -929,7 +947,11 @@ and parsePattern: Parser<Ast.Pattern> = state => {
       let node = { id: patId, span: tok.span }
       let attach = { leading: [], trailing: [], dangling: [] }
       let nameNode = { node: { id: nameId, span: tok.span }, text: name }
-      let kind: Ast.PatternKind = Ast.Pin(nameNode)
+      let kind: Ast.PatternKind = if (pinBareIdent) {
+        Ast.Pin(nameNode)
+      } else {
+        Ast.Var(nameNode)
+      }
       let pat: Ast.Pattern = { node, kind, attach }
       (pat, state3)
     },
@@ -996,12 +1018,12 @@ and parsePattern: Parser<Ast.Pattern> = state => {
         let mut args = []
         let mut currentState = state2
         if (!kindIs(currentToken(currentState).kind, Lexer.RParen)) {
-          let (arg, state_temp) = parsePattern(currentState)
+          let (arg, state_temp) = parsePatternWithPinMode(currentState, false)
           args = [arg, ...args]
           currentState = state_temp
           while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
             let (_, state_temp2) = expectSimple(Lexer.Comma, currentState)
-            let (nextArg, state_temp3) = parsePattern(state_temp2)
+            let (nextArg, state_temp3) = parsePatternWithPinMode(state_temp2, false)
             args = [nextArg, ...args]
             currentState = state_temp3
           }
@@ -1031,13 +1053,16 @@ and parsePattern: Parser<Ast.Pattern> = state => {
     },
     Lexer.LParen => {
       let (_, state1) = expectSimple(Lexer.LParen, state)
-      let (innerPat, state2) = parsePattern(state1)
+      let (innerPat, state2) = parsePatternWithPinMode(state1, pinBareIdent)
       if (kindIs(currentToken(state2).kind, Lexer.Comma)) {
         let mut pats = [innerPat]
         let mut currentState = state2
         while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
           let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
-          let (nextPat, state_next) = parsePattern(state_temp)
+          let (nextPat, state_next) = parsePatternWithPinMode(
+            state_temp,
+            pinBareIdent,
+          )
           pats = [nextPat, ...pats]
           currentState = state_next
         }
@@ -1062,11 +1087,27 @@ and parsePattern: Parser<Ast.Pattern> = state => {
       ),
   }
 }
+and parsePattern: Parser<Ast.Pattern> = state => parsePatternWithPinMode(
+  state,
+  false,
+)
+and parseMatchPattern: Parser<Ast.Pattern> = state => parsePatternWithPinMode(
+  state,
+  true,
+)
 and parseMatch = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (matchTok, state2) = expectKeyword("match", state)
   let rec exprToParamPattern = (expr: Ast.Expr) => {
     match (expr.kind) {
+      Ident({ _, text }) when text == "_" =>
+        Some(
+          {
+            node: expr.node,
+            kind: Ast.Wildcard,
+            attach: expr.attach,
+          }: Ast.Pattern,
+        ),
       Ident(name) =>
         Some(
           {
@@ -1110,146 +1151,148 @@ and parseMatch = (state: ParseState) => {
     let mut items: List<Ast.FnItem> = []
     let mut currentState = state4
     while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
-      let (pat, state_temp) = parsePattern(currentState)
-      let (guardOpt, state_temp1) = if (
-        kindIs(currentToken(state_temp).kind, Lexer.LitName("when"))
-      ) {
-        let (_, state_temp0) = expectKeyword("when", state_temp)
-        let (guard, state_temp00) = parseExpr(state_temp0)
-        (Some(guard), state_temp00)
-      } else {
-        (None, state_temp)
+      let tok = currentToken(currentState)
+      let nextTok = currentToken(dropToken(currentState))
+      let includeName = match (tok.kind) {
+        Lexer.LitName(name) when (
+          kindIs(nextTok.kind, Lexer.Comma) ||
+          kindIs(nextTok.kind, Lexer.RBrace)
+        ) =>
+          Some(name),
+        _ => None,
       }
-      let (_, state_temp2) = expectSimple(Lexer.FatArrow, state_temp1)
-      let (blockExpr, state_temp3) = parseBlock(state_temp2)
-      let body: Ast.Block = match (blockExpr.kind) {
-        Block(b) => b,
-        _ =>
-          Error.createError(
-            Error.Parsing,
-            blockExpr.node.span,
-            "Expected block after =>",
-            [Error.Received("non-block expression")]
-          ),
-      }
-      let clause: Ast.FnClause = {
-        node: { id: 0, span: Source.makeSpan(0, 0, 0, 0) },
-        param: pat,
-        guard: guardOpt,
-        body,
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let item: Ast.FnItem = {
-        node: clause.node,
-        kind: Ast.Clause(clause),
-        attach: { leading: [], trailing: [], dangling: [] },
+      let (nextState, item) = match (includeName) {
+        Some(name) => {
+          let state_temp = dropToken(currentState)
+          let (nameId, state_temp1) = freshId(state_temp)
+          let (itemId, state_temp2) = freshId(state_temp1)
+          let includeRef: Ast.Name = {
+            node: { id: nameId, span: tok.span },
+            text: name,
+          }
+          let includeItem: Ast.FnItem = {
+            node: { id: itemId, span: tok.span },
+            kind: Ast.Include(includeRef),
+            attach: { leading: [], trailing: [], dangling: [] },
+          }
+          (state_temp2, includeItem)
+        },
+        None => {
+          let (pat, state_temp) = parseMatchPattern(currentState)
+          let (guardOpt, state_temp1) = if (
+            kindIs(currentToken(state_temp).kind, Lexer.LitName("when"))
+          ) {
+            let (_, state_temp0) = expectKeyword("when", state_temp)
+            let (guard, state_temp00) = parseExpr(state_temp0)
+            (Some(guard), state_temp00)
+          } else {
+            (None, state_temp)
+          }
+          let (_, state_temp2) = expectSimple(Lexer.FatArrow, state_temp1)
+          let (blockExpr, state_temp3) = parseBlock(state_temp2)
+          let body: Ast.Block = match (blockExpr.kind) {
+            Block(b) => b,
+            _ =>
+              Error.createError(
+                Error.Parsing,
+                blockExpr.node.span,
+                "Expected block after =>",
+                [Error.Received("non-block expression")]
+              ),
+          }
+          let (clauseId, state_temp4) = freshId(state_temp3)
+          let span = spanFromTokens(pat.node.span, body.node.span)
+          let clause: Ast.FnClause = {
+            node: { id: clauseId, span },
+            param: pat,
+            guard: guardOpt,
+            body,
+            attach: { leading: [], trailing: [], dangling: [] },
+          }
+          let (itemId, state_temp5) = freshId(state_temp4)
+          let clauseItem: Ast.FnItem = {
+            node: { id: itemId, span },
+            kind: Ast.Clause(clause),
+            attach: { leading: [], trailing: [], dangling: [] },
+          }
+          (state_temp5, clauseItem)
+        },
       }
       items = [item, ...items]
-      if (kindIs(currentToken(state_temp3).kind, Lexer.Comma)) {
-        let (_, state_temp4) = expectSimple(Lexer.Comma, state_temp3)
-        currentState = state_temp4
+      if (kindIs(currentToken(nextState).kind, Lexer.Comma)) {
+        let (_, state_temp6) = expectSimple(Lexer.Comma, nextState)
+        currentState = state_temp6
       } else {
-        currentState = state_temp3
+        currentState = nextState
       }
     }
     let (rbraceTok, state5) = expectSimple(Lexer.RBrace, currentState)
     (List.reverse(items), rbraceTok, state5)
   }
 
-  let mkFnOnlyMatch = (endSpan: Source.Span, fnItems: List<Ast.FnItem>, stateX: ParseState) => {
-    let fnExpr: Ast.FnExpr = {
-      node: { id, span: endSpan },
-      items: fnItems,
-      attach: { leading: [], trailing: [], dangling: [] },
-    }
-    let fnVal = makeExpr(id, endSpan, Fn(fnExpr))
-    (fnVal, stateX)
-  }
-
-  let mkApplyMatch = (
-    scrutinee: Ast.Expr,
+  let mkMatchExpr = (
+    exprId: Number,
     endSpan: Source.Span,
+    scrutineeOpt: Option<Ast.Expr>,
     fnItems: List<Ast.FnItem>,
+    arrowSugar: Bool,
     stateX: ParseState,
   ) => {
+    let (fnExprId, stateY) = freshId(stateX)
     let fnExpr: Ast.FnExpr = {
-      node: { id, span: endSpan },
+      node: { id: fnExprId, span: endSpan },
       items: fnItems,
       attach: { leading: [], trailing: [], dangling: [] },
     }
-    let fnVal = makeExpr(id, endSpan, Fn(fnExpr))
-    let applyExpr = makeExpr(id, endSpan, Apply(fnVal, scrutinee))
-    (applyExpr, stateX)
+    let matchExpr: Ast.MatchExpr = {
+      node: { id: exprId, span: endSpan },
+      scrutinee: scrutineeOpt,
+      bundle: fnExpr,
+      arrowSugar,
+      attach: { leading: [], trailing: [], dangling: [] },
+    }
+    let expr = makeExpr(exprId, endSpan, Match(matchExpr))
+    (expr, stateY)
   }
 
   if (kindIs(currentToken(state2).kind, Lexer.LBrace)) {
     let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state2)
     let span = spanFromTokens(matchTok.span, rbraceTok.span)
-    mkFnOnlyMatch(span, fnItems, state5)
+    mkMatchExpr(id, span, None, fnItems, false, state5)
   } else {
     let (scrutinee, state3) = parseInfix(state2)
     if (kindIs(currentToken(state3).kind, Lexer.LBrace)) {
       let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state3)
       let span = spanFromTokens(matchTok.span, rbraceTok.span)
-      mkApplyMatch(scrutinee, span, fnItems, state5)
+      mkMatchExpr(id, span, Some(scrutinee), fnItems, false, state5)
     } else if (kindIs(currentToken(state3).kind, Lexer.FatArrow)) {
       let (_, state4) = expectSimple(Lexer.FatArrow, state3)
-    if (kindIs(currentToken(state4).kind, Lexer.LBrace)) {
-      let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state4)
-      let span = spanFromTokens(matchTok.span, rbraceTok.span)
-      let matcherFnExpr: Ast.FnExpr = {
-        node: { id, span },
-        items: fnItems,
-        attach: { leading: [], trailing: [], dangling: [] },
+      if (kindIs(currentToken(state4).kind, Lexer.LBrace)) {
+        let _ = match (exprToParamPattern(scrutinee)) {
+          Some(_) => void,
+          None =>
+            Error.createError(
+              Error.Parsing,
+              scrutinee.node.span,
+              "Unsupported first-class match parameter",
+              [
+                Error.Note(
+                  "match(param) => currently supports identifier or tuple of identifiers",
+                ),
+              ]
+            ),
+        }
+        let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state4)
+        let span = spanFromTokens(matchTok.span, rbraceTok.span)
+        mkMatchExpr(id, span, Some(scrutinee), fnItems, true, state5)
+      } else {
+        Error.createError(
+          Error.Parsing,
+          currentToken(state4).span,
+          "Expected { ... } after match(...) =>",
+          [Error.Note("match arrow form requires a clause block")]
+        )
       }
-      let matcherFn = makeExpr(id, span, Fn(matcherFnExpr))
-      let applyExpr = makeExpr(id, span, Apply(matcherFn, scrutinee))
-      let paramPattern = match (exprToParamPattern(scrutinee)) {
-        Some(p) => p,
-        None =>
-          Error.createError(
-            Error.Parsing,
-            scrutinee.node.span,
-            "Unsupported first-class match parameter",
-            [
-              Error.Note(
-                "match(param) => currently supports identifier or tuple of identifiers",
-              ),
-            ]
-          ),
-      }
-      let bodyBlock: Ast.Block = {
-        node: { id, span },
-        items: [],
-        result: [applyExpr],
-      }
-      let outerClause: Ast.FnClause = {
-        node: { id, span },
-        param: paramPattern,
-        guard: None,
-        body: bodyBlock,
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let outerItem: Ast.FnItem = {
-        node: { id, span },
-        kind: Ast.Clause(outerClause),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let outerFn: Ast.FnExpr = {
-        node: { id, span },
-        items: [outerItem],
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let expr = makeExpr(id, span, Fn(outerFn))
-      (expr, state5)
-    } else {
-      Error.createError(
-        Error.Parsing,
-        currentToken(state4).span,
-        "Expected { ... } after match(...) =>",
-        [Error.Note("match arrow form requires a clause block")]
-      )
-    }
     } else {
       Error.createError(
         Error.Parsing,

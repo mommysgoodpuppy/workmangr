@@ -100,6 +100,59 @@ and lowerFnExpr = (fnExpr: Ast.FnExpr) => {
   { ...fnExpr, items: List.map(lowerFnItem, fnExpr.items) }
 }
 
+and lowerMatchExpr = (expr: Ast.Expr, m: Ast.MatchExpr) => {
+  let loweredBundle = lowerFnExpr(m.bundle)
+  let bundleExpr: Ast.Expr = {
+    node: m.bundle.node,
+    kind: Ast.Fn(loweredBundle),
+    attach: m.attach,
+  }
+  match ((m.scrutinee, m.arrowSugar)) {
+    (None, false) => {
+      { ...expr, kind: Ast.Fn(loweredBundle) }
+    },
+    (Some(scrutinee), false) => {
+      let loweredScrutinee = lowerExpr(scrutinee)
+      { ...expr, kind: Ast.Apply(bundleExpr, loweredScrutinee) }
+    },
+    (Some(scrutinee), true) => {
+      let loweredScrutinee = lowerExpr(scrutinee)
+      let param = exprToPattern(loweredScrutinee)
+      let innerApply: Ast.Expr = {
+        node: expr.node,
+        kind: Ast.Apply(bundleExpr, loweredScrutinee),
+        attach: expr.attach,
+      }
+      let body: Ast.Block = {
+        node: expr.node,
+        items: [],
+        result: [innerApply],
+      }
+      let clause: Ast.FnClause = {
+        node: expr.node,
+        param,
+        guard: None,
+        body,
+        attach: emptyAttach,
+      }
+      let item: Ast.FnItem = {
+        node: expr.node,
+        kind: Ast.Clause(clause),
+        attach: emptyAttach,
+      }
+      let fnExpr: Ast.FnExpr = { node: expr.node, items: [item], attach: expr.attach }
+      { ...expr, kind: Ast.Fn(fnExpr) }
+    },
+    _ =>
+      Error.createError(
+        Error.Lowering,
+        expr.node.span,
+        "invalid match arrow shape",
+        []
+      ),
+  }
+}
+
 and normalizeCallArgs = (node: Ast.Node, args: List<Ast.Expr>) => {
   match (args) {
     [] => makeUnitExpr(node),
@@ -265,6 +318,7 @@ and lowerExpr = (expr: Ast.Expr) => {
     Ast.Apply(callee, arg) => {
       { ...expr, kind: Ast.Apply(lowerExpr(callee), lowerExpr(arg)) }
     },
+    Ast.Match(m) => lowerMatchExpr(expr, m),
     Ast.Fn(fnExpr) => { ...expr, kind: Ast.Fn(lowerFnExpr(fnExpr)) },
     _ => expr,
   }

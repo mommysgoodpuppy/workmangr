@@ -63,6 +63,7 @@ provide enum rec ExprKind {
   Lit(AtomLiteral),
   Ident(Name),
   Fn(FnExpr),
+  Match(MatchExpr),
   Apply(Expr, Expr), // callee, single arg
   InfixChain(InfixChain),
   Postfix(Postfix),
@@ -164,6 +165,13 @@ and provide record FnItem {
 and provide record FnExpr {
   node: Node,
   items: List<FnItem>,
+  attach: Attachments,
+}
+and provide record MatchExpr {
+  node: Node,
+  scrutinee: Option<Expr>,
+  bundle: FnExpr,
+  arrowSugar: Bool, // true for `match(param) => { ... }`
   attach: Attachments,
 }
 and provide enum TypeExprKind {

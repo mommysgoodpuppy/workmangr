@@ -18,6 +18,7 @@ provide enum TokenKind {
   KwVar, // Var
   KwAllErrors, // AllErrors
   //literals
+  Wildcard, // _
   LitName(String), // strs
   ConstructorTok(String), // Strs
   LitNum(Number), //138510
@@ -65,6 +66,7 @@ provide record Token {
 provide let tokenKindToString = kind => match (kind) {
   KwVar => "Var",
   KwAllErrors => "AllErrors",
+  Wildcard => "_",
   LitName(name) => name,
   ConstructorTok(name) => name,
   LitNum(num) => "<number>",
@@ -327,6 +329,7 @@ provide let lex = source => {
     match (name) {
       "Var" => KwVar,
       "AllErrors" => KwAllErrors,
+      "_" => Wildcard,
       "true" => LitBool(true),
       "false" => LitBool(false),
       _ => {
