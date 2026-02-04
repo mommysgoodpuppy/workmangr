@@ -49,7 +49,7 @@ let rec exprToPattern = (expr: Ast.Expr) => {
       { node: expr.node, kind: Ast.Lit(lit), attach: expr.attach }: Ast.Pattern
     },
     _ =>
-      Error.createError(
+      Error.createPanicError(
         Error.Lowering,
         expr.node.span,
         "Unsupported pattern in => clause",
@@ -79,7 +79,7 @@ let rec lowerFnClause = (clause: Ast.FnClause) => {
   let loweredBody = match (loweredBodyExpr.kind: Ast.ExprKind) {
     Ast.Block(b) => b,
     _ =>
-      Error.createError(
+      Error.createPanicError(
         Error.Lowering,
         clause.body.node.span,
         "internal lowering error: expected block body",
@@ -144,7 +144,7 @@ and lowerMatchExpr = (expr: Ast.Expr, m: Ast.MatchExpr) => {
       { ...expr, kind: Ast.Fn(fnExpr) }
     },
     _ =>
-      Error.createError(
+      Error.createPanicError(
         Error.Lowering,
         expr.node.span,
         "invalid match arrow shape",
@@ -180,7 +180,7 @@ and lowerCallOnlyPostfix = (expr: Ast.Expr, pf: Ast.Postfix) => {
         foldCalls(applied, rest)
       },
       _ =>
-        Error.createError(
+        Error.createPanicError(
           Error.Lowering,
           expr.node.span,
           "internal lowering error: non-call segment in call-only fold",
@@ -267,24 +267,24 @@ and lowerExpr = (expr: Ast.Expr) => {
     Ast.Block(inner) => {
       let loweredItems = List.map(item =>
         match (item) {
-          Ast.Stmt(stmt) => {
-            let loweredStmt = match (stmt.kind) {
-              Ast.Expr(e) => { ...stmt, kind: Ast.Expr(lowerExpr(e)) },
+          Ast.ExprItem(expr) => {
+            let loweredExpr = match (expr.kind) {
+              Ast.Let(binding) => {
+                let loweredBinding = { ...binding, value: lowerExpr(binding.value) }
+                { ...expr, kind: Ast.Let(loweredBinding) }
+              },
               Ast.Assign(asg) => {
                 {
-                  ...stmt,
+                  ...expr,
                   kind: Ast.Assign({
                     target: lowerExpr(asg.target),
                     value: lowerExpr(asg.value),
                   }),
                 }
               },
-              Ast.Let(binding) => {
-                let loweredBinding = { ...binding, value: lowerExpr(binding.value) }
-                { ...stmt, kind: Ast.Let(loweredBinding) }
-              },
+              _ => lowerExpr(expr),
             }
-            Ast.Stmt(loweredStmt)
+            Ast.ExprItem(loweredExpr)
           },
           _ => item,
         },
@@ -320,6 +320,13 @@ and lowerExpr = (expr: Ast.Expr) => {
     },
     Ast.Match(m) => lowerMatchExpr(expr, m),
     Ast.Fn(fnExpr) => { ...expr, kind: Ast.Fn(lowerFnExpr(fnExpr)) },
+    Ast.Let(binding) => {
+      let loweredBinding = { ...binding, value: lowerExpr(binding.value) }
+      { ...expr, kind: Ast.Let(loweredBinding) }
+    },
+    Ast.Assign(asg) => {
+      { ...expr, kind: Ast.Assign({ target: lowerExpr(asg.target), value: lowerExpr(asg.value) }) }
+    },
     _ => expr,
   }
 }

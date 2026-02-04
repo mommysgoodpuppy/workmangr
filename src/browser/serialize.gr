@@ -47,6 +47,30 @@ let nodeToJson = (node: Ast.Node) => {
   ",\"span\":" ++ spanToJson(node.span) ++ "}"
 }
 
+let expectedTopItemKindToString = (kind: Ast.ExpectedTopItemKind) => {
+  match (kind) {
+    Ast.TopItemAny => "AnyTopItem",
+    Ast.TopItemDeclGroup => "DeclGroup",
+    Ast.TopItemImport => "Import",
+    Ast.TopItemReexport => "Reexport",
+    Ast.TopItemExport => "Export",
+    Ast.TopItemDirective => "Directive",
+    Ast.TopItemTrivia => "Trivia",
+    Ast.TopItemRecovery => "Recovery",
+  }
+}
+
+let expectedKindToString = (kind: Ast.ExpectedKind) => {
+  match (kind) {
+    Ast.ExpectTopItem(tk) => "TopItem(" ++ expectedTopItemKindToString(tk) ++ ")",
+    Ast.ExpectExpr => "Expr",
+    Ast.ExpectPattern => "Pattern",
+    Ast.ExpectTypeExpr => "TypeExpr",
+    Ast.ExpectToken => "Token",
+    Ast.ExpectBlock => "Block",
+  }
+}
+
 let rec exprKindToString = (kind: Ast.ExprKind) => {
   match (kind) {
     Ast.Lit(Ast.Int(n)) => "Lit(Int(" ++ toString(n) ++ "))",
@@ -160,7 +184,19 @@ let topItemToJson = (item: Ast.TopItem) => {
     },
     Ast.Import(_) => "{\"type\":\"Import\"}",
     Ast.Reexport(_) => "{\"type\":\"Reexport\"}",
+    Ast.Export(_) => "{\"type\":\"Export\"}",
     Ast.Directive(_) => "{\"type\":\"Directive\"}",
+    Ast.Recovery(recovery) =>
+      match (recovery.kind) {
+        Ast.UnknownTopLevel(text) =>
+          "{\"type\":\"Recovery\",\"kind\":\"UnknownTopLevel\",\"text\":\""
+          ++ escapeJson(text) ++ "\",\"expected\":\""
+          ++ expectedKindToString(recovery.expected) ++ "\"}",
+        Ast.InvalidTopLevel(text) =>
+          "{\"type\":\"Recovery\",\"kind\":\"InvalidTopLevel\",\"text\":\""
+          ++ escapeJson(text) ++ "\",\"expected\":\""
+          ++ expectedKindToString(recovery.expected) ++ "\"}",
+      },
     Ast.Trivia(_) => "{\"type\":\"Trivia\"}"
   }
 }

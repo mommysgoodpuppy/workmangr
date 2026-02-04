@@ -73,6 +73,8 @@ provide enum rec ExprKind {
   RecordLit(List<RecordItem>),
   Hole(Hole),
   If(Expr, Expr, Option<Expr>),
+  Let(LetBinding),
+  Assign(AssignExpr),
 }
 and provide enum RecordItem {
   Field(Name, Expr),
@@ -87,19 +89,9 @@ and provide record Expr {
   kind: ExprKind,
   attach: Attachments,
 }
-and provide record AssignStmt {
+and provide record AssignExpr {
   target: Expr,
   value: Expr,
-}
-and provide enum StmtKind {
-  Let(LetBinding),
-  Assign(AssignStmt),
-  Expr(Expr), // expression statement (void)
-}
-and provide record Stmt {
-  node: Node,
-  kind: StmtKind,
-  attach: Attachments,
 }
 and provide enum PostfixSegment {
   Call(List<Expr>),
@@ -120,7 +112,7 @@ and provide record Block {
   result: List<Expr>,
 }
 and provide enum BlockItem {
-  Stmt(Stmt),
+  ExprItem(Expr),
   TriviaItem(Trivia), // includes comments AND islands
   Directive(Directive),
 }
@@ -292,12 +284,40 @@ and provide enum RuleKind {
   Op,
   Annotate,
 }
+and provide enum ExpectedTopItemKind {
+  TopItemAny,
+  TopItemDeclGroup,
+  TopItemImport,
+  TopItemReexport,
+  TopItemExport,
+  TopItemDirective,
+  TopItemTrivia,
+  TopItemRecovery,
+}
+and provide enum ExpectedKind {
+  ExpectTopItem(ExpectedTopItemKind),
+  ExpectExpr,
+  ExpectPattern,
+  ExpectTypeExpr,
+  ExpectToken,
+  ExpectBlock,
+}
+and provide record Recovery {
+  node: Node,
+  kind: RecoveryKind,
+  expected: ExpectedKind,
+}
+and provide enum RecoveryKind {
+  UnknownTopLevel(String),
+  InvalidTopLevel(String),
+}
 and provide enum TopItem {
   Directive(Directive),
   Import(ImportDecl),
   Reexport(ReexportDecl),
   Export(Export),
   DeclGroup(DeclGroup),
+  Recovery(Recovery),
   //can be raw region
   Trivia(Trivia),
 }

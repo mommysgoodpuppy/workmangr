@@ -1,0 +1,71 @@
+module TestParserSemicolon
+
+from "list" include List
+from "runtime/unsafe/panic" include Panic
+use Panic.{ panic }
+from "./parser.gr" include Parser
+
+let assertOk = (cond: Bool, message: String) => {
+  if (!cond) {
+    panic(message)
+  } else {
+    void
+  }
+}
+
+let main = () => {
+  let source = "let a = 1\nlet b = 2;"
+  let tolerantResult = Parser.parseResult(source)
+  assertOk(
+    List.length(tolerantResult.missingSemicolons) == 1,
+    "expected one recovered top-level semicolon",
+  )
+
+  let blockSource = "let x = { let y = 1 y };"
+  let tolerantBlock = Parser.parseResult(blockSource)
+  assertOk(
+    List.length(tolerantBlock.missingSemicolons) == 1,
+    "expected one recovered block semicolon",
+  )
+
+  let exprStmtSource = "let x = { 1 let y = 2; y };"
+  let tolerantExprStmt = Parser.parseResult(exprStmtSource)
+  assertOk(
+    List.length(tolerantExprStmt.missingSemicolons) == 1,
+    "expected one recovered semicolon between expression statement and let",
+  )
+
+  let missingEq = Parser.parseResult("let a;")
+  assertOk(
+    List.length(missingEq.missingSemicolons) == 0,
+    "expected tolerant parse to recover missing '=' in let binding",
+  )
+
+  let missingRhs = Parser.parseResult("let x = { y = ; y };")
+  assertOk(
+    List.length(missingRhs.missingSemicolons) == 0,
+    "expected tolerant parse to recover missing assignment rhs",
+  )
+
+  let missingParen = Parser.parseResult("let x = (1 + 2;")
+  assertOk(
+    List.length(missingParen.missingSemicolons) == 0,
+    "expected tolerant parse to recover missing ')'",
+  )
+
+  let missingBrace = Parser.parseResult("let x = { let y = 1;")
+  assertOk(
+    List.length(missingBrace.missingSemicolons) == 0,
+    "expected tolerant parse to recover missing '}'",
+  )
+
+  let unknownTopLevel = Parser.parseResult("oops ; let ok = 1;")
+  assertOk(
+    List.length(unknownTopLevel.missingSemicolons) == 0,
+    "expected tolerant parse to skip unknown top-level tokens",
+  )
+
+  print("parser semicolon recovery test passed")
+}
+
+main()

@@ -32,6 +32,9 @@ provide record CompilerError {
   clues: List<ErrorClue>,
 }
 
+let mut diagnostics: List<CompilerError> = []
+let mut panicMode: Bool = false
+
 let clueToString = (clue: ErrorClue) => {
   match (clue) {
     Expected(s) => "  expected: " ++ s,
@@ -81,7 +84,40 @@ provide let errorToString = (error: CompilerError) => {
   stageInfo ++ error.message ++ " " ++ location ++ cluesStr
 }
 
-provide let createError = (stage: Stage, span: Source.Span, message: String, clues: List<ErrorClue>) => {
+provide let clearErrors = () => {
+  diagnostics = []
+}
+
+provide let getErrors = () => List.reverse(diagnostics)
+
+provide let setPanicMode = (enabled: Bool) => {
+  panicMode = enabled
+}
+
+provide let createError = (
+  stage: Stage,
+  span: Source.Span,
+  message: String,
+  recovery,
+  clues: List<ErrorClue> = [],
+  shouldPanic: Bool = false,
+) => {
   let error: CompilerError = { stage, message, span, clues }
+  diagnostics = [error, ...diagnostics]
+  if (shouldPanic || panicMode) {
+    panic(errorToString(error))
+  } else {
+    recovery
+  }
+}
+
+provide let createPanicError = (
+  stage: Stage,
+  span: Source.Span,
+  message: String,
+  clues: List<ErrorClue>,
+) => {
+  let error: CompilerError = { stage, message, span, clues }
+  diagnostics = [error, ...diagnostics]
   panic(errorToString(error))
 }

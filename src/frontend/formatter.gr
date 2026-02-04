@@ -2,142 +2,718 @@ module Formatter
 
 from "array" include Array
 from "list" include List
+from "string" include String
 
 from "../core/ast.gr" include Ast
+from "../core/source.gr" include Source
 from "./parser.gr" include Parser
 
 let join = (sep: String, xs: List<String>) => Array.join(sep, Array.fromList(xs))
 
-let rec formatPattern = (pat: Ast.Pattern) => {
-  match (pat.kind) {
-    Ast.Wildcard => "_",
-    Ast.Var(name) => name.text,
-    Ast.Pin(name) => name.text,
-    Ast.Lit(Ast.Int(n)) => toString(n),
-    Ast.Lit(Ast.Bool(b)) => if (b) { "true" } else { "false" },
-    Ast.Lit(Ast.Str(s)) => "\"" ++ s ++ "\"",
-    Ast.Lit(Ast.Char(c)) => "'" ++ toString(c) ++ "'",
-    Ast.Lit(Ast.Unit) => "()",
-    Ast.Lit(_) => "<lit>",
-    Ast.Tuple(items) => "(" ++ join(", ", List.map(formatPattern, items)) ++ ")",
-    Ast.Constructor(name, args) =>
-      if (List.length(args) == 0) {
-        name.text
-      } else {
-        name.text ++ "(" ++ join(", ", List.map(formatPattern, args)) ++ ")"
+let canonicalNonWs = (text: String) => {
+  let noSpace = String.replaceAll(" ", "", text)
+  let noTab = String.replaceAll("\t", "", noSpace)
+  let noLf = String.replaceAll("\n", "", noTab)
+  String.replaceAll("\r", "", noLf)
+}
+
+provide enum Mode {
+  Real,
+  Virtual,
+}
+
+provide record VirtualArtifact {
+  kind: String,
+  text: String,
+  start: Number,
+  end: Number,
+  reason: String,
+}
+
+provide record FormatResult {
+  text: String,
+  virtualArtifacts: List<VirtualArtifact>,
+}
+
+record Settings {
+  allowVirtualInsertions: Bool,
+}
+
+let realSettings = { allowVirtualInsertions: false }
+let virtualSettings = { allowVirtualInsertions: true }
+
+let rec spaces = (n: Number) => {
+  if (n <= 0) {
+    ""
+  } else {
+    " " ++ spaces(n - 1)
+  }
+}
+
+let artifactFromVirtual = (text: String, anchor: Number, reason: String) => {
+  {
+    kind: "ghostToken",
+    text,
+    start: anchor,
+    end: anchor,
+    reason,
+  }
+}
+
+let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) => {
+  let mut chunks: List<String> = []
+  let mut artifacts: List<VirtualArtifact> = []
+  let mut indent = 0
+  let mut atLineStart = true
+
+  let write = (text: String) => {
+    if (atLineStart) {
+      chunks = [spaces(indent), ...chunks]
+      atLineStart = false
+    }
+    chunks = [text, ...chunks]
+  }
+
+  let newline = () => {
+    chunks = ["\n", ...chunks]
+    atLineStart = true
+  }
+
+  let space = () => {
+    if (!atLineStart) {
+      chunks = [" ", ...chunks]
+    }
+  }
+
+  let emitVirtual = (text: String, anchor: Number, reason: String) => {
+    if (mode == Virtual && settings.allowVirtualInsertions) {
+      write(text)
+      artifacts = [artifactFromVirtual(text, anchor, reason), ...artifacts]
+    }
+  }
+
+  let rec emitTrivia = (trivia: Ast.Trivia) => {
+    match (trivia.kind) {
+      Ast.LineComment(text) => write(text),
+      Ast.BlockComment(text) => write(text),
+      Ast.Opaque(text) => write(text),
+    }
+  }
+
+  let rec emitTriviaInline = (triviaList: List<Ast.Trivia>) => {
+    match (triviaList) {
+      [] => void,
+      [single] => emitTrivia(single),
+      [head, ...tail] => {
+        emitTrivia(head)
+        space()
+        emitTriviaInline(tail)
       },
-    Ast.Hole(_) => "?",
-    Ast.List(items, _) => "[" ++ join(", ", List.map(formatPattern, items)) ++ "]",
-    Ast.AllErrors => "AllErrors",
+    }
   }
-}
 
-let rec formatExpr = (expr: Ast.Expr) => {
-  match (expr.kind) {
-    Ast.Lit(Ast.Int(n)) => toString(n),
-    Ast.Lit(Ast.Bool(b)) => if (b) { "true" } else { "false" },
-    Ast.Lit(Ast.Str(s)) => "\"" ++ s ++ "\"",
-    Ast.Lit(Ast.Char(c)) => "'" ++ toString(c) ++ "'",
-    Ast.Lit(Ast.Unit) => "()",
-    Ast.Lit(_) => "<lit>",
-    Ast.Ident(name) => name.text,
-    Ast.Paren(inner) => "(" ++ formatExpr(inner) ++ ")",
-    Ast.Tuple(items) => "(" ++ join(", ", List.map(formatExpr, items)) ++ ")",
-    Ast.Hole(_) => "?",
-    Ast.RecordLit(_) => ".{...}",
-    Ast.Postfix(_) => "<postfix>",
-    Ast.InfixChain(chain) => {
-      let parts = List.map(
-        (pair: (Ast.Name, Ast.Expr)) => {
-          let (op, rhs) = pair
-          " " ++ op.text ++ " " ++ formatExpr(rhs)
-        },
-        chain.rest,
-      )
-      formatExpr(chain.first) ++ join("", parts)
-    },
-    Ast.Apply(callee, arg) => formatExpr(callee) ++ "(" ++ formatExpr(arg) ++ ")",
-    Ast.Block(block) => {
-      let resultText = join("; ", List.map(formatExpr, block.result))
-      "{ " ++ resultText ++ " }"
-    },
-    Ast.If(cond, thenExpr, elseExpr) => {
-      let elsePart = match (elseExpr) {
-        None => "",
-        Some(e) => " else " ++ formatExpr(e),
-      }
-      "if " ++ formatExpr(cond) ++ " " ++ formatExpr(thenExpr) ++ elsePart
-    },
-    Ast.Fn(fnExpr) => {
-      let items = List.map(
-        (item: Ast.FnItem) =>
-          match (item.kind) {
-            Ast.Clause(clause) => formatPattern(clause.param) ++ " => " ++ formatExpr(
-              { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
-            ),
-            Ast.Include(name) => name.text,
-            Ast.Trivia(_) => "<trivia>",
-            Ast.Hole(_) => "?",
+  let rec emitTriviaLines = (triviaList: List<Ast.Trivia>) => {
+    match (triviaList) {
+      [] => void,
+      [single] => emitTrivia(single),
+      [head, ...tail] => {
+        emitTrivia(head)
+        newline()
+        emitTriviaLines(tail)
+      },
+    }
+  }
+
+  let withAttachments = (attach: Ast.Attachments, emitCore) => {
+    if (attach.leading != []) {
+      emitTriviaLines(attach.leading)
+      newline()
+    }
+    emitCore()
+    if (attach.trailing != []) {
+      space()
+      emitTriviaInline(attach.trailing)
+    }
+    if (attach.dangling != []) {
+      newline()
+      emitTriviaLines(attach.dangling)
+    }
+  }
+
+  let rec emitCommaSeparated = (emitOne, items) => {
+    match (items) {
+      [] => void,
+      [single] => emitOne(single),
+      [head, ...tail] => {
+        emitOne(head)
+        write(",")
+        space()
+        emitCommaSeparated(emitOne, tail)
+      },
+    }
+  }
+
+  let rec emitPattern = (pattern: Ast.Pattern) => {
+    withAttachments(
+      pattern.attach,
+      () => {
+        match (pattern.kind) {
+          Ast.Hole(_) => write("?"),
+          Ast.Wildcard => write("_"),
+          Ast.Var(name) => write(name.text),
+          Ast.Pin(name) => {
+            write("Var")
+            write("(")
+            write(name.text)
+            write(")")
           },
-        fnExpr.items
-      )
-      if (List.length(items) == 1) {
-        match (items) {
-          [single] => single,
-          _ => "match { " ++ join(", ", items) ++ " }",
+          Ast.Lit(Ast.Int(n)) => write(toString(n)),
+          Ast.Lit(Ast.Bool(b)) => write(if (b) { "true" } else { "false" }),
+          Ast.Lit(Ast.Char(c)) => write("'" ++ toString(c) ++ "'"),
+          Ast.Lit(Ast.Str(s)) => write("\"" ++ s ++ "\""),
+          Ast.Lit(Ast.Unit) => write("()"),
+          Ast.Lit(_) => write("<lit>"),
+          Ast.Constructor(name, args) => {
+            write(name.text)
+            if (args != []) {
+              write("(")
+              emitCommaSeparated(emitPattern, args)
+              write(")")
+            }
+          },
+          Ast.Tuple(items) => {
+            write("(")
+            emitCommaSeparated(emitPattern, items)
+            write(")")
+          },
+          Ast.List(items, rest) => {
+            write("[")
+            emitCommaSeparated(emitPattern, items)
+            match (rest) {
+              None => void,
+              Some(r) => {
+                if (items != []) {
+                  write(",")
+                  space()
+                }
+                write("..")
+                space()
+                emitPattern(r)
+              },
+            }
+            write("]")
+          },
+          Ast.AllErrors => write("AllErrors"),
         }
-      } else {
-        "match { " ++ join(", ", items) ++ " }"
-      }
-    },
-    Ast.Match(m) => {
-      let items = List.map(
-        (item: Ast.FnItem) =>
-          match (item.kind) {
-            Ast.Clause(clause) => formatPattern(clause.param) ++ " => " ++ formatExpr(
-              { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
-            ),
-            Ast.Include(name) => name.text,
-            Ast.Trivia(_) => "<trivia>",
-            Ast.Hole(_) => "?",
+      },
+    )
+  }
+
+  let rec emitTypeExpr = (typeExpr: Ast.TypeExpr) => {
+    match (typeExpr.kind) {
+      Ast.Hole(_) => write("?"),
+      Ast.Var(name) => write(name.text),
+      Ast.Ref(name, args) => {
+        write(name.text)
+        if (args != []) {
+          write("<")
+          emitCommaSeparated(emitTypeExpr, args)
+          write(">")
+        }
+      },
+      Ast.Tuple(items) => {
+        write("(")
+        emitCommaSeparated(emitTypeExpr, items)
+        write(")")
+      },
+      Ast.Record(fields) => {
+        write("{")
+        if (fields != []) {
+          space()
+          emitCommaSeparated(
+            (pair: (Ast.Name, Ast.TypeExpr)) => {
+              let (name, ty) = pair
+              write(name.text)
+              space()
+              write(":")
+              space()
+              emitTypeExpr(ty)
+            },
+            fields,
+          )
+          space()
+        }
+        write("}")
+      },
+      Ast.Arrow(params, result) => {
+        write("(")
+        emitCommaSeparated(emitTypeExpr, params)
+        write(")")
+        space()
+        write("=>")
+        space()
+        emitTypeExpr(result)
+      },
+      Ast.Ptr(inner, stateOpt) => {
+        write("Ptr")
+        write("<")
+        emitTypeExpr(inner)
+        match (stateOpt) {
+          None => void,
+          Some(name) => {
+            write(",")
+            space()
+            write(name.text)
           },
-        m.bundle.items
-      )
-      let arms = "{ " ++ join(", ", items) ++ " }"
-      match ((m.scrutinee, m.arrowSugar)) {
-        (None, _) => "match " ++ arms,
-        (Some(scrutinee), false) => "match(" ++ formatExpr(scrutinee) ++ ") " ++ arms,
-        (Some(scrutinee), true) => "match(" ++ formatExpr(scrutinee) ++ ") => " ++ arms,
+        }
+        write(">")
+      },
+      Ast.EffectRow(cases, hasTailWildcard) => {
+        write("[")
+        emitCommaSeparated(
+          (effectCase: Ast.EffectCase) => {
+            write(effectCase.name.text)
+            match (effectCase.payload) {
+              None => void,
+              Some(payload) => {
+                write("(")
+                emitTypeExpr(payload)
+                write(")")
+              },
+            }
+          },
+          cases,
+        )
+        if (hasTailWildcard) {
+          if (cases != []) {
+            write(",")
+            space()
+          }
+          write("..")
+        }
+        write("]")
+      },
+      Ast.UnitType => write("Void"),
+    }
+  }
+
+  let rec emitExpr = (expr: Ast.Expr) => {
+    withAttachments(
+      expr.attach,
+      () => {
+        match (expr.kind) {
+          Ast.Lit(Ast.Int(n)) => write(toString(n)),
+          Ast.Lit(Ast.Bool(b)) => write(if (b) { "true" } else { "false" }),
+          Ast.Lit(Ast.Str(s)) => write("\"" ++ s ++ "\""),
+          Ast.Lit(Ast.Char(c)) => write("'" ++ toString(c) ++ "'"),
+          Ast.Lit(Ast.Unit) => write("()"),
+          Ast.Lit(_) => write("<lit>"),
+          Ast.Ident(name) => write(name.text),
+          Ast.Paren(inner) => {
+            write("(")
+            emitExpr(inner)
+            write(")")
+          },
+          Ast.Tuple(items) => {
+            write("(")
+            emitCommaSeparated(emitExpr, items)
+            write(")")
+          },
+          Ast.Hole(_) => write("?"),
+          Ast.RecordLit(items) => {
+            write(".{")
+            if (items != []) {
+              space()
+              emitCommaSeparated(
+                (item) =>
+                  match (item) {
+                    Ast.Field(name, value) => {
+                      write(name.text)
+                      space()
+                      write("=")
+                      space()
+                      emitExpr(value)
+                    },
+                    Ast.Spread(e) => {
+                      write("..")
+                      emitExpr(e)
+                    },
+                  },
+                items,
+              )
+              space()
+            }
+            write("}")
+          },
+          Ast.Postfix(postfix) => {
+            emitExpr(postfix.target)
+            let rec emitSegments = (segments: List<Ast.PostfixSegment>) => {
+              match (segments) {
+                [] => void,
+                [segment, ...tail] => {
+                  match (segment) {
+                    Ast.Call(args) => {
+                      write("(")
+                      emitCommaSeparated(emitExpr, args)
+                      write(")")
+                    },
+                    Ast.Project(name) => {
+                      write(".")
+                      write(name.text)
+                    },
+                    Ast.Index(indexExpr) => {
+                      write("[")
+                      emitExpr(indexExpr)
+                      write("]")
+                    },
+                  }
+                  emitSegments(tail)
+                },
+              }
+            }
+            emitSegments(postfix.segments)
+          },
+          Ast.InfixChain(chain) => {
+            emitExpr(chain.first)
+            let rec emitRest = (rest: List<(Ast.Name, Ast.Expr)>) => {
+              match (rest) {
+                [] => void,
+                [(op, rhs), ...tail] => {
+                  space()
+                  write(op.text)
+                  space()
+                  emitExpr(rhs)
+                  emitRest(tail)
+                },
+              }
+            }
+            emitRest(chain.rest)
+          },
+          Ast.Apply(callee, arg) => {
+            emitExpr(callee)
+            write("(")
+            emitExpr(arg)
+            write(")")
+          },
+          Ast.Block(block) => emitBlock(block),
+          Ast.If(cond, thenExpr, elseExpr) => {
+            write("if")
+            space()
+            emitExpr(cond)
+            space()
+            emitExpr(thenExpr)
+            match (elseExpr) {
+              None => void,
+              Some(e) => {
+                space()
+                write("else")
+                space()
+                emitExpr(e)
+              },
+            }
+          },
+          Ast.Fn(fnExpr) => {
+            write("match")
+            space()
+            write("{")
+            if (fnExpr.items != []) {
+              space()
+              emitCommaSeparated(emitFnItem, fnExpr.items)
+              space()
+            }
+            write("}")
+          },
+          Ast.Match(matchExpr) => {
+            write("match")
+            match (matchExpr.scrutinee) {
+              None => {
+                space()
+              },
+              Some(scrutinee) => {
+                write("(")
+                emitExpr(scrutinee)
+                write(")")
+                space()
+                if (matchExpr.arrowSugar) {
+                  write("=>")
+                  space()
+                }
+              },
+            }
+            write("{")
+            if (matchExpr.bundle.items != []) {
+              space()
+              emitCommaSeparated(emitFnItem, matchExpr.bundle.items)
+              space()
+            }
+            write("}")
+          },
+          Ast.Let(binding) => {
+            emitBinding(binding)
+          },
+          Ast.Assign(assignStmt) => {
+            emitExpr(assignStmt.target)
+            space()
+            write("=")
+            space()
+            emitExpr(assignStmt.value)
+          },
+        }
+      },
+    )
+  }
+
+  and emitDirective = (directive: Ast.Directive) => {
+    write("@")
+    write(directive.name.text)
+    write("(")
+    emitCommaSeparated(emitExpr, directive.args)
+    write(")")
+  }
+
+  and emitBlock = (block: Ast.Block) => {
+    write("{")
+    let hasBody = block.items != [] || block.result != []
+    if (hasBody) {
+      newline()
+      indent = indent + 2
+
+      let mut first = true
+      let emitSep = () => {
+        if (!first) {
+          newline()
+        } else {
+          first = false
+        }
       }
-    },
+
+      let rec emitItems = (items: List<Ast.BlockItem>) => {
+        match (items) {
+          [] => void,
+          [item, ...tail] => {
+            emitSep()
+            match (item) {
+              Ast.ExprItem(expr) => {
+                emitExpr(expr)
+                match (expr.kind) {
+                  Ast.Assign(_) =>
+                    emitVirtual(";", expr.node.span.end, "implicit statement terminator"),
+                  _ => void,
+                }
+              },
+              Ast.TriviaItem(trivia) => emitTrivia(trivia),
+              Ast.Directive(d) => emitDirective(d),
+            }
+            emitItems(tail)
+          },
+        }
+      }
+
+      let rec emitResults = (results: List<Ast.Expr>) => {
+        match (results) {
+          [] => void,
+          [expr, ...tail] => {
+            emitSep()
+            emitExpr(expr)
+            emitResults(tail)
+          },
+        }
+      }
+
+      emitItems(block.items)
+      emitResults(block.result)
+
+      indent = indent - 2
+      newline()
+    }
+    write("}")
+  }
+
+  and emitFnItem = (item: Ast.FnItem) => {
+    withAttachments(
+      item.attach,
+      () => {
+        match (item.kind) {
+          Ast.Clause(clause) => {
+            emitPattern(clause.param)
+            match (clause.guard) {
+              None => void,
+              Some(guardExpr) => {
+                space()
+                write("when")
+                space()
+                emitExpr(guardExpr)
+              },
+            }
+            space()
+            write("=>")
+            space()
+            emitBlock(clause.body)
+          },
+          Ast.Include(name) => write(name.text),
+          Ast.Trivia(trivia) => emitTrivia(trivia),
+          Ast.Hole(_) => write("?"),
+        }
+      },
+    )
+  }
+
+  and emitBinding = (binding: Ast.LetBinding) => {
+    write("let")
+    space()
+    emitPattern(binding.name)
+    match (binding.annotation) {
+      None => void,
+      Some(ty) => {
+        space()
+        write(":")
+        space()
+        emitTypeExpr(ty)
+      },
+    }
+    space()
+    write("=")
+    space()
+    emitExpr(binding.value)
+    emitVirtual(";", binding.node.span.end, "implicit statement terminator")
+  }
+
+  let emitDecl = (decl: Ast.Decl) => {
+    match (decl) {
+      Ast.LetDecl(letDecl) => {
+        let mut first = true
+        let rec emitBindings = (bindings: List<Ast.LetBinding>) => {
+          match (bindings) {
+            [] => void,
+            [binding, ...tail] => {
+              if (!first) {
+                newline()
+              } else {
+                first = false
+              }
+              emitBinding(binding)
+              emitBindings(tail)
+            },
+          }
+        }
+        emitBindings(letDecl.bindings)
+      },
+      Ast.TypeDecl(typeDecl) => {
+        write("type")
+        space()
+        write(typeDecl.name.text)
+        space()
+        write("= ?")
+      },
+      Ast.RecordDecl(recordDecl) => {
+        write("record")
+        space()
+        write(recordDecl.name.text)
+        space()
+        write("= {}")
+      },
+      Ast.InfixDecl(infixDecl) => {
+        write("infix")
+        space()
+        write(infixDecl.name.text)
+      },
+      Ast.PrefixDecl(prefixDecl) => {
+        write("prefix")
+        space()
+        write(prefixDecl.name.text)
+      },
+    }
+  }
+
+  let emitTopItem = (item: Ast.TopItem) => {
+    match (item) {
+      Ast.DeclGroup(group) => {
+        let mut first = true
+        let rec emitDecls = (decls: List<Ast.Decl>) => {
+          match (decls) {
+            [] => void,
+            [decl, ...tail] => {
+              if (!first) {
+                newline()
+              } else {
+                first = false
+              }
+              emitDecl(decl)
+              emitDecls(tail)
+            },
+          }
+        }
+        emitDecls(group.decls)
+      },
+      Ast.Import(importDecl) => {
+        write("import")
+        space()
+        write(importDecl.modulePath)
+      },
+      Ast.Reexport(reexportDecl) => {
+        write("reexport")
+        space()
+        write(reexportDecl.modulePath)
+      },
+      Ast.Export(_) => write("export"),
+      Ast.Directive(directive) => emitDirective(directive),
+      Ast.Recovery(recovery) =>
+        match (recovery.kind) {
+          Ast.UnknownTopLevel(text) => write(text),
+          Ast.InvalidTopLevel(text) => write(text),
+        },
+      Ast.Trivia(trivia) => emitTrivia(trivia),
+    }
+  }
+
+  let mut firstTop = true
+  let rec emitProgramItems = (items: List<Ast.TopItem>) => {
+    match (items) {
+      [] => void,
+      [item, ...tail] => {
+        if (!firstTop) {
+          newline()
+          newline()
+        } else {
+          firstTop = false
+        }
+        emitTopItem(item)
+        emitProgramItems(tail)
+      },
+    }
+  }
+
+  emitProgramItems(program.items)
+
+  {
+    text: join("", List.reverse(chunks)),
+    virtualArtifacts: List.reverse(artifacts),
   }
 }
 
-let formatBinding = (b: Ast.LetBinding) => {
-  "let " ++ formatPattern(b.name) ++ " = " ++ formatExpr(b.value) ++ ";"
-}
-
-let formatTopItem = (item: Ast.TopItem) => {
-  match (item) {
-    Ast.DeclGroup(dg) => {
-      match (dg.decls) {
-        [Ast.LetDecl(ld), ..._] => join("\n", List.map(formatBinding, ld.bindings)),
-        _ => "<decl-group>",
-      }
-    },
-    Ast.Import(_) => "<import>",
-    Ast.Reexport(_) => "<reexport>",
-    Ast.Export(_) => "<export>",
-    Ast.Directive(_) => "<directive>",
-    Ast.Trivia(_) => "<trivia>",
-  }
-}
-
-let formatProgram = (program: Ast.Program) => {
-  join("\n\n", List.map(formatTopItem, program.items))
-}
-
-provide let format = (source: String) => {
+let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) => {
   let program = Parser.parse(source)
-  formatProgram(program)
+  let rendered = renderWithSettings(program, mode, settings)
+  if (mode == Real) {
+    if (canonicalNonWs(rendered.text) == canonicalNonWs(source)) {
+      rendered
+    } else {
+      { text: source, virtualArtifacts: [] }
+    }
+  } else {
+    rendered
+  }
 }
+
+provide let formatResultWithMode = (source: String, mode: Mode) =>
+  match (mode) {
+    Real => formatResultWithSettings(source, mode, realSettings),
+    Virtual => formatResultWithSettings(source, mode, virtualSettings),
+  }
+
+provide let formatWithMode = (source: String, mode: Mode) => {
+  let result = formatResultWithMode(source, mode)
+  result.text
+}
+
+provide let format = (source: String) => formatWithMode(source, Real)

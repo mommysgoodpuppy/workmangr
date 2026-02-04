@@ -1,0 +1,44 @@
+module TestFormatter
+
+from "string" include String
+from "runtime/unsafe/panic" include Panic
+use Panic.{ panic }
+from "../util.gr" include Util
+from "./formatter.gr" include Formatter
+
+let canonicalNonWs = (text: String) => {
+  let noSpace = String.replaceAll(" ", "", text)
+  let noTab = String.replaceAll("\t", "", noSpace)
+  let noLf = String.replaceAll("\n", "", noTab)
+  String.replaceAll("\r", "", noLf)
+}
+
+let assertOk = (cond: Bool, message: String) => {
+  if (!cond) {
+    panic(message)
+  } else {
+    void
+  }
+}
+
+let main = () => {
+  let input = Util.testStr
+  let real1 = Formatter.formatWithMode(input, Formatter.Real)
+  let real2 = Formatter.formatWithMode(real1, Formatter.Real)
+  let unsupported = "type Foo = Bar;"
+  let unsupportedReal = Formatter.formatWithMode(unsupported, Formatter.Real)
+
+  assertOk(
+    canonicalNonWs(real1) == canonicalNonWs(input),
+    "real mode changed non-whitespace text"
+  )
+  assertOk(real2 == real1, "real mode is not idempotent")
+  assertOk(
+    unsupportedReal == unsupported,
+    "real mode did not preserve original text on invariant failure fallback"
+  )
+
+  print("formatter real-mode safety test passed")
+}
+
+main()
