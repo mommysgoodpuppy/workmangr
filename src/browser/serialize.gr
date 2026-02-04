@@ -55,15 +55,14 @@ let rec exprKindToString = (kind: Ast.ExprKind) => {
     Ast.Lit(Ast.Char(c)) => "Lit(Char('" ++ String.fromChar(c) ++ "'))",
     Ast.Lit(Ast.Unit) => "Lit(Unit)",
     Ast.Ident(name) => "Ident(" ++ name.text ++ ")",
-    Ast.Lambda(_, _) => "Lambda",
+    Ast.Fn(_) => "Fn",
+    Ast.Apply(_, _) => "Apply",
     Ast.InfixChain(_) => "InfixChain",
     Ast.Postfix(_) => "Postfix",
     Ast.Block(_) => "Block",
     Ast.Paren(_) => "Paren",
     Ast.Tuple(_) => "Tuple",
     Ast.RecordLit(_) => "RecordLit",
-    Ast.MatchApply(_) => "MatchApply",
-    Ast.Bundle(_) => "Bundle",
     Ast.Hole(_) => "Hole",
     Ast.If(_, _, _) => "If",
     _ => "Unknown"
@@ -81,7 +80,27 @@ let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
         let resultJson = "[" ++ String.join(",", resultExprs) ++ "]"
         ",\"children\":" ++ resultJson
       },
-      Ast.Lambda(_, body) => ",\"children\":[" ++ exprToJson(body, depth + 1) ++ "]",
+      Ast.Fn(fnExpr) => {
+        let clauseBodies = List.filterMap(
+          item =>
+            match (item.kind) {
+              Ast.Clause(clause) => Some(
+                exprToJson(
+                  { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
+                  depth + 1,
+                ),
+              ),
+              _ => None,
+            },
+          fnExpr.items
+        )
+        ",\"children\":[" ++ String.join(",", clauseBodies) ++ "]"
+      },
+      Ast.Apply(callee, arg) => {
+        let calleeJson = exprToJson(callee, depth + 1)
+        let argJson = exprToJson(arg, depth + 1)
+        ",\"children\":[" ++ calleeJson ++ "," ++ argJson ++ "]"
+      },
       Ast.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
       Ast.Tuple(exprs) => {
         let items = List.map((e) => exprToJson(e, depth + 1), exprs)

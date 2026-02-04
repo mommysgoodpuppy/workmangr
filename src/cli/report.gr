@@ -62,7 +62,31 @@ let rec collectExprs = (expr: Ast.Expr) =>
       }
       [expr, ...resultExprs]
     },
-    Ast.Lambda(_, body) => [expr, ...collectExprs(body)],
+    Ast.Fn(fnExpr) => {
+      let bodyExprs = List.filterMap(
+        (item: Ast.FnItem) =>
+          match (item.kind) {
+            Ast.Clause(clause) =>
+              Some(
+                {
+                  node: clause.body.node,
+                  kind: Ast.Block(clause.body),
+                  attach: clause.attach,
+                }: Ast.Expr,
+              ),
+            _ => None,
+          },
+        fnExpr.items
+      )
+      let rec collectBodies = (items: List<Ast.Expr>) => {
+        match (items) {
+          [] => [],
+          [h, ...t] => List.append(collectExprs(h), collectBodies(t)),
+        }
+      }
+      [expr, ...collectBodies(bodyExprs)]
+    },
+    Ast.Apply(callee, arg) => [expr, ...List.append(collectExprs(callee), collectExprs(arg))],
     Ast.Paren(inner) => [expr, ...collectExprs(inner)],
     _ => [expr]
   }

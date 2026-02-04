@@ -62,15 +62,14 @@ and provide record Attachments {
 provide enum rec ExprKind {
   Lit(AtomLiteral),
   Ident(Name),
-  Lambda(Option<Pattern>, Expr),
+  Fn(FnExpr),
+  Apply(Expr, Expr), // callee, single arg
   InfixChain(InfixChain),
   Postfix(Postfix),
   Block(Block),
   Paren(Expr),
   Tuple(List<Expr>),
   RecordLit(List<RecordItem>),
-  MatchApply(MatchApply),
-  Bundle(BundleExpr),
   Hole(Hole),
   If(Expr, Expr, Option<Expr>),
 }
@@ -144,35 +143,28 @@ and provide record Pattern {
   kind: PatternKind,
   attach: Attachments,
 }
-and provide enum BundleItemKind {
-  Case(Pattern, Option<Expr>, Block),
+and provide record FnClause {
+  node: Node,
+  param: Pattern,
+  guard: Option<Expr>,
+  body: Block,
+  attach: Attachments,
+}
+and provide enum FnItemKind {
+  Clause(FnClause),
+  Include(Name),
   Trivia(Trivia),
-}
-and provide record BundleItem {
-  node: Node,
-  kind: BundleItemKind,
-  attach: Attachments,
-}
-and provide record BundleLiteral {
-  node: Node,
-  items: List<BundleItem>,
-}
-and provide enum BundleExprKind {
-  Literal(BundleLiteral),
-  Ref(Name),
-  Compose(List<BundleExpr>),
   Hole(Hole),
-  Paren(BundleExpr),
 }
-and provide record BundleExpr {
+and provide record FnItem {
   node: Node,
-  kind: BundleExprKind,
+  kind: FnItemKind,
   attach: Attachments,
 }
-and provide record MatchApply {
+and provide record FnExpr {
   node: Node,
-  scrutinees: List<Expr>,
-  bundle: BundleExpr,
+  items: List<FnItem>,
+  attach: Attachments,
 }
 and provide enum TypeExprKind {
   Hole(Hole),

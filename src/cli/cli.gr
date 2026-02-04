@@ -10,6 +10,8 @@ from "list" include List
 from "../core/analysis.gr" include Analysis
 from "../core/ast.gr" include Ast
 from "./report.gr" include Report
+from "../frontend/parser.gr" include Parser
+from "../frontend/lower.gr" include Lower
 
 let usage = "Usage: wmgr type <file.wm> | wmgr --ast <file.wm>"
 
@@ -82,11 +84,20 @@ let main = () => {
           print(filePath)
           let path = Path.fromString(filePath)
           match (Fs.Utf8.readFile(path)) {
-            Err(fsErr) => exitWith(1, "Failed to read file: " ++ filePath ++ " " ++ toString(fsErr)),
+            Err(fsErr) =>
+              exitWith(
+                1,
+                "Failed to read file: " ++ filePath ++ " " ++ toString(fsErr)
+              ),
             Ok(source) => {
               if (command == "ast") {
-                let analysis = Analysis.analyze(source)
-                print(analysis.program)
+                let parsed = Parser.parse(source)
+                let lowered = Lower.lowerProgram(parsed)
+                print("Surface AST:")
+                print(parsed)
+                print("---")
+                print("Lowered AST:")
+                print(lowered)
               } else if (command == "type") {
                 let analysis = Analysis.analyze(source)
                 Report.report(source, analysis)

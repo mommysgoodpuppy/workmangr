@@ -2,66 +2,61 @@ module Formatter
 
 from "array" include Array
 from "list" include List
-from "string" include String
-from "char" include Char
-from "../util.gr" include Util
-
-use Util.{ (|>), testStr }
-
-from "./frontend.gr" include Frontend
+from "../frontend/frontend.gr" include Frontend
 from "../core/ast.gr" include Ast
-use Ast.*
 
 let rec formatExpr = (expr: Ast.Expr) => {
   match (expr.kind) {
-    Ast.IntLit(n) => toString(n),
-    Ast.StrLit(s) => "\"" ++ s ++ "\"",
-    Ast.CharLit(c) => "'" ++ Char.toString(c) ++ "'",
-    Ast.Ident(name) => name,
-    Ast.Lambda(param, body) => {
-      let paramStr = match (param) {
-        Some(p) => formatPattern(p),
-        None => "()",
+    Ast.Lit(Ast.Int(n)) => toString(n),
+    Ast.Lit(Ast.Bool(b)) => if (b) { "true" } else { "false" },
+    Ast.Lit(Ast.Str(s)) => "\"" ++ s ++ "\"",
+    Ast.Lit(Ast.Char(c)) => "'" ++ toString(c) ++ "'",
+    Ast.Lit(Ast.Unit) => "()",
+    Ast.Ident(name) => name.text,
+    Ast.Paren(inner) => "(" ++ formatExpr(inner) ++ ")",
+    Ast.Tuple(items) => {
+      let rendered = List.map(formatExpr, items)
+      "(" ++ Array.join(", ", Array.fromList(rendered)) ++ ")"
+    },
+    Ast.Block(_) => "{ ... }",
+    Ast.Fn(_) => "<fn>",
+    Ast.Apply(callee, arg) => formatExpr(callee) ++ "(" ++ formatExpr(arg) ++ ")",
+    Ast.InfixChain(_) => "<infix>",
+    Ast.Postfix(_) => "<postfix>",
+    Ast.RecordLit(_) => "{ ... }",
+    Ast.If(cond, thenExpr, elseExpr) => {
+      let elsePart = match (elseExpr) {
+        None => "",
+        Some(e) => " else " ++ formatExpr(e),
       }
-      paramStr ++ " => " ++ formatExpr(body)
+      "if " ++ formatExpr(cond) ++ " " ++ formatExpr(thenExpr) ++ elsePart
     },
-    Ast.Infix(Ast.OpFatArrow, left, right) => {
-      // This shouldn't happen after lowering, but just in case
-      formatExpr(left) ++ " => " ++ formatExpr(right)
-    },
-    Ast.Block(inner) => {
-      "{ " ++ formatExpr(inner) ++ " }"
-    },
-    Ast.Paren(inner) => {
-      "(" ++ formatExpr(inner) ++ ")"
-    },
-    Ast.Tuple(exprs) => {
-      let formatted = List.map(formatExpr, exprs)
-      "(" ++ Array.join(", ", Array.fromList(formatted)) ++ ")"
-    },
-    Ast.Unit => "()",
-    Ast.Unknown => "<unknown>",
+    Ast.Hole(_) => "?",
+    Ast.Lit(_) => "<lit>",
   }
 }
 
-let formatBinding = (b: Ast.Binding) => {
-  "let " ++ b.name ++ " = " ++ formatExpr(b.value)
+let formatBinding = (b: Ast.LetBinding) => {
+  "let <pat> = " ++ formatExpr(b.value)
 }
 
-let formatTopLevel = (tl: Ast.TopLevel) => {
-  let base = match (tl.kind) {
-    Ast.LetBinding(b) => formatBinding(b),
-    Ast.TypeDef(name, def) => "type " ++ name ++ " = " ++ def,
-  }
-  if (tl.exported) {
-    "export " ++ base
-  } else {
-    base
+let formatTopItem = (item: Ast.TopItem) => {
+  match (item) {
+    Ast.DeclGroup(dg) => {
+      match (dg.decls) {
+        [Ast.LetDecl(ld), ..._] => {
+          let bindings = List.map(formatBinding, ld.bindings)
+          Array.join("\n", Array.fromList(bindings))
+        },
+        _ => "<decl-group>",
+      }
+    },
+    _ => "<top-item>",
   }
 }
 
 let formatProgram = (program: Ast.Program) => {
-  let items = List.map(formatTopLevel, program.topLevels)
+  let items = List.map(formatTopItem, program.items)
   Array.join("\n\n", Array.fromList(items))
 }
 
@@ -69,5 +64,3 @@ provide let format = (source: String) => {
   let program = Frontend.parseAndLower(source)
   formatProgram(program)
 }
-
-print(format(testStr))

@@ -1,3 +1,10 @@
-let main = () => {
-  42
+let x = (y) => {"t"};
+let x2 = match { y => {"t"} };
+let x3 = (y) => {
+  match(y) {
+    y => {"t"}
+  }
+};
+let x4 = match(y) => {
+  y => {"t"}
 };

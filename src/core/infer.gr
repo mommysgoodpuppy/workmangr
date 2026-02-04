@@ -124,32 +124,46 @@ let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
       let t = recordNodeType(expr.node.id, tInner, state1)
       (t, state1)
     },
-    Ast.Lambda(paramOpt, body) => match (paramOpt) {
-      None => {
-        let (tBody, state1) = inferExpr(body, state)
-        let fnType = Types.TFun(Types.TVoid, tBody)
-        let t = recordNodeType(expr.node.id, fnType, state1)
-        (t, state1)
-      },
-      Some(pattern) => {
-        let paramName = match (pattern.kind) {
-          Ast.Var(name) => name.text,
-          _ => "_"
-        }
-        let (paramType, state1) = freshVar(state)
-        let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
-        let (fnType, stFn) = withBinding(
-          paramName,
-          monoScheme,
-          state1,
-          st => {
-            let (tBody, stBody) = inferExpr(body, st)
-            (Types.TFun(paramType, tBody), stBody)
+    Ast.Fn(fnExpr) => {
+      let clause = match (fnExpr.items) {
+        [item, ..._] =>
+          match (item.kind) {
+            Ast.Clause(c) => c,
+            _ => Panic.panic("Type error: function item is not a clause"),
+          },
+        _ => Panic.panic("Type error: empty function clauses"),
+      }
+      let paramName = match (clause.param.kind) {
+        Ast.Var(name) => name.text,
+        _ => "_"
+      }
+      let (paramType, state1) = freshVar(state)
+      let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
+      let (fnType, stFn) = withBinding(
+        paramName,
+        monoScheme,
+        state1,
+        st => {
+          let bodyExpr: Ast.Expr = {
+            node: clause.body.node,
+            kind: Ast.Block(clause.body),
+            attach: { leading: [], trailing: [], dangling: [] },
           }
-        )
-        let tRecorded = recordNodeType(expr.node.id, fnType, stFn)
-        (tRecorded, stFn)
-      },
+          let (tBody, stBody) = inferExpr(bodyExpr, st)
+          (Types.TFun(paramType, tBody), stBody)
+        }
+      )
+      let tRecorded = recordNodeType(expr.node.id, fnType, stFn)
+      (tRecorded, stFn)
+    },
+    Ast.Apply(callee, arg) => {
+      let (tCallee, state1) = inferExpr(callee, state)
+      let (tArg, state2) = inferExpr(arg, state1)
+      let (tRes, state3) = freshVar(state2)
+      let state4 = unify(tCallee, Types.TFun(tArg, tRes), state3)
+      let tApplied = apply(state4, tRes)
+      let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
+      (tRecorded, state4)
     },
     Ast.Paren(inner) => {
       let (tInner, state1) = inferExpr(inner, state)

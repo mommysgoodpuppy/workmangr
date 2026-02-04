@@ -3,203 +3,273 @@ module Lower
 from "../core/ast.gr" include Ast
 use Ast.*
 from "list" include List
-from "runtime/unsafe/panic" include Panic
-use Panic.{ panic }
 from "../core/error.gr" include Error
 
-// Convert block of case expressions to bundle
-let rec blockToBundle = (block: Ast.Block) => {
-  let items = List.map((expr: Ast.Expr) => {
-    match (expr.kind: Ast.ExprKind) {
-      Ast.InfixChain({ first: patExpr, rest: [(op, bodyExpr)] }) when op.text
-        == "=>" => {
-        let pat = exprToPattern(patExpr)
-        let body = match (bodyExpr.kind: Ast.ExprKind) {
-          Ast.Block(b) => b,
-          _ =>
-            Error.createError(
-              Error.Lowering,
-              bodyExpr.node.span,
-              "Case body must be a block",
-              []
-            ),
-        }
-        let caseKind = Ast.Case(pat, None, body)
-        {
-          node: { id: expr.node.id, span: expr.node.span },
-          kind: caseKind,
-          attach: { leading: [], trailing: [], dangling: [] },
-        }: Ast.BundleItem
-      },
-      _ =>
-        Error.createError(
-          Error.Lowering,
-          expr.node.span,
-          "Expected case pattern => block",
-          []
-        ),
-    }
-  }, block.result)
-  let bundleLit = { node: { id: block.node.id, span: block.node.span }, items }
-  {
-    node: { id: block.node.id, span: block.node.span },
-    kind: Ast.Literal(bundleLit),
-    attach: { leading: [], trailing: [], dangling: [] },
-  }: Ast.BundleExpr
+let emptyAttach = { leading: [], trailing: [], dangling: [] }
+
+let makeUnitExpr = (node: Ast.Node) => {
+  { node, kind: Ast.Lit(Ast.Unit), attach: emptyAttach }: Ast.Expr
 }
 
-// Convert expr to pattern (for case pats)
-and exprToPattern = (expr: Ast.Expr) => {
+let makeTupleExpr = (node: Ast.Node, exprs: List<Ast.Expr>) => {
+  { node, kind: Ast.Tuple(exprs), attach: emptyAttach }: Ast.Expr
+}
+
+let rec exprToPattern = (expr: Ast.Expr) => {
   match (expr.kind) {
-    Ast.Ident({ _, text }) when text == "_" => { //TODO: missing node
+    Ast.Ident({ _, text }) when text == "_" => {
       {
         node: expr.node,
         kind: Ast.Wildcard,
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
+        attach: expr.attach,
+      }: Ast.Pattern
     },
-    Ast.Ident({ _, text }) => { //TODO: missing node
-      let nameNode = { node: { id: expr.node.id, span: expr.node.span }, text }
+    Ast.Ident(name) => {
       {
         node: expr.node,
-        kind: Ast.Pin(nameNode),
-        attach: { leading: [], trailing: [], dangling: [] },
+        kind: Ast.Var(name),
+        attach: expr.attach,
+      }: Ast.Pattern
+    },
+    Ast.Paren(inner) => exprToPattern(inner),
+    Ast.Tuple(exprs) => {
+      let rec convert = (es: List<Ast.Expr>) => {
+        match (es) {
+          [] => [],
+          [head, ...tail] => [exprToPattern(head), ...convert(tail)],
+        }
       }
+      {
+        node: expr.node,
+        kind: Ast.Tuple(convert(exprs)),
+        attach: expr.attach,
+      }: Ast.Pattern
     },
     Ast.Lit(lit) => {
-      {
-        node: expr.node,
-        kind: Ast.Lit(lit),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
+      { node: expr.node, kind: Ast.Lit(lit), attach: expr.attach }: Ast.Pattern
     },
-    // Add more as needed
     _ =>
       Error.createError(
         Error.Lowering,
         expr.node.span,
-        "Unsupported pattern in case",
+        "Unsupported pattern in => clause",
         []
       ),
   }
 }
 
-// Transform => infix expressions into lambdas
-let rec lowerExpr = (expr: Ast.Expr) => {
+let exprToBlock = (expr: Ast.Expr) => {
+  match (expr.kind) {
+    Ast.Block(b) => b,
+    _ => ({ node: expr.node, items: [], result: [expr] }: Ast.Block),
+  }
+}
+
+let rec lowerFnClause = (clause: Ast.FnClause) => {
+  let guard = match (clause.guard) {
+    None => None,
+    Some(g) => Some(lowerExpr(g)),
+  }
+  let bodyExpr = {
+    node: clause.body.node,
+    kind: Ast.Block(clause.body),
+    attach: emptyAttach,
+  }: Ast.Expr
+  let loweredBodyExpr: Ast.Expr = lowerExpr(bodyExpr)
+  let loweredBody = match (loweredBodyExpr.kind: Ast.ExprKind) {
+    Ast.Block(b) => b,
+    _ =>
+      Error.createError(
+        Error.Lowering,
+        clause.body.node.span,
+        "internal lowering error: expected block body",
+        []
+      ),
+  }
+  { ...clause, guard, body: loweredBody }
+}
+
+and lowerFnItem = (item: Ast.FnItem) => {
+  match (item.kind) {
+    Ast.Clause(clause) => { ...item, kind: Ast.Clause(lowerFnClause(clause)) },
+    Ast.Hole(_) | Ast.Include(_) | Ast.Trivia(_) => item,
+  }
+}
+
+and lowerFnExpr = (fnExpr: Ast.FnExpr) => {
+  { ...fnExpr, items: List.map(lowerFnItem, fnExpr.items) }
+}
+
+and normalizeCallArgs = (node: Ast.Node, args: List<Ast.Expr>) => {
+  match (args) {
+    [] => makeUnitExpr(node),
+    [only] => only,
+    _ => makeTupleExpr(node, args),
+  }
+}
+
+and prependArg = (node: Ast.Node, firstArg: Ast.Expr, argExpr: Ast.Expr) => {
+  match (argExpr.kind) {
+    Ast.Tuple(items) => makeTupleExpr(node, [firstArg, ...items]),
+    _ => makeTupleExpr(node, [firstArg, argExpr]),
+  }
+}
+
+and lowerCallOnlyPostfix = (expr: Ast.Expr, pf: Ast.Postfix) => {
+  let loweredTarget = lowerExpr(pf.target)
+  let rec foldCalls = (currentExpr: Ast.Expr, segments: List<Ast.PostfixSegment>) => {
+    match (segments) {
+      [] => currentExpr,
+      [Ast.Call(args), ...rest] => {
+        let loweredArgs = List.map(lowerExpr, args)
+        let argExpr = normalizeCallArgs(currentExpr.node, loweredArgs)
+        let applied = { ...currentExpr, kind: Ast.Apply(currentExpr, argExpr) }
+        foldCalls(applied, rest)
+      },
+      _ =>
+        Error.createError(
+          Error.Lowering,
+          expr.node.span,
+          "internal lowering error: non-call segment in call-only fold",
+          []
+        ),
+    }
+  }
+  foldCalls(loweredTarget, pf.segments)
+}
+
+and lowerPostfix = (expr: Ast.Expr, pf: Ast.Postfix) => {
+  let isCallOnly = List.every(
+    seg =>
+      match (seg) {
+        Ast.Call(_) => true,
+        _ => false,
+      },
+    pf.segments
+  )
+  if (isCallOnly) {
+    lowerCallOnlyPostfix(expr, pf)
+  } else {
+    let loweredTarget = lowerExpr(pf.target)
+    let loweredSegments = List.map(seg =>
+      match (seg) {
+        Ast.Call(args) => Ast.Call(List.map(lowerExpr, args)),
+        Ast.Index(ix) => Ast.Index(lowerExpr(ix)),
+        Ast.Project(name) => Ast.Project(name),
+      },
+      pf.segments
+    )
+    { ...expr, kind: Ast.Postfix({ target: loweredTarget, segments: loweredSegments }) }
+  }
+}
+
+and lowerArrow = (expr: Ast.Expr, lhs: Ast.Expr, rhs: Ast.Expr) => {
+  let param = exprToPattern(lhs)
+  let loweredRhs = lowerExpr(rhs)
+  let body = exprToBlock(loweredRhs)
+  let clause: Ast.FnClause = {
+    node: expr.node,
+    param,
+    guard: None,
+    body,
+    attach: emptyAttach,
+  }
+  let item: Ast.FnItem = {
+    node: expr.node,
+    kind: Ast.Clause(clause),
+    attach: emptyAttach,
+  }
+  let fnExpr: Ast.FnExpr = { node: expr.node, items: [item], attach: expr.attach }
+  { ...expr, kind: Ast.Fn(fnExpr) }
+}
+
+and lowerPipe = (expr: Ast.Expr, lhs: Ast.Expr, rhs: Ast.Expr) => {
+  let loweredLhs = lowerExpr(lhs)
+  let loweredRhs = lowerExpr(rhs)
+  match (loweredRhs.kind) {
+    Ast.Apply(callee, arg) => {
+      let combinedArg = prependArg(expr.node, loweredLhs, arg)
+      { ...expr, kind: Ast.Apply(callee, combinedArg) }
+    },
+    _ => { ...expr, kind: Ast.Apply(loweredRhs, loweredLhs) },
+  }
+}
+
+and lowerExpr = (expr: Ast.Expr) => {
   match (expr.kind: Ast.ExprKind) {
     Ast.InfixChain(chain) => {
       match (chain) {
-        {
-          first: { node: _, kind: Ast.MatchApply(ma), attach: _ },
-          rest: [(op, body)],
-        } when op.text == "=>" => {
-          let bundle = match (body.kind: Ast.ExprKind) {
-            Ast.Bundle(b) => b,
-            Ast.Block(b) => blockToBundle(b),
-            _ =>
-              Error.createError(
-                Error.Lowering,
-                body.node.span,
-                "Match arrow expects bundle or block of cases",
-                [
-                  Error.Received("non-bundle/block expression"),
-                  Error.Note(
-                    "match => must be followed by a bundle or block of cases",
-                  ),
-                ]
-              ),
-          }
-          let matchApply = Ast.MatchApply({ ...ma, bundle })
-          { ...expr, kind: Ast.Lambda(None, { ...expr, kind: matchApply }) }
-        },
-        { first, rest: [(op, body)] } when op.text == "=>" => {
-          // Normal param => body
-          let param = first
-          let pattern = extractParam(param)
-          let loweredBody = lowerExpr(body)
-          let lambda = match (pattern) {
-            Some(p) => Ast.Lambda(Some(p), loweredBody),
-            None =>
-              Error.createError(
-                Error.Lowering,
-                expr.node.span,
-                "Unsupported parameter",
-                [
-                  Error.Note(
-                    "lambda parameter pattern not yet supported in lowering",
-                  ),
-                  Error.Hint("this AST node type needs to be implemented"),
-                ]
-              ),
-          }
-          { ...expr, kind: lambda }
-        },
+        { first, rest: [(op, rhs)] } when op.text == "=>" =>
+          lowerArrow(expr, first, rhs),
+        { first, rest: [(op, rhs)] } when op.text == ":>" =>
+          lowerPipe(expr, first, rhs),
         _ => {
-          // General infix chain
           let loweredFirst = lowerExpr(chain.first)
-          let loweredRest = List.map(
-            ((op, e)) => (op, lowerExpr(e)),
-            chain.rest
-          )
-          {
-            ...expr,
-            kind: Ast.InfixChain({ first: loweredFirst, rest: loweredRest }),
-          }
+          let loweredRest = List.map(((op, e)) => (op, lowerExpr(e)), chain.rest)
+          { ...expr, kind: Ast.InfixChain({ first: loweredFirst, rest: loweredRest }) }
         },
       }
     },
+    Ast.Postfix(pf) => lowerPostfix(expr, pf),
     Ast.Block(inner) => {
+      let loweredItems = List.map(item =>
+        match (item) {
+          Ast.Stmt(stmt) => {
+            let loweredStmt = match (stmt.kind) {
+              Ast.Expr(e) => { ...stmt, kind: Ast.Expr(lowerExpr(e)) },
+              Ast.Assign(asg) => {
+                {
+                  ...stmt,
+                  kind: Ast.Assign({
+                    target: lowerExpr(asg.target),
+                    value: lowerExpr(asg.value),
+                  }),
+                }
+              },
+              Ast.Let(binding) => {
+                let loweredBinding = { ...binding, value: lowerExpr(binding.value) }
+                { ...stmt, kind: Ast.Let(loweredBinding) }
+              },
+            }
+            Ast.Stmt(loweredStmt)
+          },
+          _ => item,
+        },
+        inner.items
+      )
+      let loweredResult = List.map(lowerExpr, inner.result)
+      { ...expr, kind: Ast.Block({ ...inner, items: loweredItems, result: loweredResult }) }
+    },
+    Ast.Paren(inner) => { ...expr, kind: Ast.Paren(lowerExpr(inner)) },
+    Ast.Tuple(exprs) => { ...expr, kind: Ast.Tuple(List.map(lowerExpr, exprs)) },
+    Ast.RecordLit(items) => {
+      let loweredItems = List.map(item =>
+        match (item) {
+          Ast.Field(name, value) => Ast.Field(name, lowerExpr(value)),
+          Ast.Spread(value) => Ast.Spread(lowerExpr(value)),
+        },
+        items
+      )
+      { ...expr, kind: Ast.RecordLit(loweredItems) }
+    },
+    Ast.If(cond, thenExpr, elseOpt) => {
+      let loweredElse = match (elseOpt) {
+        None => None,
+        Some(e) => Some(lowerExpr(e)),
+      }
       {
         ...expr,
-        kind: Ast.Block({ ...inner, result: List.map(lowerExpr, inner.result) }),
+        kind: Ast.If(lowerExpr(cond), lowerExpr(thenExpr), loweredElse),
       }
     },
-    Ast.Paren(inner) => {
-      { ...expr, kind: Ast.Paren(lowerExpr(inner)) }
+    Ast.Apply(callee, arg) => {
+      { ...expr, kind: Ast.Apply(lowerExpr(callee), lowerExpr(arg)) }
     },
-    Ast.Tuple(exprs) => {
-      { ...expr, kind: Ast.Tuple(List.map(lowerExpr, exprs)) }
-    },
-    Ast.Lambda(optPat, body) => {
-      { ...expr, kind: Ast.Lambda(optPat, lowerExpr(body)) }
-    },
-    // Other cases remain unchanged
+    Ast.Fn(fnExpr) => { ...expr, kind: Ast.Fn(lowerFnExpr(fnExpr)) },
     _ => expr,
   }
 }
-and extractParam = (param: Ast.Expr) => {
-  match (param.kind) {
-    Ast.Ident(name) =>
-      Some({ node: param.node, kind: Var(name), attach: param.attach }),
-    Ast.Paren(inner) => extractParam(inner), // Recursively extract from parenthesized expression
-    Ast.Tuple(exprs) => {
-      // Convert tuple expression to tuple pattern
-      // Each element of the tuple should be convertible to a pattern
-      let rec convertAll = (es: List<Ast.Expr>) => {
-        match (es) {
-          [] => Some([]),
-          [h, ...t] => {
-            match (extractParam(h)) {
-              Some(pat) => match (convertAll(t)) {
-                Some(pats) => Some([pat, ...pats]),
-                None => None,
-              },
-              None => None,
-            }
-          },
-        }
-      }
-      match (convertAll(exprs)) {
-        Some(patterns) =>
-          Some(
-            { node: param.node, kind: Tuple(patterns), attach: param.attach },
-          ),
-        None => None,
-      }
-    },
-    _ => None, // Other parameter patterns not supported yet
-  }
-}
+
 let lowerBinding = (binding: Ast.LetBinding) => {
   { ...binding, value: lowerExpr(binding.value) }
 }
@@ -227,5 +297,5 @@ let lowerTopItem = (ti: Ast.TopItem) => {
 }
 
 provide let lowerProgram = (program: Ast.Program) => {
-  { ...program, items: List.map(lowerTopItem, program.items) }
+  { ...program, items: List.map(lowerTopItem, program.items), core: true }
 }

@@ -50,17 +50,32 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
       NS.addChild(store, expr.node.id, "name", name.node.id)
     },
 
-    Ast.Lambda(patOpt, body) => {
-      let store = NS.updatePreview(store, expr.node.id, "Lambda")
-      let store = match (patOpt) {
-        None => store,
-        Some(pat) => {
-          let store = visitPattern(store, pat)
-          NS.addChild(store, expr.node.id, "param", pat.node.id)
+    Ast.Fn(fnExpr) => {
+      let store = NS.updatePreview(store, expr.node.id, "Fn")
+      List.reduce((s, item) => {
+        match (item.kind) {
+          Ast.Clause(clause) => {
+            let s = visitPattern(s, clause.param)
+            let s = NS.addChild(s, expr.node.id, "clause.param", clause.param.node.id)
+            let bodyExpr: Ast.Expr = {
+              node: clause.body.node,
+              kind: Ast.Block(clause.body),
+              attach: clause.attach,
+            }
+            let s = visitExpr(s, bodyExpr)
+            NS.addChild(s, expr.node.id, "clause.body", bodyExpr.node.id)
+          },
+          _ => s,
         }
-      }
-      let store = visitExpr(store, body)
-      NS.addChild(store, expr.node.id, "body", body.node.id)
+      }, store, fnExpr.items)
+    },
+
+    Ast.Apply(callee, arg) => {
+      let store = NS.updatePreview(store, expr.node.id, "Apply")
+      let store = visitExpr(store, callee)
+      let store = NS.addChild(store, expr.node.id, "callee", callee.node.id)
+      let store = visitExpr(store, arg)
+      NS.addChild(store, expr.node.id, "arg", arg.node.id)
     },
 
     Ast.InfixChain(chain) => {

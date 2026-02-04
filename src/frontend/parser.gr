@@ -340,7 +340,33 @@ and parseTerm: Parser<Ast.Expr> = state => {
       let (_, state2) = expectSimple(Lexer.FatArrow, state1)
       let (body, state3) = parseExpr(state2)
       let span = spanFromTokens(tok.span, body.node.span)
-      let expr = makeExpr(id, span, Lambda(None, body))
+      let bodyBlock = match (body.kind) {
+        Block(b) => b,
+        _ => { node: body.node, items: [], result: [body] },
+      }
+      let wildcardPat: Ast.Pattern = {
+        node: { id, span: tok.span },
+        kind: Wildcard,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let clause: Ast.FnClause = {
+        node: { id, span },
+        param: wildcardPat,
+        guard: None,
+        body: bodyBlock,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let item: Ast.FnItem = {
+        node: { id, span },
+        kind: Ast.Clause(clause),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let fnExpr: Ast.FnExpr = {
+        node: { id, span },
+        items: [item],
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let expr = makeExpr(id, span, Fn(fnExpr))
       (expr, state3)
     },
     _ => {
@@ -555,12 +581,33 @@ and parsePrimary: Parser<Ast.Expr> = state => {
       let state2 = dropToken(state1)
       let (bodyExpr, state3) = parseExpr(state2)
       let span = spanFromTokens(tok.span, bodyExpr.node.span)
-      let pat = {
+      let pat: Ast.Pattern = {
         node: { id, span: tok.span },
         kind: Wildcard,
         attach: { leading: [], trailing: [], dangling: [] },
-      }: Ast.Pattern
-      let expr = makeExpr(id, span, Lambda(Some(pat), bodyExpr))
+      }
+      let bodyBlock = match (bodyExpr.kind) {
+        Block(b) => b,
+        _ => { node: bodyExpr.node, items: [], result: [bodyExpr] },
+      }
+      let clause: Ast.FnClause = {
+        node: { id, span },
+        param: pat,
+        guard: None,
+        body: bodyBlock,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let item: Ast.FnItem = {
+        node: { id, span },
+        kind: Ast.Clause(clause),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let fnExpr: Ast.FnExpr = {
+        node: { id, span },
+        items: [item],
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let expr = makeExpr(id, span, Fn(fnExpr))
       (expr, state3)
     },
     _ => {
@@ -1018,22 +1065,49 @@ and parsePattern: Parser<Ast.Pattern> = state => {
 and parseMatch = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (matchTok, state2) = expectKeyword("match", state)
-  let (scrutinee, state3) = parseExpr(state2)
-  let emptyBundle: Ast.BundleExpr = {
-    node: { id, span: Source.makeSpan(0, 0, 0, 0) },
-    kind: Ast.Literal(
-      { node: { id, span: Source.makeSpan(0, 0, 0, 0) }, items: [] },
-    ),
-    attach: { leading: [], trailing: [], dangling: [] },
+  let rec exprToParamPattern = (expr: Ast.Expr) => {
+    match (expr.kind) {
+      Ident(name) =>
+        Some(
+          {
+            node: expr.node,
+            kind: Ast.Var(name),
+            attach: expr.attach,
+          }: Ast.Pattern,
+        ),
+      Paren(inner) => exprToParamPattern(inner),
+      Tuple(items) => {
+        let rec convertAll = (es: List<Ast.Expr>) => {
+          match (es) {
+            [] => Some([]),
+            [head, ...tail] =>
+              match (exprToParamPattern(head)) {
+                Some(hPat) => match (convertAll(tail)) {
+                  Some(restPats) => Some([hPat, ...restPats]),
+                  None => None,
+                },
+                None => None,
+              },
+          }
+        }
+        match (convertAll(items)) {
+          Some(pats) =>
+            Some(
+              {
+                node: expr.node,
+                kind: Ast.Tuple(pats),
+                attach: expr.attach,
+              }: Ast.Pattern,
+            ),
+          None => None,
+        }
+      },
+      _ => None,
+    }
   }
-  let initialMatchApply: Ast.MatchApply = {
-    node: { id, span: Source.makeSpan(0, 0, 0, 0) },
-    scrutinees: [scrutinee],
-    bundle: emptyBundle,
-  }
-  if (kindIs(currentToken(state3).kind, Lexer.LBrace)) {
-    let (_, state4) = expectSimple(Lexer.LBrace, state3)
-    let mut items: List<Ast.BundleItem> = []
+  let parseFnItemsInBraces = (stateX: ParseState) => {
+    let (_, state4) = expectSimple(Lexer.LBrace, stateX)
+    let mut items: List<Ast.FnItem> = []
     let mut currentState = state4
     while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
       let (pat, state_temp) = parsePattern(currentState)
@@ -1048,7 +1122,7 @@ and parseMatch = (state: ParseState) => {
       }
       let (_, state_temp2) = expectSimple(Lexer.FatArrow, state_temp1)
       let (blockExpr, state_temp3) = parseBlock(state_temp2)
-      let block: Ast.Block = match (blockExpr.kind) {
+      let body: Ast.Block = match (blockExpr.kind) {
         Block(b) => b,
         _ =>
           Error.createError(
@@ -1058,13 +1132,19 @@ and parseMatch = (state: ParseState) => {
             [Error.Received("non-block expression")]
           ),
       }
-      let caseKind: Ast.BundleItemKind = Ast.Case(pat, guardOpt, block)
-      let caseItem: Ast.BundleItem = {
+      let clause: Ast.FnClause = {
         node: { id: 0, span: Source.makeSpan(0, 0, 0, 0) },
-        kind: caseKind,
+        param: pat,
+        guard: guardOpt,
+        body,
         attach: { leading: [], trailing: [], dangling: [] },
       }
-      items = [caseItem, ...items]
+      let item: Ast.FnItem = {
+        node: clause.node,
+        kind: Ast.Clause(clause),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      items = [item, ...items]
       if (kindIs(currentToken(state_temp3).kind, Lexer.Comma)) {
         let (_, state_temp4) = expectSimple(Lexer.Comma, state_temp3)
         currentState = state_temp4
@@ -1073,23 +1153,111 @@ and parseMatch = (state: ParseState) => {
       }
     }
     let (rbraceTok, state5) = expectSimple(Lexer.RBrace, currentState)
-    let bundleLit = {
-      node: { id, span: Source.makeSpan(0, 0, 0, 0) },
-      items: List.reverse(items),
-    }
-    let bundle: Ast.BundleExpr = {
-      node: { id, span: Source.makeSpan(0, 0, 0, 0) },
-      kind: Ast.Literal(bundleLit),
+    (List.reverse(items), rbraceTok, state5)
+  }
+
+  let mkFnOnlyMatch = (endSpan: Source.Span, fnItems: List<Ast.FnItem>, stateX: ParseState) => {
+    let fnExpr: Ast.FnExpr = {
+      node: { id, span: endSpan },
+      items: fnItems,
       attach: { leading: [], trailing: [], dangling: [] },
     }
-    let matchApply: Ast.MatchApply = { ...initialMatchApply, bundle }
+    let fnVal = makeExpr(id, endSpan, Fn(fnExpr))
+    (fnVal, stateX)
+  }
+
+  let mkApplyMatch = (
+    scrutinee: Ast.Expr,
+    endSpan: Source.Span,
+    fnItems: List<Ast.FnItem>,
+    stateX: ParseState,
+  ) => {
+    let fnExpr: Ast.FnExpr = {
+      node: { id, span: endSpan },
+      items: fnItems,
+      attach: { leading: [], trailing: [], dangling: [] },
+    }
+    let fnVal = makeExpr(id, endSpan, Fn(fnExpr))
+    let applyExpr = makeExpr(id, endSpan, Apply(fnVal, scrutinee))
+    (applyExpr, stateX)
+  }
+
+  if (kindIs(currentToken(state2).kind, Lexer.LBrace)) {
+    let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state2)
     let span = spanFromTokens(matchTok.span, rbraceTok.span)
-    let expr = makeExpr(id, span, MatchApply(matchApply))
-    (expr, state5)
+    mkFnOnlyMatch(span, fnItems, state5)
   } else {
-    let span = spanFromTokens(matchTok.span, scrutinee.node.span)
-    let expr = makeExpr(id, span, MatchApply(initialMatchApply))
-    (expr, state3)
+    let (scrutinee, state3) = parseInfix(state2)
+    if (kindIs(currentToken(state3).kind, Lexer.LBrace)) {
+      let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state3)
+      let span = spanFromTokens(matchTok.span, rbraceTok.span)
+      mkApplyMatch(scrutinee, span, fnItems, state5)
+    } else if (kindIs(currentToken(state3).kind, Lexer.FatArrow)) {
+      let (_, state4) = expectSimple(Lexer.FatArrow, state3)
+    if (kindIs(currentToken(state4).kind, Lexer.LBrace)) {
+      let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state4)
+      let span = spanFromTokens(matchTok.span, rbraceTok.span)
+      let matcherFnExpr: Ast.FnExpr = {
+        node: { id, span },
+        items: fnItems,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let matcherFn = makeExpr(id, span, Fn(matcherFnExpr))
+      let applyExpr = makeExpr(id, span, Apply(matcherFn, scrutinee))
+      let paramPattern = match (exprToParamPattern(scrutinee)) {
+        Some(p) => p,
+        None =>
+          Error.createError(
+            Error.Parsing,
+            scrutinee.node.span,
+            "Unsupported first-class match parameter",
+            [
+              Error.Note(
+                "match(param) => currently supports identifier or tuple of identifiers",
+              ),
+            ]
+          ),
+      }
+      let bodyBlock: Ast.Block = {
+        node: { id, span },
+        items: [],
+        result: [applyExpr],
+      }
+      let outerClause: Ast.FnClause = {
+        node: { id, span },
+        param: paramPattern,
+        guard: None,
+        body: bodyBlock,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let outerItem: Ast.FnItem = {
+        node: { id, span },
+        kind: Ast.Clause(outerClause),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let outerFn: Ast.FnExpr = {
+        node: { id, span },
+        items: [outerItem],
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+      let expr = makeExpr(id, span, Fn(outerFn))
+      (expr, state5)
+    } else {
+      Error.createError(
+        Error.Parsing,
+        currentToken(state4).span,
+        "Expected { ... } after match(...) =>",
+        [Error.Note("match arrow form requires a clause block")]
+      )
+    }
+    } else {
+      Error.createError(
+        Error.Parsing,
+        currentToken(state3).span,
+        "Expected match body",
+        [Error.Note("use match { ... }, match(expr) { ... }, or match(expr) => { ... }")]
+      )
+    }
   }
 }
 
