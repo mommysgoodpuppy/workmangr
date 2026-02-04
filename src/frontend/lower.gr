@@ -7,18 +7,107 @@ from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
 from "../core/error.gr" include Error
 
+// Convert block of case expressions to bundle
+let rec blockToBundle = (block: Ast.Block) => {
+  let items = List.map((expr: Ast.Expr) => {
+    match (expr.kind: Ast.ExprKind) {
+      Ast.InfixChain({ first: patExpr, rest: [(op, bodyExpr)] }) when op.text
+        == "=>" => {
+        let pat = exprToPattern(patExpr)
+        let body = match (bodyExpr.kind: Ast.ExprKind) {
+          Ast.Block(b) => b,
+          _ =>
+            Error.createError(
+              Error.Lowering,
+              bodyExpr.node.span,
+              "Case body must be a block",
+              []
+            ),
+        }
+        let caseKind = Ast.Case(pat, None, body)
+        {
+          node: { id: expr.node.id, span: expr.node.span },
+          kind: caseKind,
+          attach: { leading: [], trailing: [], dangling: [] },
+        }: Ast.BundleItem
+      },
+      _ =>
+        Error.createError(
+          Error.Lowering,
+          expr.node.span,
+          "Expected case pattern => block",
+          []
+        ),
+    }
+  }, block.result)
+  let bundleLit = { node: { id: block.node.id, span: block.node.span }, items }
+  {
+    node: { id: block.node.id, span: block.node.span },
+    kind: Ast.Literal(bundleLit),
+    attach: { leading: [], trailing: [], dangling: [] },
+  }: Ast.BundleExpr
+}
+
+// Convert expr to pattern (for case pats)
+and exprToPattern = (expr: Ast.Expr) => {
+  match (expr.kind) {
+    Ast.Ident({ _, text }) when text == "_" => { //TODO: missing node
+      {
+        node: expr.node,
+        kind: Ast.Wildcard,
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+    },
+    Ast.Ident({ _, text }) => { //TODO: missing node
+      let nameNode = { node: { id: expr.node.id, span: expr.node.span }, text }
+      {
+        node: expr.node,
+        kind: Ast.Pin(nameNode),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+    },
+    Ast.Lit(lit) => {
+      {
+        node: expr.node,
+        kind: Ast.Lit(lit),
+        attach: { leading: [], trailing: [], dangling: [] },
+      }
+    },
+    // Add more as needed
+    _ =>
+      Error.createError(
+        Error.Lowering,
+        expr.node.span,
+        "Unsupported pattern in case",
+        []
+      ),
+  }
+}
+
 // Transform => infix expressions into lambdas
 let rec lowerExpr = (expr: Ast.Expr) => {
-  match (expr.kind) {
+  match (expr.kind: Ast.ExprKind) {
     Ast.InfixChain(chain) => {
       match (chain) {
         {
           first: { node: _, kind: Ast.MatchApply(ma), attach: _ },
           rest: [(op, body)],
         } when op.text == "=>" => {
-          let bundle = match (body.kind) {
+          let bundle = match (body.kind: Ast.ExprKind) {
             Ast.Bundle(b) => b,
-            _ => Error.createError(Error.Lowering, body.node.span, "Match arrow expects bundle", [Error.Received("non-bundle expression"), Error.Note("match => must be followed by a bundle of cases")]),
+            Ast.Block(b) => blockToBundle(b),
+            _ =>
+              Error.createError(
+                Error.Lowering,
+                body.node.span,
+                "Match arrow expects bundle or block of cases",
+                [
+                  Error.Received("non-bundle/block expression"),
+                  Error.Note(
+                    "match => must be followed by a bundle or block of cases",
+                  ),
+                ]
+              ),
           }
           let matchApply = Ast.MatchApply({ ...ma, bundle })
           { ...expr, kind: Ast.Lambda(None, { ...expr, kind: matchApply }) }
@@ -30,7 +119,18 @@ let rec lowerExpr = (expr: Ast.Expr) => {
           let loweredBody = lowerExpr(body)
           let lambda = match (pattern) {
             Some(p) => Ast.Lambda(Some(p), loweredBody),
-            None => Error.createError(Error.Lowering, expr.node.span, "Unsupported parameter", [Error.Note("lambda parameter pattern not yet supported in lowering"), Error.Hint("this AST node type needs to be implemented")]),
+            None =>
+              Error.createError(
+                Error.Lowering,
+                expr.node.span,
+                "Unsupported parameter",
+                [
+                  Error.Note(
+                    "lambda parameter pattern not yet supported in lowering",
+                  ),
+                  Error.Hint("this AST node type needs to be implemented"),
+                ]
+              ),
           }
           { ...expr, kind: lambda }
         },
@@ -90,7 +190,10 @@ and extractParam = (param: Ast.Expr) => {
         }
       }
       match (convertAll(exprs)) {
-        Some(patterns) => Some({ node: param.node, kind: Tuple(patterns), attach: param.attach }),
+        Some(patterns) =>
+          Some(
+            { node: param.node, kind: Tuple(patterns), attach: param.attach },
+          ),
         None => None,
       }
     },

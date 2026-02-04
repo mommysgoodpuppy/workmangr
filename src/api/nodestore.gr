@@ -35,7 +35,7 @@ provide let empty = () => {
 }
 
 // Add a node to the store
-provide let putNode = (store, info) => {
+provide let putNode = (store, info:NodeInfo) => {
   Map.set(info.id, info, store.nodes)
   store
 }
