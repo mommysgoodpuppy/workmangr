@@ -1,12 +1,12 @@
 module Analysis
 
-from "./ast.gr" include Ast
+from "./core_ast.gr" include CoreAst
 from "./infer.gr" include Infer
 from "./types.gr" include Types
 from "../frontend/frontend.gr" include Frontend
 
 provide record Analysis {
-  program: Ast.Program,
+  program: CoreAst.Program,
   infer: Infer.InferState,
 }
 

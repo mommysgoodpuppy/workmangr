@@ -1,0 +1,39 @@
+module FormatTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "../src/util.gr" include Util
+from "../src/frontend/formatter.gr" include Formatter
+from "string" include String
+
+setSourceFile("./tests/format_test.gr")
+
+let canonicalNonWs = (text: String) => {
+  let noSpace = String.replaceAll(" ", "", text)
+  let noTab = String.replaceAll("\t", "", noSpace)
+  let noLf = String.replaceAll("\n", "", noTab)
+  String.replaceAll("\r", "", noLf)
+}
+
+test("formatting is stable on a small program", () => {
+  let source =
+    "let x = (y) => { match(y) { y => { 1 } } };"
+  let formatted1 = Formatter.format(source)
+  let formatted2 = Formatter.format(formatted1)
+  assertEquals(formatted1, formatted2)
+})
+
+test("formatting roundtrips util.testStr", () => {
+  let formatted1 = Formatter.format(Util.testStr)
+  let formatted2 = Formatter.format(formatted1)
+  assertEquals(formatted1, formatted2)
+})
+
+test("real formatter preserves non-whitespace tokens on util.testStr", () => {
+  let formatted = Formatter.format(Util.testStr)
+  assertEquals(canonicalNonWs(Util.testStr), canonicalNonWs(formatted))
+})
+
+let results = runTests()
+printResultsAndExit(results)

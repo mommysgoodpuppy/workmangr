@@ -3,7 +3,7 @@ module Infer
 from "map" include Map
 from "runtime/unsafe/panic" include Panic
 
-from "./ast.gr" include Ast
+from "./core_ast.gr" include CoreAst
 from "./types.gr" include Types
 
 provide record InferState {
@@ -96,46 +96,39 @@ let withBinding = (
   (resultType, stateAfter)
 }
 
-let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
+let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
   match (expr.kind) {
-    Ast.Lit(Ast.Int(_value)) => {
+    CoreAst.Mark(_, inner) => inferExpr(inner, state),
+    CoreAst.Lit(CoreAst.Int(_value)) => {
       let t = recordNodeType(expr.node.id, Types.TNumber, state)
       (t, state)
     },
-    Ast.Lit(_) => {
+    CoreAst.Lit(_) => {
       let t = recordNodeType(expr.node.id, Types.TNumber, state)
       (t, state)
     },
-    Ast.Ident(name) => {
+    CoreAst.Ident(name) => {
       let (t, state1) = lookupEnv(name.text, state)
       let tRecorded = recordNodeType(expr.node.id, t, state1)
       (tRecorded, state1)
     },
-    Ast.Hole(_) => {
+    CoreAst.Hole(_) => {
       let (t, state1) = freshVar(state)
       let tRecorded = recordNodeType(expr.node.id, t, state1)
       (tRecorded, state1)
     },
-    Ast.Block(block) => {
-      let (tInner, state1) = match (block.result) {
-        [] => (Types.TVoid, state),
-        [expr, ..._] => inferExpr(expr, state)
-      }
-      let t = recordNodeType(expr.node.id, tInner, state1)
-      (t, state1)
-    },
-    Ast.Fn(fnExpr) => {
+    CoreAst.Fn(fnExpr) => {
       let clause = match (fnExpr.items) {
         [item, ..._] =>
           match (item.kind) {
-            Ast.Clause(c) => c,
+            CoreAst.Clause(c) => c,
             _ => Panic.panic("Type error: function item is not a clause"),
           },
         _ => Panic.panic("Type error: empty function clauses"),
       }
       let paramName = match (clause.param.kind) {
-        Ast.Var(name) => name.text,
-        _ => "_"
+        CoreAst.Var(name) => name.text,
+        _ => "_",
       }
       let (paramType, state1) = freshVar(state)
       let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
@@ -144,19 +137,14 @@ let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
         monoScheme,
         state1,
         st => {
-          let bodyExpr: Ast.Expr = {
-            node: clause.body.node,
-            kind: Ast.Block(clause.body),
-            attach: { leading: [], trailing: [], dangling: [] },
-          }
-          let (tBody, stBody) = inferExpr(bodyExpr, st)
+          let (tBody, stBody) = inferExpr(clause.body, st)
           (Types.TFun(paramType, tBody), stBody)
         }
       )
       let tRecorded = recordNodeType(expr.node.id, fnType, stFn)
       (tRecorded, stFn)
     },
-    Ast.Apply(callee, arg) => {
+    CoreAst.Apply(callee, arg) => {
       let (tCallee, state1) = inferExpr(callee, state)
       let (tArg, state2) = inferExpr(arg, state1)
       let (tRes, state3) = freshVar(state2)
@@ -165,12 +153,35 @@ let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
       let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
       (tRecorded, state4)
     },
-    Ast.Paren(inner) => {
-      let (tInner, state1) = inferExpr(inner, state)
-      let t = recordNodeType(expr.node.id, tInner, state1)
-      (t, state1)
+    CoreAst.Let(binding, body) => {
+      let (tValue, state1) = inferExpr(binding.value, state)
+      Types.applySubstEnv(state1.subst, state1.env)
+      let scheme = Types.generalize(state1.env, state1.subst, tValue)
+      let bindingName = match (binding.name.kind) {
+        CoreAst.Var(name) => name.text,
+        _ => "_",
+      }
+      let (tBody, state2) = withBinding(
+        bindingName,
+        scheme,
+        state1,
+        st => inferExpr(body, st)
+      )
+      let tRecorded = recordNodeType(expr.node.id, tBody, state2)
+      (tRecorded, state2)
     },
-    Ast.Tuple(exprs) => {
+    CoreAst.If(cond, thenExpr, elseOpt) => {
+      let (tCond, state1) = inferExpr(cond, state)
+      let (tThen, state2) = inferExpr(thenExpr, state1)
+      let (tElse, state3) = match (elseOpt) {
+        None => (Types.TVoid, state2),
+        Some(e) => inferExpr(e, state2),
+      }
+      let state4 = unify(tThen, tElse, state3)
+      let t = recordNodeType(expr.node.id, tThen, state4)
+      (t, state4)
+    },
+    CoreAst.Tuple(exprs) => {
       let (types, state1) = inferExprList(exprs, state)
       let t = recordNodeType(expr.node.id, Types.TNumber, state1)
       (t, state1)
@@ -182,7 +193,7 @@ let rec inferExpr = (expr: Ast.Expr, state: InferState) => {
     }
   }
 }
-and inferExprList = (exprs: List<Ast.Expr>, state: InferState) => {
+and inferExprList = (exprs: List<CoreAst.Expr>, state: InferState) => {
   match (exprs) {
     [] => ([], state),
     [expr, ...rest] => {
@@ -193,32 +204,32 @@ and inferExprList = (exprs: List<Ast.Expr>, state: InferState) => {
   }
 }
 
-let inferLetBinding = (binding: Ast.LetBinding, state: InferState) => {
+let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
   let (tValue, state1) = inferExpr(binding.value, state)
   Types.applySubstEnv(state1.subst, state1.env)
   let scheme = Types.generalize(state1.env, state1.subst, tValue)
   let bindingName = match (binding.name.kind) {
-    Ast.Var(name) => name.text,
-    _ => "_"
+    CoreAst.Var(name) => name.text,
+    _ => "_",
   }
   Map.set(bindingName, scheme, state1.env)
   Map.set(bindingName, scheme, state1.topBindings)
   state1
 }
 
-let rec inferTopItems = (items: List<Ast.TopItem>, state: InferState) => {
+let rec inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) => {
   match (items) {
     [] => state,
     [item, ...rest] => {
       let state1 = match (item) {
-        Ast.DeclGroup(dg) => {
-          let rec inferDecls = (decls: List<Ast.Decl>, st: InferState) => {
+        CoreAst.DeclGroup(dg) => {
+          let rec inferDecls = (decls: List<CoreAst.Decl>, st: InferState) => {
             match (decls) {
               [] => st,
               [decl, ...restDecls] => {
                 let st1 = match (decl) {
-                  Ast.LetDecl(ld) => {
-                    let rec inferBindings = (bindings: List<Ast.LetBinding>, s: InferState) => {
+                  CoreAst.LetDecl(ld) => {
+                    let rec inferBindings = (bindings: List<CoreAst.LetBinding>, s: InferState) => {
                       match (bindings) {
                         [] => s,
                         [b, ...restBindings] => inferBindings(restBindings, inferLetBinding(b, s))
@@ -241,8 +252,15 @@ let rec inferTopItems = (items: List<Ast.TopItem>, state: InferState) => {
   }
 }
 
-provide let inferProgram = (program: Ast.Program) => {
+provide let inferProgram = (program: CoreAst.Program) => {
   let state = makeInitialState()
+  let finalState = inferTopItems(program.items, state)
+  Types.applySubstEnv(finalState.subst, finalState.env)
+  finalState
+}
+
+provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) => {
+  let state = { ...makeInitialState(), env }
   let finalState = inferTopItems(program.items, state)
   Types.applySubstEnv(finalState.subst, finalState.env)
   finalState

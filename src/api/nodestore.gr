@@ -4,7 +4,6 @@ from "map" include Map
 from "list" include List
 from "option" include Option
 from "string" include String
-from "../core/ast.gr" include Ast
 from "../core/source.gr" include Source
 
 // Edge from parent to child with field name

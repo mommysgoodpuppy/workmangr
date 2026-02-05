@@ -1,3 +1,6 @@
 [submodule "submodules/wmplayground"]
 	path = submodules/wmplayground
 	url = https://github.com/mommysgoodpuppy/wmplayground
+[submodule "submodules/graintest"]
+	path = submodules/graintest
+	url = https://github.com/mommysgoodpuppy/graintest.git

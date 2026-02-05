@@ -1,0 +1,47 @@
+module ParseComplexTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "../src/util.gr" include Util
+from "../src/frontend/parser.gr" include Parser
+from "../src/frontend/lower.gr" include Lower
+from "../src/core/core_ast.gr" include CoreAst
+from "../src/core/surface_ast.gr" include SurfaceAst
+from "list" include List
+
+setSourceFile("./tests/parse_complex_test.gr")
+
+let hasCoreExport = (program: CoreAst.Program) =>
+  List.some(item => match (item) { CoreAst.Export(_) => true, _ => false }, program.items)
+
+let hasCoreLetDecl = (program: CoreAst.Program) =>
+  List.some(item =>
+    match (item) {
+      CoreAst.DeclGroup(dg) =>
+        List.some(d => match (d) { CoreAst.LetDecl(_) => true, _ => false }, dg.decls),
+      _ => false,
+    },
+    program.items
+  )
+
+test("parse and lower util.testStr", () => {
+  let parsed = Parser.parseResult(Util.testStr)
+  let surfaceProgram: SurfaceAst.Program = parsed.program
+
+  all([
+    assertEquals(0, List.length(parsed.missingSemicolons)),
+    assertThat(List.length(surfaceProgram.items) > 10, "expected many top-level items"),
+  ])
+
+  let lowered = Lower.lowerProgram(surfaceProgram)
+
+  all([
+    assertThat(List.length(lowered.items) > 10, "expected many lowered items"),
+    assertThat(hasCoreExport(lowered), "expected at least one export"),
+    assertThat(hasCoreLetDecl(lowered), "expected at least one let decl"),
+  ])
+})
+
+let results = runTests()
+printResultsAndExit(results)

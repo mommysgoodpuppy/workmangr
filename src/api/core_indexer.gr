@@ -1,0 +1,257 @@
+module CoreIndexer
+
+from "list" include List
+from "option" include Option
+from "string" include String
+from "../core/core_ast.gr" include CoreAst
+from "./nodestore.gr" include NodeStore as NS
+
+let visitName = (store: NS.NodeStore, name: CoreAst.Name) => {
+  let info: NS.NodeInfo = {
+    id: name.node.id,
+    kind: "Name",
+    span: name.node.span,
+    preview: Some(name.text),
+    children: [],
+  }
+  let store = NS.putNode(store, info)
+  store
+}
+
+let rec visitExpr = (store: NS.NodeStore, expr: CoreAst.Expr) => {
+  let store = NS.putNode(store, {
+    id: expr.node.id,
+    kind: "Expr",
+    span: expr.node.span,
+    preview: None,
+    children: [],
+  })
+
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => {
+      let store = NS.updatePreview(store, expr.node.id, "Mark")
+      let store = visitExpr(store, inner)
+      NS.addChild(store, expr.node.id, "inner", inner.node.id)
+    },
+    CoreAst.Lit(lit) => {
+      let preview = match (lit) {
+        CoreAst.Int(n) => "Lit: Int(" ++ toString(n) ++ ")",
+        CoreAst.Bool(b) => "Lit: Bool(" ++ (if (b) { "true" } else { "false" }) ++ ")",
+        CoreAst.Str(_) => "Lit: Str",
+        CoreAst.Char(_) => "Lit: Char",
+        CoreAst.Unit => "Lit: Unit",
+        CoreAst.Byte(n) => "Lit: Byte(" ++ toString(n) ++ ")",
+      }
+      NS.updatePreview(store, expr.node.id, preview)
+    },
+    CoreAst.Ident(name) => {
+      let store = NS.updatePreview(store, expr.node.id, "Ident")
+      let store = visitName(store, name)
+      NS.addChild(store, expr.node.id, "name", name.node.id)
+    },
+    CoreAst.Fn(fnExpr) => {
+      let store = NS.updatePreview(store, expr.node.id, "Fn")
+      List.reduce((s: NS.NodeStore, item: CoreAst.FnItem) => {
+        match (item.kind) {
+          CoreAst.Clause(clause) => {
+            let s = visitPattern(s, clause.param)
+            let s = NS.addChild(s, expr.node.id, "clause.param", clause.param.node.id)
+            let s = visitExpr(s, clause.body)
+            NS.addChild(s, expr.node.id, "clause.body", clause.body.node.id)
+          },
+          CoreAst.Include(name) => {
+            let s = visitName(s, name)
+            NS.addChild(s, expr.node.id, "include", name.node.id)
+          },
+          CoreAst.Hole(_) => s,
+        }
+      }, store, fnExpr.items)
+    },
+    CoreAst.Apply(callee, arg) => {
+      let store = NS.updatePreview(store, expr.node.id, "Apply")
+      let store = visitExpr(store, callee)
+      let store = NS.addChild(store, expr.node.id, "callee", callee.node.id)
+      let store = visitExpr(store, arg)
+      NS.addChild(store, expr.node.id, "arg", arg.node.id)
+    },
+    CoreAst.Let(binding, body) => {
+      let store = NS.updatePreview(store, expr.node.id, "LetExpr")
+      let store = visitLetBinding(store, binding)
+      NS.addChild(store, expr.node.id, "binding", binding.node.id)
+      let store = visitExpr(store, body)
+      NS.addChild(store, expr.node.id, "body", body.node.id)
+    },
+    CoreAst.If(cond, thenE, elseOpt) => {
+      let store = NS.updatePreview(store, expr.node.id, "If")
+      let store = visitExpr(store, cond)
+      let store = NS.addChild(store, expr.node.id, "cond", cond.node.id)
+      let store = visitExpr(store, thenE)
+      let store = NS.addChild(store, expr.node.id, "then", thenE.node.id)
+      match (elseOpt) {
+        None => store,
+        Some(elseE) => {
+          let store = visitExpr(store, elseE)
+          NS.addChild(store, expr.node.id, "else", elseE.node.id)
+        }
+      }
+    },
+    CoreAst.Tuple(exprs) => {
+      let store = NS.updatePreview(store, expr.node.id, "Tuple")
+      List.reduce((s, e) => {
+        let s = visitExpr(s, e)
+        NS.addChild(s, expr.node.id, "item", e.node.id)
+      }, store, exprs)
+    },
+    CoreAst.RecordLit(items) => {
+      let store = NS.updatePreview(store, expr.node.id, "RecordLit")
+      List.reduce((s, item) => {
+        match (item) {
+          CoreAst.Field(name, value) => {
+            let s = visitName(s, name)
+            let s = NS.addChild(s, expr.node.id, "field.name", name.node.id)
+            let s = visitExpr(s, value)
+            NS.addChild(s, expr.node.id, "field.value", value.node.id)
+          },
+          CoreAst.Spread(value) => {
+            let s = visitExpr(s, value)
+            NS.addChild(s, expr.node.id, "spread", value.node.id)
+          },
+        }
+      }, store, items)
+    },
+    CoreAst.Hole(_) => NS.updatePreview(store, expr.node.id, "Hole"),
+  }
+}
+
+and visitPattern = (store: NS.NodeStore, pat: CoreAst.Pattern) => {
+  let store = NS.putNode(store, {
+    id: pat.node.id,
+    kind: "Pattern",
+    span: pat.node.span,
+    preview: None,
+    children: [],
+  })
+
+  match (pat.kind) {
+    CoreAst.Mark(_, inner) => {
+      let store = NS.updateKind(store, pat.node.id, "PatMark")
+      let store = visitPattern(store, inner)
+      NS.addChild(store, pat.node.id, "inner", inner.node.id)
+    },
+    CoreAst.Var(name) => {
+      let store = NS.updateKind(store, pat.node.id, "PatVar")
+      let store = visitName(store, name)
+      NS.addChild(store, pat.node.id, "name", name.node.id)
+    },
+    CoreAst.Pin(name) => {
+      let store = NS.updateKind(store, pat.node.id, "PatPin")
+      let store = visitName(store, name)
+      NS.addChild(store, pat.node.id, "name", name.node.id)
+    },
+    _ => store
+  }
+}
+
+and visitLetBinding = (store: NS.NodeStore, binding: CoreAst.LetBinding) => {
+  let store = NS.putNode(store, {
+    id: binding.node.id,
+    kind: "LetBinding",
+    span: binding.node.span,
+    preview: None,
+    children: [],
+  })
+  let store = visitPattern(store, binding.name)
+  let store = NS.addChild(store, binding.node.id, "name", binding.name.node.id)
+  let store = visitExpr(store, binding.value)
+  NS.addChild(store, binding.node.id, "value", binding.value.node.id)
+}
+
+let visitDecl = (store: NS.NodeStore, decl: CoreAst.Decl) => {
+  match (decl) {
+    CoreAst.LetDecl(ld) => {
+      List.reduce((s, binding) => visitLetBinding(s, binding), store, ld.bindings)
+    },
+    CoreAst.TypeDecl(td) => {
+      let store = NS.putNode(store, {
+        id: td.node.id,
+        kind: "TypeDecl",
+        span: td.node.span,
+        preview: Some(td.name.text),
+        children: [],
+      })
+      let store = visitName(store, td.name)
+      NS.addChild(store, td.node.id, "name", td.name.node.id)
+    },
+    CoreAst.RecordDecl(rd) => {
+      let store = NS.putNode(store, {
+        id: rd.node.id,
+        kind: "RecordDecl",
+        span: rd.node.span,
+        preview: Some(rd.name.text),
+        children: [],
+      })
+      let store = visitName(store, rd.name)
+      NS.addChild(store, rd.node.id, "name", rd.name.node.id)
+    },
+    _ => store
+  }
+}
+
+let visitExport = (store: NS.NodeStore, exp: CoreAst.Export) => {
+  NS.putNode(store, {
+    id: exp.node.id,
+    kind: "Export",
+    span: exp.node.span,
+    preview: Some("export"),
+    children: [],
+  })
+}
+
+let visitTopItem = (store: NS.NodeStore, item: CoreAst.TopItem) => {
+  match (item) {
+    CoreAst.Export(exp) => visitExport(store, exp),
+    CoreAst.DeclGroup(dg) => {
+      List.reduce((s, decl) => visitDecl(s, decl), store, dg.decls)
+    },
+    _ => store
+  }
+}
+
+provide let indexProgram = (program: CoreAst.Program) => {
+  let store = NS.empty()
+
+  let store = List.reduce((s, item) => {
+    match (item) {
+      CoreAst.Export(exp) => {
+        let s = visitExport(s, exp)
+        NS.addRoot(s, exp.node.id)
+      },
+      CoreAst.DeclGroup(dg) => {
+        List.reduce((s2, decl) => {
+          match (decl) {
+            CoreAst.LetDecl(ld) => {
+              List.reduce((s3, binding) => {
+                let s3 = visitLetBinding(s3, binding)
+                NS.addRoot(s3, binding.node.id)
+              }, s2, ld.bindings)
+            },
+            CoreAst.TypeDecl(td) => {
+              let s3 = visitDecl(s2, decl)
+              let s4 = NS.addRoot(s3, td.node.id)
+              s4
+            },
+            CoreAst.RecordDecl(rd) => {
+              let s3 = visitDecl(s2, decl)
+              let s4 = NS.addRoot(s3, rd.node.id)
+              s4
+            },
+            _ => visitDecl(s2, decl)
+          }
+        }, s, dg.decls)
+      },
+      _ => visitTopItem(s, item)
+    }
+  }, store, program.items)
+
+  store
+}

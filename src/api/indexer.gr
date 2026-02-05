@@ -3,11 +3,11 @@ module Indexer
 from "list" include List
 from "option" include Option
 from "string" include String
-from "../core/ast.gr" include Ast
+from "../core/surface_ast.gr" include SurfaceAst
 from "./nodestore.gr" include NodeStore as NS
 
 // Visit a Name node - just add it to the store
-let visitName = (store: NS.NodeStore, name: Ast.Name) => {
+let visitName = (store: NS.NodeStore, name: SurfaceAst.Name) => {
   let info: NS.NodeInfo = {
     id: name.node.id,
     kind: "Name",
@@ -20,7 +20,7 @@ let visitName = (store: NS.NodeStore, name: Ast.Name) => {
 }
 
 // Visit an expression
-let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
+let rec visitExpr = (store: NS.NodeStore, expr: SurfaceAst.Expr) => {
   // Insert base node
   let store = NS.putNode(store, {
     id: expr.node.id,
@@ -32,34 +32,34 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
 
   // Handle based on kind
   match (expr.kind) {
-    Ast.Lit(lit) => {
+    SurfaceAst.Lit(lit) => {
       let preview = match (lit) {
-        Ast.Int(n) => "Lit: Int(" ++ toString(n) ++ ")",
-        Ast.Bool(b) => "Lit: Bool(" ++ (if (b) { "true" } else { "false" }) ++ ")",
-        Ast.Str(s) => "Lit: Str",
-        Ast.Char(_) => "Lit: Char",
-        Ast.Unit => "Lit: Unit",
-        Ast.Byte(n) => "Lit: Byte(" ++ toString(n) ++ ")",
+        SurfaceAst.Int(n) => "Lit: Int(" ++ toString(n) ++ ")",
+        SurfaceAst.Bool(b) => "Lit: Bool(" ++ (if (b) { "true" } else { "false" }) ++ ")",
+        SurfaceAst.Str(s) => "Lit: Str",
+        SurfaceAst.Char(_) => "Lit: Char",
+        SurfaceAst.Unit => "Lit: Unit",
+        SurfaceAst.Byte(n) => "Lit: Byte(" ++ toString(n) ++ ")",
       }
       NS.updatePreview(store, expr.node.id, preview)
     },
 
-    Ast.Ident(name) => {
+    SurfaceAst.Ident(name) => {
       let store = NS.updatePreview(store, expr.node.id, "Ident")
       let store = visitName(store, name)
       NS.addChild(store, expr.node.id, "name", name.node.id)
     },
 
-    Ast.Fn(fnExpr) => {
+    SurfaceAst.Fn(fnExpr) => {
       let store = NS.updatePreview(store, expr.node.id, "Fn")
-      List.reduce((s: NS.NodeStore, item: Ast.FnItem) => {
+      List.reduce((s: NS.NodeStore, item: SurfaceAst.FnItem) => {
         match (item.kind) {
-          Ast.Clause(clause) => {
+          SurfaceAst.Clause(clause) => {
             let s = visitPattern(s, clause.param)
             let s = NS.addChild(s, expr.node.id, "clause.param", clause.param.node.id)
-            let bodyExpr: Ast.Expr = {
+            let bodyExpr: SurfaceAst.Expr = {
               node: clause.body.node,
-              kind: Ast.Block(clause.body),
+              kind: SurfaceAst.Block(clause.body),
               attach: clause.attach,
             }
             let s = visitExpr(s, bodyExpr)
@@ -70,7 +70,7 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
       }, store, fnExpr.items)
     },
 
-    Ast.Match(m) => {
+    SurfaceAst.Match(m) => {
       let store = NS.updatePreview(
         store,
         expr.node.id,
@@ -83,20 +83,20 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
           NS.addChild(s, expr.node.id, "scrutinee", scrutinee.node.id)
         }
       }
-      List.reduce((s: NS.NodeStore, item: Ast.FnItem) => {
+      List.reduce((s: NS.NodeStore, item: SurfaceAst.FnItem) => {
         match (item.kind) {
-          Ast.Clause(clause) => {
+          SurfaceAst.Clause(clause) => {
             let s = visitPattern(s, clause.param)
             let s = NS.addChild(s, expr.node.id, "clause.param", clause.param.node.id)
-            let bodyExpr: Ast.Expr = {
+            let bodyExpr: SurfaceAst.Expr = {
               node: clause.body.node,
-              kind: Ast.Block(clause.body),
+              kind: SurfaceAst.Block(clause.body),
               attach: clause.attach,
             }
             let s = visitExpr(s, bodyExpr)
             NS.addChild(s, expr.node.id, "clause.body", bodyExpr.node.id)
           },
-          Ast.Include(name) => {
+          SurfaceAst.Include(name) => {
             let s = visitName(s, name)
             NS.addChild(s, expr.node.id, "include", name.node.id)
           },
@@ -105,7 +105,7 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
       }, store, m.bundle.items)
     },
 
-    Ast.Apply(callee, arg) => {
+    SurfaceAst.Apply(callee, arg) => {
       let store = NS.updatePreview(store, expr.node.id, "Apply")
       let store = visitExpr(store, callee)
       let store = NS.addChild(store, expr.node.id, "callee", callee.node.id)
@@ -113,7 +113,7 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
       NS.addChild(store, expr.node.id, "arg", arg.node.id)
     },
 
-    Ast.InfixChain(chain) => {
+    SurfaceAst.InfixChain(chain) => {
       let store = NS.updatePreview(store, expr.node.id, "InfixChain")
       let store = visitExpr(store, chain.first)
       let store = NS.addChild(store, expr.node.id, "first", chain.first.node.id)
@@ -127,37 +127,25 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
       store
     },
 
-    Ast.Postfix(pf) => {
+    SurfaceAst.Postfix(pf) => {
       let store = NS.updatePreview(store, expr.node.id, "Postfix")
       let store = visitExpr(store, pf.target)
       NS.addChild(store, expr.node.id, "target", pf.target.node.id)
     },
 
-    Ast.Block(block) => {
+    SurfaceAst.Block(block) => {
       let store = NS.updatePreview(store, expr.node.id, "Block")
-      let store = List.reduce((s, item) => {
-        match (item) {
-          Ast.ExprItem(innerExpr) => {
-            let s = visitExpr(s, innerExpr)
-            NS.addChild(s, expr.node.id, "expr", innerExpr.node.id)
-          },
-          _ => s
-        }
-      }, store, block.items)
-      let store = List.reduce((s, e) => {
-        let s = visitExpr(s, e)
-        NS.addChild(s, expr.node.id, "result", e.node.id)
-      }, store, block.result)
-      store
+      let store = visitExpr(store, block.body)
+      NS.addChild(store, expr.node.id, "body", block.body.node.id)
     },
 
-    Ast.Paren(inner) => {
+    SurfaceAst.Paren(inner) => {
       let store = NS.updatePreview(store, expr.node.id, "Paren")
       let store = visitExpr(store, inner)
       NS.addChild(store, expr.node.id, "inner", inner.node.id)
     },
 
-    Ast.Tuple(exprs) => {
+    SurfaceAst.Tuple(exprs) => {
       let store = NS.updatePreview(store, expr.node.id, "Tuple")
       List.reduce((s, e) => {
         let s = visitExpr(s, e)
@@ -165,7 +153,7 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
       }, store, exprs)
     },
 
-    Ast.If(cond, thenE, elseOpt) => {
+    SurfaceAst.If(cond, thenE, elseOpt) => {
       let store = NS.updatePreview(store, expr.node.id, "If")
       let store = visitExpr(store, cond)
       let store = NS.addChild(store, expr.node.id, "cond", cond.node.id)
@@ -179,12 +167,14 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
         }
       }
     },
-    Ast.Let(binding) => {
+    SurfaceAst.Let(binding, body) => {
       let store = NS.updatePreview(store, expr.node.id, "LetExpr")
       let store = visitLetBinding(store, binding)
       NS.addChild(store, expr.node.id, "binding", binding.node.id)
+      let store = visitExpr(store, body)
+      NS.addChild(store, expr.node.id, "body", body.node.id)
     },
-    Ast.Assign(asg) => {
+    SurfaceAst.Assign(asg) => {
       let store = NS.updatePreview(store, expr.node.id, "AssignExpr")
       let store = visitExpr(store, asg.target)
       let store = NS.addChild(store, expr.node.id, "target", asg.target.node.id)
@@ -196,7 +186,7 @@ let rec visitExpr = (store: NS.NodeStore, expr: Ast.Expr) => {
   }
 }
 
-and visitPattern = (store: NS.NodeStore, pat: Ast.Pattern) => {
+and visitPattern = (store: NS.NodeStore, pat: SurfaceAst.Pattern) => {
   let store = NS.putNode(store, {
     id: pat.node.id,
     kind: "Pattern",
@@ -206,7 +196,7 @@ and visitPattern = (store: NS.NodeStore, pat: Ast.Pattern) => {
   })
 
   match (pat.kind) {
-    Ast.Var(name) => {
+    SurfaceAst.Var(name) => {
       let store = NS.updateKind(store, pat.node.id, "PatVar")
       let store = visitName(store, name)
       NS.addChild(store, pat.node.id, "name", name.node.id)
@@ -215,7 +205,7 @@ and visitPattern = (store: NS.NodeStore, pat: Ast.Pattern) => {
   }
 }
 
-and visitLetBinding = (store: NS.NodeStore, binding: Ast.LetBinding) => {
+and visitLetBinding = (store: NS.NodeStore, binding: SurfaceAst.LetBinding) => {
   let store = NS.putNode(store, {
     id: binding.node.id,
     kind: "LetBinding",
@@ -230,12 +220,12 @@ and visitLetBinding = (store: NS.NodeStore, binding: Ast.LetBinding) => {
 }
 
 // Visit a declaration
-let visitDecl = (store: NS.NodeStore, decl: Ast.Decl) => {
+let visitDecl = (store: NS.NodeStore, decl: SurfaceAst.Decl) => {
   match (decl) {
-    Ast.LetDecl(ld) => {
+    SurfaceAst.LetDecl(ld) => {
       List.reduce((s, binding) => visitLetBinding(s, binding), store, ld.bindings)
     },
-    Ast.TypeDecl(td) => {
+    SurfaceAst.TypeDecl(td) => {
       let store = NS.putNode(store, {
         id: td.node.id,
         kind: "TypeDecl",
@@ -246,7 +236,7 @@ let visitDecl = (store: NS.NodeStore, decl: Ast.Decl) => {
       let store = visitName(store, td.name)
       NS.addChild(store, td.node.id, "name", td.name.node.id)
     },
-    Ast.RecordDecl(rd) => {
+    SurfaceAst.RecordDecl(rd) => {
       let store = NS.putNode(store, {
         id: rd.node.id,
         kind: "RecordDecl",
@@ -262,7 +252,7 @@ let visitDecl = (store: NS.NodeStore, decl: Ast.Decl) => {
 }
 
 // Visit an Export node
-let visitExport = (store: NS.NodeStore, exp: Ast.Export) => {
+let visitExport = (store: NS.NodeStore, exp: SurfaceAst.Export) => {
   NS.putNode(store, {
     id: exp.node.id,
     kind: "Export",
@@ -273,10 +263,10 @@ let visitExport = (store: NS.NodeStore, exp: Ast.Export) => {
 }
 
 // Visit a top-level item
-let visitTopItem = (store: NS.NodeStore, item: Ast.TopItem) => {
+let visitTopItem = (store: NS.NodeStore, item: SurfaceAst.TopItem) => {
   match (item) {
-    Ast.Export(exp) => visitExport(store, exp),
-    Ast.DeclGroup(dg) => {
+    SurfaceAst.Export(exp) => visitExport(store, exp),
+    SurfaceAst.DeclGroup(dg) => {
       List.reduce((s, decl) => visitDecl(s, decl), store, dg.decls)
     },
     _ => store
@@ -284,33 +274,33 @@ let visitTopItem = (store: NS.NodeStore, item: Ast.TopItem) => {
 }
 
 // Index an entire program
-provide let indexProgram = (program: Ast.Program) => {
+provide let indexProgram = (program: SurfaceAst.Program) => {
   let store = NS.empty()
   
   // Visit all items and collect root binding IDs
   let store = List.reduce((s, item) => {
     match (item) {
-      Ast.Export(exp) => {
+      SurfaceAst.Export(exp) => {
         let s = visitExport(s, exp)
         NS.addRoot(s, exp.node.id)
       },
-      Ast.DeclGroup(dg) => {
+      SurfaceAst.DeclGroup(dg) => {
         // Visit declarations and add binding IDs as roots
         List.reduce((s2, decl) => {
           match (decl) {
-            Ast.LetDecl(ld) => {
+            SurfaceAst.LetDecl(ld) => {
               // Add each binding as a root
               List.reduce((s3, binding) => {
                 let s3 = visitLetBinding(s3, binding)
                 NS.addRoot(s3, binding.node.id)
               }, s2, ld.bindings)
             },
-            Ast.TypeDecl(td) => {
+            SurfaceAst.TypeDecl(td) => {
               let s3 = visitDecl(s2, decl)
               let s4 = NS.addRoot(s3, td.node.id)
               s4
             },
-            Ast.RecordDecl(rd) => {
+            SurfaceAst.RecordDecl(rd) => {
               let s3 = visitDecl(s2, decl)
               let s4 = NS.addRoot(s3, rd.node.id)
               s4

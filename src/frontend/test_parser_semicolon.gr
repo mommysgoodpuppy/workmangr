@@ -3,6 +3,8 @@ module TestParserSemicolon
 from "list" include List
 from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
+from "../core/surface_ast.gr" include SurfaceAst
+use SurfaceAst.*
 from "./parser.gr" include Parser
 
 let assertOk = (cond: Bool, message: String) => {
@@ -65,7 +67,58 @@ let main = () => {
     "expected tolerant parse to skip unknown top-level tokens",
   )
 
-  print("parser semicolon recovery test passed")
+  let foldedSource = "let x = { let y = 1; y };"
+  let foldedProgram = Parser.parse(foldedSource)
+  let foldedOk = match (foldedProgram.items) {
+    [SurfaceAst.DeclGroup(dg)] => match (dg.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Block(block) => match (block.body.kind) {
+            SurfaceAst.Let(letBinding, letBody) =>
+              match ((letBinding.value.kind, letBody.kind)) {
+                (SurfaceAst.Lit(SurfaceAst.Int(1)), SurfaceAst.Ident({ _, text })) when text == "y" => true,
+                _ => false,
+              },
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+  assertOk(
+    foldedOk,
+    "expected block body to fold into Let(binding, body)",
+  )
+
+  let seqSource = "let x = 1; 2;"
+  let seqProgram = Parser.parse(seqSource)
+  let seqOk = match (seqProgram.items) {
+    [SurfaceAst.DeclGroup(dg)] => match (dg.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Let(seqBinding, seqBody) =>
+            match ((seqBinding.value.kind, seqBody.kind)) {
+              (SurfaceAst.Lit(SurfaceAst.Int(1)), SurfaceAst.Lit(SurfaceAst.Int(2))) => true,
+              _ => false,
+            },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+  assertOk(
+    seqOk,
+    "expected top-level ';' to parse as sequencing in let RHS",
+  )
+
+  print("parser semicolon Mark test passed")
 }
 
 main()

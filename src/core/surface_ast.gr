@@ -1,4 +1,4 @@
-module Ast
+module SurfaceAst
 
 from "./source.gr" include Source
 
@@ -73,7 +73,7 @@ provide enum rec ExprKind {
   RecordLit(List<RecordItem>),
   Hole(Hole),
   If(Expr, Expr, Option<Expr>),
-  Let(LetBinding),
+  Let(LetBinding, Expr),
   Assign(AssignExpr),
 }
 and provide enum RecordItem {
@@ -109,10 +109,11 @@ and provide record InfixChain {
 and provide record Block {
   node: Node,
   items: List<BlockItem>,
-  result: List<Expr>,
+  body: Expr,
 }
 and provide enum BlockItem {
-  ExprItem(Expr),
+  ExprItem(Expr, Bool), // Bool indicates explicit semicolon terminator
+  LetItem(LetBinding, Bool), // Bool indicates explicit semicolon terminator
   TriviaItem(Trivia), // includes comments AND islands
   Directive(Directive),
 }
@@ -269,13 +270,16 @@ and provide enum DeclGroupKind {
 }
 and provide type Rec = Bool
 and provide enum LetGroupMods {
+  Plain,
   Rec,
   Mut,
 }
 and provide enum TypeGroupMods {
+  Plain,
   Rec,
 }
 and provide enum RecordGroupMods {
+  Plain,
   Rec,
 }
 and provide enum RuleKind {
@@ -292,7 +296,7 @@ and provide enum ExpectedTopItemKind {
   TopItemExport,
   TopItemDirective,
   TopItemTrivia,
-  TopItemRecovery,
+  TopItemMark,
 }
 and provide enum ExpectedKind {
   ExpectTopItem(ExpectedTopItemKind),
@@ -302,12 +306,12 @@ and provide enum ExpectedKind {
   ExpectToken,
   ExpectBlock,
 }
-and provide record Recovery {
+and provide record Mark {
   node: Node,
-  kind: RecoveryKind,
+  kind: MarkKind,
   expected: ExpectedKind,
 }
-and provide enum RecoveryKind {
+and provide enum MarkKind {
   UnknownTopLevel(String),
   InvalidTopLevel(String),
 }
@@ -317,7 +321,7 @@ and provide enum TopItem {
   Reexport(ReexportDecl),
   Export(Export),
   DeclGroup(DeclGroup),
-  Recovery(Recovery),
+  Mark(Mark),
   //can be raw region
   Trivia(Trivia),
 }

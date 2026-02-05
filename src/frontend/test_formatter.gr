@@ -38,6 +38,13 @@ let main = () => {
     "real mode did not preserve original text on invariant failure fallback"
   )
 
+  let seqInput = "let x = 1; 2;"
+  let seqReal = Formatter.formatWithMode(seqInput, Formatter.Real)
+  assertOk(
+    canonicalNonWs(seqReal) == canonicalNonWs(seqInput),
+    "real mode changed sequencing expression text"
+  )
+
   print("formatter real-mode safety test passed")
 }
 

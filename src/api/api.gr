@@ -8,7 +8,7 @@ from "wasi/process" include Process
 from "fs" include Fs
 from "path" include Path
 
-from "../core/ast.gr" include Ast
+from "../core/surface_ast.gr" include SurfaceAst
 from "../core/analysis.gr" include Analysis
 from "../core/types.gr" include Types
 from "../core/source.gr" include Source
@@ -18,6 +18,7 @@ from "../frontend/lower.gr" include Lower
 from "../frontend/parser.gr" include Parser
 from "../frontend/lower.gr" include Lower
 from "../frontend/frontend.gr" include Frontend
+from "./core_indexer.gr" include CoreIndexer
 from "../frontend/formatter.gr" include Formatter
 from "./nodestore.gr" include NodeStore as NS
 from "./indexer.gr" include Indexer
@@ -86,27 +87,27 @@ let tokenToJson = (tok: Lexer.Token) => {
   "\"mate\":" ++ mateJson ++ "}"
 }
 
-let expectedTopItemKindToString = (kind: Ast.ExpectedTopItemKind) => {
+let expectedTopItemKindToString = (kind: SurfaceAst.ExpectedTopItemKind) => {
   match (kind) {
-    Ast.TopItemAny => "AnyTopItem",
-    Ast.TopItemDeclGroup => "DeclGroup",
-    Ast.TopItemImport => "Import",
-    Ast.TopItemReexport => "Reexport",
-    Ast.TopItemExport => "Export",
-    Ast.TopItemDirective => "Directive",
-    Ast.TopItemTrivia => "Trivia",
-    Ast.TopItemRecovery => "Recovery",
+    SurfaceAst.TopItemAny => "AnyTopItem",
+    SurfaceAst.TopItemDeclGroup => "DeclGroup",
+    SurfaceAst.TopItemImport => "Import",
+    SurfaceAst.TopItemReexport => "Reexport",
+    SurfaceAst.TopItemExport => "Export",
+    SurfaceAst.TopItemDirective => "Directive",
+    SurfaceAst.TopItemTrivia => "Trivia",
+    SurfaceAst.TopItemMark => "Mark",
   }
 }
 
-let expectedKindToString = (kind: Ast.ExpectedKind) => {
+let expectedKindToString = (kind: SurfaceAst.ExpectedKind) => {
   match (kind) {
-    Ast.ExpectTopItem(tk) => "TopItem(" ++ expectedTopItemKindToString(tk) ++ ")",
-    Ast.ExpectExpr => "Expr",
-    Ast.ExpectPattern => "Pattern",
-    Ast.ExpectTypeExpr => "TypeExpr",
-    Ast.ExpectToken => "Token",
-    Ast.ExpectBlock => "Block",
+    SurfaceAst.ExpectTopItem(tk) => "TopItem(" ++ expectedTopItemKindToString(tk) ++ ")",
+    SurfaceAst.ExpectExpr => "Expr",
+    SurfaceAst.ExpectPattern => "Pattern",
+    SurfaceAst.ExpectTypeExpr => "TypeExpr",
+    SurfaceAst.ExpectToken => "Token",
+    SurfaceAst.ExpectBlock => "Block",
   }
 }
 
@@ -123,51 +124,45 @@ let tokensToJson = (tokens: List<Lexer.Token>) => {
   "[" ++ joinStrings(",", items) ++ "]"
 }
 
-let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
+let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
   if (depth > 8) {
     "{\"kind\":\"MaxDepth\",\"id\":" ++ toString(expr.node.id) ++ "}"
   } else {
     let kindName = match (expr.kind) {
-      Ast.Lit(Ast.Int(n)) => "Lit(Int(" ++ toString(n) ++ "))",
-      Ast.Lit(Ast.Bool(b)) => "Lit(Bool(" ++ toString(b) ++ "))",
-      Ast.Lit(Ast.Str(s)) => "Lit(Str)",
-      Ast.Lit(Ast.Char(_)) => "Lit(Char)",
-      Ast.Lit(Ast.Unit) => "Lit(Unit)",
-      Ast.Lit(Ast.Byte(_)) => "Lit(Byte)",
-      Ast.Ident(name) => "Ident(" ++ escapeJson(name.text) ++ ")",
-      Ast.Fn(_) => "Fn",
-      Ast.Match(_) => "Match",
-      Ast.Apply(_, _) => "Apply",
-      Ast.InfixChain(_) => "InfixChain",
-      Ast.Postfix(_) => "Postfix",
-      Ast.Block(_) => "Block",
-      Ast.Paren(_) => "Paren",
-      Ast.Tuple(_) => "Tuple",
-      Ast.RecordLit(_) => "RecordLit",
-      Ast.Hole(_) => "Hole",
-      Ast.If(_, _, _) => "If",
-      Ast.Let(_) => "Let",
-      Ast.Assign(_) => "Assign"
+      SurfaceAst.Lit(SurfaceAst.Int(n)) => "Lit(Int(" ++ toString(n) ++ "))",
+      SurfaceAst.Lit(SurfaceAst.Bool(b)) => "Lit(Bool(" ++ toString(b) ++ "))",
+      SurfaceAst.Lit(SurfaceAst.Str(s)) => "Lit(Str)",
+      SurfaceAst.Lit(SurfaceAst.Char(_)) => "Lit(Char)",
+      SurfaceAst.Lit(SurfaceAst.Unit) => "Lit(Unit)",
+      SurfaceAst.Lit(SurfaceAst.Byte(_)) => "Lit(Byte)",
+      SurfaceAst.Ident(name) => "Ident(" ++ escapeJson(name.text) ++ ")",
+      SurfaceAst.Fn(_) => "Fn",
+      SurfaceAst.Match(_) => "Match",
+      SurfaceAst.Apply(_, _) => "Apply",
+      SurfaceAst.InfixChain(_) => "InfixChain",
+      SurfaceAst.Postfix(_) => "Postfix",
+      SurfaceAst.Block(_) => "Block",
+      SurfaceAst.Paren(_) => "Paren",
+      SurfaceAst.Tuple(_) => "Tuple",
+      SurfaceAst.RecordLit(_) => "RecordLit",
+      SurfaceAst.Hole(_) => "Hole",
+      SurfaceAst.If(_, _, _) => "If",
+      SurfaceAst.Let(_, _) => "Let",
+      SurfaceAst.Assign(_) => "Assign"
     }
     
     let childrenJson = match (expr.kind) {
-      Ast.Block(block) => {
-        // Serialize all items in the block
-        let itemJsons = List.map((item) => {
-          match (item) {
-            Ast.ExprItem(e) => exprToJson(e, depth + 1),
-            _ => "{\"kind\":\"OtherItem\"}"
-          }
-        }, block.items)
-        ",\"children\":[" ++ joinStrings(",", itemJsons) ++ "]"
+      SurfaceAst.Block(block) => {
+        let bodyJson = exprToJson(block.body, depth + 1)
+        ",\"children\":[" ++ bodyJson ++ "]"
       },
-      Ast.Fn(fnExpr) => {
+      SurfaceAst.Fn(fnExpr) => {
         let clauseBodies = List.filterMap(
-          (item: Ast.FnItem) =>
+          (item: SurfaceAst.FnItem) =>
             match (item.kind) {
-              Ast.Clause(clause) => Some(
+              SurfaceAst.Clause(clause) => Some(
                 exprToJson(
-                  { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
+                  { node: clause.body.node, kind: SurfaceAst.Block(clause.body), attach: clause.attach },
                   depth + 1,
                 ),
               ),
@@ -177,17 +172,17 @@ let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
         )
         ",\"children\":[" ++ joinStrings(",", clauseBodies) ++ "]"
       },
-      Ast.Match(m) => {
+      SurfaceAst.Match(m) => {
         let scrutineeJson = match (m.scrutinee) {
           None => [],
           Some(s) => [exprToJson(s, depth + 1)],
         }
         let clauseBodies = List.filterMap(
-          (item: Ast.FnItem) =>
+          (item: SurfaceAst.FnItem) =>
             match (item.kind) {
-              Ast.Clause(clause) => Some(
+              SurfaceAst.Clause(clause) => Some(
                 exprToJson(
-                  { node: clause.body.node, kind: Ast.Block(clause.body), attach: clause.attach },
+                  { node: clause.body.node, kind: SurfaceAst.Block(clause.body), attach: clause.attach },
                   depth + 1,
                 ),
               ),
@@ -198,32 +193,33 @@ let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
         let allChildren = List.append(scrutineeJson, clauseBodies)
         ",\"children\":[" ++ joinStrings(",", allChildren) ++ "]"
       },
-      Ast.Apply(callee, arg) => {
+      SurfaceAst.Apply(callee, arg) => {
         let calleeJson = exprToJson(callee, depth + 1)
         let argJson = exprToJson(arg, depth + 1)
         ",\"children\":[" ++ calleeJson ++ "," ++ argJson ++ "]"
       },
-      Ast.Assign(asg) => {
+      SurfaceAst.Assign(asg) => {
         let targetJson = exprToJson(asg.target, depth + 1)
         let valueJson = exprToJson(asg.value, depth + 1)
         ",\"children\":[" ++ targetJson ++ "," ++ valueJson ++ "]"
       },
-      Ast.Let(binding) => {
+      SurfaceAst.Let(binding, body) => {
         let valueJson = exprToJson(binding.value, depth + 1)
-        ",\"children\":[" ++ valueJson ++ "]"
+        let bodyJson = exprToJson(body, depth + 1)
+        ",\"children\":[" ++ valueJson ++ "," ++ bodyJson ++ "]"
       },
-      Ast.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
-      Ast.Tuple(exprs) => {
+      SurfaceAst.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
+      SurfaceAst.Tuple(exprs) => {
         let tupleExprs = List.map((e) => exprToJson(e, depth + 1), exprs)
         ",\"children\":[" ++ joinStrings(",", tupleExprs) ++ "]"
       },
-      Ast.InfixChain(chain) => {
+      SurfaceAst.InfixChain(chain) => {
         let firstJson = exprToJson(chain.first, depth + 1)
         let restJsons = List.map(((_, e)) => exprToJson(e, depth + 1), chain.rest)
         let allExprs = [firstJson, ...restJsons]
         ",\"children\":[" ++ joinStrings(",", allExprs) ++ "]"
       },
-      Ast.If(cond, thenE, elseE) => {
+      SurfaceAst.If(cond, thenE, elseE) => {
         let condJson = exprToJson(cond, depth + 1)
         let thenJson = exprToJson(thenE, depth + 1)
         let elseJson = match (elseE) {
@@ -243,24 +239,24 @@ let rec exprToJson = (expr: Ast.Expr, depth: Number) => {
   }
 }
 
-let topItemToJson = (item: Ast.TopItem) => {
+let topItemToJson = (item: SurfaceAst.TopItem) => {
   match (item) {
-    Ast.DeclGroup(dg) => {
+    SurfaceAst.DeclGroup(dg) => {
       let kindStr = match (dg.kind) {
-        Ast.LetGroup(_) => "LetGroup",
-        Ast.TypeGroup(_) => "TypeGroup",
-        Ast.RecordGroup(_) => "RecordGroup",
-        Ast.OpGroup => "OpGroup",
-        Ast.RuleGroup(_) => "RuleGroup"
+        SurfaceAst.LetGroup(_) => "LetGroup",
+        SurfaceAst.TypeGroup(_) => "TypeGroup",
+        SurfaceAst.RecordGroup(_) => "RecordGroup",
+        SurfaceAst.OpGroup => "OpGroup",
+        SurfaceAst.RuleGroup(_) => "RuleGroup"
       }
       
       // Serialize declarations with their bindings and expressions
       let declsJson = match (dg.kind) {
-        Ast.LetGroup(_) => {
+        SurfaceAst.LetGroup(_) => {
           let declStrs = List.map((decl) => {
             match (decl) {
-              Ast.LetDecl(ld) => {
-                let bindingStrs = List.map((b: Ast.LetBinding) => {
+              SurfaceAst.LetDecl(ld) => {
+                let bindingStrs = List.map((b: SurfaceAst.LetBinding) => {
                   let valueJson = exprToJson(b.value, 0)
                   "{\"kind\":\"LetBinding\",\"id\":" ++ toString(b.node.id) ++ 
                   ",\"span\":{\"start\":" ++ toString(b.node.span.start) ++ 
@@ -273,15 +269,15 @@ let topItemToJson = (item: Ast.TopItem) => {
           }, dg.decls)
           ",\"decls\":[" ++ joinStrings(",", declStrs) ++ "]"
         },
-        Ast.TypeGroup(_) | Ast.RecordGroup(_) => {
+        SurfaceAst.TypeGroup(_) | SurfaceAst.RecordGroup(_) => {
           let declStrs = List.map((decl) => {
             match (decl) {
-              Ast.TypeDecl(td) => 
+              SurfaceAst.TypeDecl(td) => 
                 "{\"kind\":\"TypeDecl\",\"id\":" ++ toString(td.node.id) ++ 
                 ",\"span\":{\"start\":" ++ toString(td.node.span.start) ++ 
                 ",\"end\":" ++ toString(td.node.span.end) ++ 
                 "},\"name\":\"" ++ escapeJson(td.name.text) ++ "\"}",
-              Ast.RecordDecl(rd) => 
+              SurfaceAst.RecordDecl(rd) => 
                 "{\"kind\":\"RecordDecl\",\"id\":" ++ toString(rd.node.id) ++ 
                 ",\"span\":{\"start\":" ++ toString(rd.node.span.start) ++ 
                 ",\"end\":" ++ toString(rd.node.span.end) ++ 
@@ -296,20 +292,20 @@ let topItemToJson = (item: Ast.TopItem) => {
       
       "{\"type\":\"DeclGroup\",\"kind\":\"" ++ kindStr ++ "\"" ++ declsJson ++ "}"
     },
-    Ast.Recovery(recovery) => {
-      let (kindStr, text) = match (recovery.kind) {
-        Ast.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
-        Ast.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
+    SurfaceAst.Mark(mark) => {
+      let (kindStr, text) = match (mark.kind) {
+        SurfaceAst.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
+        SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
       }
-      "{\"type\":\"Recovery\",\"kind\":\"" ++ kindStr ++ "\",\"text\":\""
+      "{\"type\":\"Mark\",\"kind\":\"" ++ kindStr ++ "\",\"text\":\""
       ++ escapeJson(text) ++ "\",\"expected\":\""
-      ++ expectedKindToString(recovery.expected) ++ "\"}"
+      ++ expectedKindToString(mark.expected) ++ "\"}"
     },
     _ => "{\"type\":\"Other\"}"
   }
 }
 
-let programToJson = (program: Ast.Program) => {
+let programToJson = (program: SurfaceAst.Program) => {
   let items = List.map(topItemToJson, program.items)
   let itemsJson = "[" ++ joinStrings(",", items) ++ "]"
   "{\"core\":" ++ (if (program.core) { "true" } else { "false" }) ++ 
@@ -350,7 +346,7 @@ let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
 let virtualArtifactsToJson = (artifacts: List<Formatter.VirtualArtifact>) =>
   "[" ++ joinStrings(",", List.map(virtualArtifactToJson, artifacts)) ++ "]"
 
-let parserRecoveryToJson = (recovery: Parser.MissingSemicolonRecovery) => {
+let parserMarkToJson = (recovery: Parser.MissingSemicolonRecovery) => {
   "{\"kind\":\"missingSemicolon\"," ++
   "\"text\":\"" ++ escapeJson(recovery.text) ++ "\"," ++
   "\"start\":" ++ toString(recovery.start) ++ "," ++
@@ -393,36 +389,36 @@ let compilerErrorToJson = (err: Error.CompilerError) => {
   "\"clues\":" ++ clues ++ "}"
 }
 
-let topLevelRecoveryToJson = (item: Ast.TopItem) =>
+let topLevelMarkToJson = (item: SurfaceAst.TopItem) =>
   match (item) {
-    Ast.Recovery(recovery) => {
-      let (kind, text) = match (recovery.kind) {
-        Ast.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
-        Ast.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
+    SurfaceAst.Mark(mark) => {
+      let (kind, text) = match (mark.kind) {
+        SurfaceAst.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
+        SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
       }
       Some(
         "{\"kind\":\"" ++ kind ++ "\"," ++
         "\"text\":\"" ++ escapeJson(text) ++ "\"," ++
-        "\"expected\":\"" ++ expectedKindToString(recovery.expected) ++ "\"," ++
-        "\"span\":{\"line\":" ++ toString(recovery.node.span.line) ++
-        ",\"col\":" ++ toString(recovery.node.span.col) ++
-        ",\"start\":" ++ toString(recovery.node.span.start) ++
-        ",\"end\":" ++ toString(recovery.node.span.end) ++ "}}",
+        "\"expected\":\"" ++ expectedKindToString(mark.expected) ++ "\"," ++
+        "\"span\":{\"line\":" ++ toString(mark.node.span.line) ++
+        ",\"col\":" ++ toString(mark.node.span.col) ++
+        ",\"start\":" ++ toString(mark.node.span.start) ++
+        ",\"end\":" ++ toString(mark.node.span.end) ++ "}}",
       )
     },
     _ => None,
   }
 
-let recoveryBundleToJson = (
+let markBundleToJson = (
   parseResult: Parser.ParseResult,
   diagnostics: List<Error.CompilerError>,
 ) => {
   let semis = "[" ++
-    joinStrings(",", List.map(parserRecoveryToJson, parseResult.missingSemicolons)) ++ "]"
+    joinStrings(",", List.map(parserMarkToJson, parseResult.missingSemicolons)) ++ "]"
   let topLevel = "[" ++
     joinStrings(
       ",",
-      List.filterMap(topLevelRecoveryToJson, parseResult.program.items),
+      List.filterMap(topLevelMarkToJson, parseResult.program.items),
     ) ++ "]"
   let diag = "[" ++ joinStrings(",", List.map(compilerErrorToJson, diagnostics)) ++ "]"
   "{\"missingSemicolons\":" ++ semis ++
@@ -455,15 +451,15 @@ provide let compileToJson = (source: String) => {
   let virtualResult = Formatter.formatResultWithMode(source, Formatter.Virtual)
   
   // Index the lowered AST into a NodeStore
-  let loweredStore = Indexer.indexProgram(lowered)
+  let loweredStore = CoreIndexer.indexProgram(lowered)
   lastStore = Some(loweredStore)
   let loweredStoreJson = NS.storeToJson(loweredStore)
-  let recoveryJson = recoveryBundleToJson(parseResult, Error.getErrors())
+  let marksJson = markBundleToJson(parseResult, Error.getErrors())
   
   "{\"tokens\":" ++ tokensJson ++
   ",\"surfaceNodeStore\":" ++ surfaceStoreJson ++
   ",\"loweredNodeStore\":" ++ loweredStoreJson ++
-  ",\"recovery\":" ++ recoveryJson ++
+  ",\"marks\":" ++ marksJson ++
   ",\"formatted\":\"" ++ escapeJson(formattedResult.text) ++ "\"" ++
   ",\"formattedVirtual\":\"" ++ escapeJson(virtualResult.text) ++ "\"" ++
   ",\"formattedVirtualArtifacts\":" ++ virtualArtifactsToJson(virtualResult.virtualArtifacts) ++ "}"

@@ -1,0 +1,146 @@
+module LoweringTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "../src/frontend/frontend.gr" include Frontend
+from "../src/core/core_ast.gr" include CoreAst
+from "list" include List
+
+setSourceFile("./tests/lowering_test.gr")
+
+let expectSingleDeclGroup = (program: CoreAst.Program) => {
+  match (program.items) {
+    [CoreAst.DeclGroup(dg)] => Ok(dg),
+    _ => Err("expected single decl group"),
+  }
+}
+
+let expectSingleLetDecl = (dg: CoreAst.DeclGroup) => {
+  match (dg.decls) {
+    [CoreAst.LetDecl(ld)] => Ok(ld),
+    _ => Err("expected single let decl"),
+  }
+}
+
+let expectSingleBinding = (ld: CoreAst.LetDecl) => {
+  match (ld.bindings) {
+    [binding] => Ok(binding),
+    _ => Err("expected single let binding"),
+  }
+}
+
+let bind = (res, f) => {
+  match (res) {
+    Ok(v) => f(v),
+    Err(e) => Err(e),
+  }
+}
+
+test("match lowers to apply and pins pattern", () => {
+  let source = "
+  let x3 = (y) => {
+    match(y) { y => {\"t\"} } 
+  };
+  "
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Fn(fnOuter) => match (fnOuter.items) {
+          [item] => match (item.kind) {
+            CoreAst.Clause(outerClause) =>
+              match (outerClause.body.kind) {
+                CoreAst.Apply(innerCallee, _) =>
+                  match (innerCallee.kind) {
+                    CoreAst.Fn(fnInner) => match (fnInner.items) {
+                      [innerItem] => match (innerItem.kind) {
+                        CoreAst.Clause(innerClause) =>
+                          match (innerClause.param.kind) {
+                            CoreAst.Pin({ _, text }) =>
+                              if (text == "y") { Ok(void) } else { Err("expected pin 'y'") },
+                            _ => Err("expected pin pattern"),
+                          },
+                        _ => Err("expected inner clause"),
+                      },
+                      _ => Err("expected single inner item"),
+                    },
+                    _ => Err("expected inner fn"),
+                  },
+                _ => Err("expected apply in outer clause body"),
+              },
+            _ => Err("expected outer clause"),
+          },
+          _ => Err("expected single outer item"),
+        },
+        _ => Err("expected outer fn"),
+      }
+    },
+  )
+})
+
+test("call with multiple args lowers to tuple", () => {
+  let source = "let x = f(1, 2);"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(_, arg) =>
+          match (arg.kind) {
+            CoreAst.Tuple(items) =>
+              if (List.length(items) == 2) { Ok(void) } else { Err("expected 2 tuple args") },
+            _ => Err("expected tuple arg"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+test("pipe prepends arg when rhs is apply", () => {
+  let source = "let x = 1 :> g(2);"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(_, arg) =>
+          match (arg.kind) {
+            CoreAst.Tuple([first, _]) =>
+              match (first.kind) {
+                CoreAst.Lit(CoreAst.Int(1)) => Ok(void),
+                _ => Err("expected lhs to be first tuple arg"),
+              },
+            _ => Err("expected tuple arg"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+let results = runTests()
+printResultsAndExit(results)

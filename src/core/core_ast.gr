@@ -1,0 +1,274 @@
+module CoreAst
+
+from "./source.gr" include Source
+
+provide record rec Node {
+  id: Number,
+  span: Source.Span,
+}
+
+provide enum HoleOrigin {
+  UserTyped,
+  Inferred,
+}
+
+provide enum HoleKind {
+  ExprHole,
+  TypeHole,
+  PatternHole,
+  NameHole,
+}
+
+provide record Hole {
+  node: Node,
+  kind: HoleKind,
+  origin: HoleOrigin,
+}
+
+provide record Name {
+  node: Node,
+  text: String,
+}
+
+provide enum AtomLiteral {
+  Int(Number),
+  Bool(Bool),
+  Char(Char),
+  Str(String),
+  Byte(Number),
+  Unit,
+}
+
+provide enum Mark {
+  FreeVar(Name),
+  NotFunction,
+  OccursCheck,
+  Inconsistent,
+  UnsupportedExpr,
+  UnfillableHole,
+  PatternError,
+  TypeExprUnknown,
+  TypeExprArity,
+  TypeExprUnsupported,
+  Internal(String),
+}
+
+provide enum rec PatternKind {
+  Mark(Mark, Pattern),
+  Hole(Hole),
+  Wildcard,
+  Var(Name),
+  Pin(Name),
+  Lit(AtomLiteral),
+  Constructor(Name, List<Pattern>),
+  Tuple(List<Pattern>),
+  List(List<Pattern>, Option<Pattern>),
+  AllErrors,
+}
+
+and provide record Pattern {
+  node: Node,
+  kind: PatternKind,
+}
+
+provide enum rec TypeExprKind {
+  Mark(Mark, TypeExpr),
+  Hole(Hole),
+  Var(Name),
+  Ref(Name, List<TypeExpr>),
+  Tuple(List<TypeExpr>),
+  Record(List<(Name, TypeExpr)>),
+  Arrow(List<TypeExpr>, TypeExpr),
+  Ptr(TypeExpr, Option<Name>),
+  EffectRow(List<EffectCase>, Bool),
+  UnitType,
+}
+
+and provide record TypeExpr {
+  node: Node,
+  kind: TypeExprKind,
+}
+
+and provide record EffectCase {
+  node: Node,
+  name: Name,
+  payload: Option<TypeExpr>,
+}
+
+provide enum rec ExprKind {
+  Mark(Mark, Expr),
+  Lit(AtomLiteral),
+  Ident(Name),
+  Apply(Expr, Expr),
+  Fn(FnExpr),
+  Let(LetBinding, Expr),
+  If(Expr, Expr, Option<Expr>),
+  Tuple(List<Expr>),
+  RecordLit(List<RecordItem>),
+  Hole(Hole),
+}
+
+and provide record Expr {
+  node: Node,
+  kind: ExprKind,
+}
+
+and provide enum RecordItem {
+  Field(Name, Expr),
+  Spread(Expr),
+}
+
+and provide record FnClause {
+  node: Node,
+  param: Pattern,
+  guard: Option<Expr>,
+  body: Expr,
+}
+
+and provide enum FnItemKind {
+  Clause(FnClause),
+  Include(Name),
+  Hole(Hole),
+}
+
+and provide record FnItem {
+  node: Node,
+  kind: FnItemKind,
+}
+
+and provide record FnExpr {
+  node: Node,
+  items: List<FnItem>,
+}
+
+and provide record LetBinding {
+  node: Node,
+  name: Pattern,
+  annotation: Option<TypeExpr>,
+  value: Expr,
+}
+
+// top level
+
+provide type Annotation = String
+
+provide enum rec Decl {
+  LetDecl(LetDecl),
+  TypeDecl(TypeDecl),
+  RecordDecl(RecordDecl),
+  InfixDecl(InfixDecl),
+  PrefixDecl(PrefixDecl),
+}
+
+and provide record LetDecl {
+  node: Node,
+  bindings: List<LetBinding>,
+}
+
+and provide record TypeDecl {
+  node: Node,
+  name: Name,
+  infection: Option<Name>,
+  typeParams: List<Name>,
+  body: TypeDeclBody,
+}
+
+and provide enum TypeDeclBody {
+  Alias(TypeExpr),
+  Variant(List<(Name, Option<TypeExpr>, Option<Annotation>)>),
+}
+
+and provide record RecordDecl {
+  node: Node,
+  name: Name,
+  typeParams: List<Name>,
+  fields: List<(Name, TypeExpr)>,
+}
+
+and provide record InfixDecl {
+  node: Node,
+  name: Name,
+  precedence: Number,
+  associativity: InfixAssociativity,
+}
+
+and provide enum InfixAssociativity {
+  Left,
+  Right,
+  NonAssoc,
+}
+
+and provide record PrefixDecl {
+  node: Node,
+  name: Name,
+}
+
+provide record rec ImportDecl {
+  node: Node,
+  modulePath: String,
+  alias: Option<Name>,
+}
+
+provide record ReexportDecl {
+  node: Node,
+  modulePath: String,
+}
+
+provide record Export {
+  node: Node,
+}
+
+provide record rec DeclGroup {
+  node: Node,
+  exported: Bool,
+  kind: DeclGroupKind,
+  decls: List<Decl>,
+}
+
+and provide enum DeclGroupKind {
+  LetGroup(LetGroupMods),
+  TypeGroup(TypeGroupMods),
+  RecordGroup(RecordGroupMods),
+  OpGroup,
+  RuleGroup(RuleKind),
+}
+
+and provide enum LetGroupMods {
+  Plain,
+  Rec,
+  Mut,
+}
+
+and provide enum TypeGroupMods {
+  Plain,
+  Rec,
+}
+
+and provide enum RecordGroupMods {
+  Plain,
+  Rec,
+}
+
+and provide enum RuleKind {
+  Domain,
+  Policy,
+  Op,
+  Annotate,
+}
+
+provide record Directive {
+  name: Name,
+  args: List<Expr>,
+}
+
+provide enum TopItem {
+  Directive(Directive),
+  Import(ImportDecl),
+  Reexport(ReexportDecl),
+  Export(Export),
+  DeclGroup(DeclGroup),
+}
+
+provide record Program {
+  items: List<TopItem>,
+}

@@ -3,10 +3,12 @@ module Formatter
 from "array" include Array
 from "list" include List
 from "string" include String
+from "char" include Char
 
-from "../core/ast.gr" include Ast
+from "../core/surface_ast.gr" include SurfaceAst
 from "../core/source.gr" include Source
 from "./parser.gr" include Parser
+from "./lexer.gr" include Lexer
 
 let join = (sep: String, xs: List<String>) => Array.join(sep, Array.fromList(xs))
 
@@ -60,7 +62,49 @@ let artifactFromVirtual = (text: String, anchor: Number, reason: String) => {
   }
 }
 
-let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) => {
+let renderWithSettings = (
+  program: SurfaceAst.Program,
+  source: String,
+  mode: Mode,
+  settings: Settings,
+) => {
+  let tokens: List<Lexer.Token> = Lexer.lex(source)
+  let tokensNoComments: List<Lexer.Token> = List.filter(
+    (tok: Lexer.Token) =>
+      match (tok.kind) {
+        Lexer.LineComment(_) => false,
+        _ => true,
+      },
+    tokens,
+  )
+  let hasTerminatorAfter = (endIndex: Number) => {
+    let rec find = (tokens: List<Lexer.Token>) => {
+      match (tokens) {
+        [] => false,
+        [tok, ...tail] =>
+          if (tok.span.start < endIndex) {
+            find(tail)
+          } else {
+            match (tok.kind) {
+              Lexer.SemiColon => true,
+              _ => false,
+            }
+          },
+      }
+    }
+    find(tokensNoComments)
+  }
+
+  let topItemSpan = (item: SurfaceAst.TopItem) =>
+    match (item) {
+      SurfaceAst.DeclGroup(group) => group.node.span,
+      SurfaceAst.Import(importDecl) => importDecl.node.span,
+      SurfaceAst.Reexport(reexportDecl) => reexportDecl.node.span,
+      SurfaceAst.Export(exportDecl) => exportDecl.node.span,
+      SurfaceAst.Directive(directive) => directive.name.node.span,
+      SurfaceAst.Mark(mark) => mark.node.span,
+      SurfaceAst.Trivia(trivia) => trivia.node.span,
+    }
   let mut chunks: List<String> = []
   let mut artifacts: List<VirtualArtifact> = []
   let mut indent = 0
@@ -92,15 +136,15 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     }
   }
 
-  let rec emitTrivia = (trivia: Ast.Trivia) => {
+  let rec emitTrivia = (trivia: SurfaceAst.Trivia) => {
     match (trivia.kind) {
-      Ast.LineComment(text) => write(text),
-      Ast.BlockComment(text) => write(text),
-      Ast.Opaque(text) => write(text),
+      SurfaceAst.LineComment(text) => write(text),
+      SurfaceAst.BlockComment(text) => write(text),
+      SurfaceAst.Opaque(text) => write(text),
     }
   }
 
-  let rec emitTriviaInline = (triviaList: List<Ast.Trivia>) => {
+  let rec emitTriviaInline = (triviaList: List<SurfaceAst.Trivia>) => {
     match (triviaList) {
       [] => void,
       [single] => emitTrivia(single),
@@ -112,7 +156,7 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     }
   }
 
-  let rec emitTriviaLines = (triviaList: List<Ast.Trivia>) => {
+  let rec emitTriviaLines = (triviaList: List<SurfaceAst.Trivia>) => {
     match (triviaList) {
       [] => void,
       [single] => emitTrivia(single),
@@ -124,7 +168,7 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     }
   }
 
-  let withAttachments = (attach: Ast.Attachments, emitCore) => {
+  let withAttachments = (attach: SurfaceAst.Attachments, emitCore) => {
     if (attach.leading != []) {
       emitTriviaLines(attach.leading)
       newline()
@@ -153,27 +197,24 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     }
   }
 
-  let rec emitPattern = (pattern: Ast.Pattern) => {
+let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
     withAttachments(
       pattern.attach,
       () => {
         match (pattern.kind) {
-          Ast.Hole(_) => write("?"),
-          Ast.Wildcard => write("_"),
-          Ast.Var(name) => write(name.text),
-          Ast.Pin(name) => {
-            write("Var")
-            write("(")
+          SurfaceAst.Hole(_) => write("?"),
+          SurfaceAst.Wildcard => write("_"),
+          SurfaceAst.Var(name) => write(name.text),
+          SurfaceAst.Pin(name) => {
             write(name.text)
-            write(")")
           },
-          Ast.Lit(Ast.Int(n)) => write(toString(n)),
-          Ast.Lit(Ast.Bool(b)) => write(if (b) { "true" } else { "false" }),
-          Ast.Lit(Ast.Char(c)) => write("'" ++ toString(c) ++ "'"),
-          Ast.Lit(Ast.Str(s)) => write("\"" ++ s ++ "\""),
-          Ast.Lit(Ast.Unit) => write("()"),
-          Ast.Lit(_) => write("<lit>"),
-          Ast.Constructor(name, args) => {
+          SurfaceAst.Lit(SurfaceAst.Int(n)) => write(toString(n)),
+          SurfaceAst.Lit(SurfaceAst.Bool(b)) => write(if (b) { "true" } else { "false" }),
+          SurfaceAst.Lit(SurfaceAst.Char(c)) => write("'" ++ toString(c) ++ "'"),
+          SurfaceAst.Lit(SurfaceAst.Str(s)) => write("\"" ++ s ++ "\""),
+          SurfaceAst.Lit(SurfaceAst.Unit) => write("()"),
+          SurfaceAst.Lit(_) => write("<lit>"),
+          SurfaceAst.Constructor(name, args) => {
             write(name.text)
             if (args != []) {
               write("(")
@@ -181,12 +222,12 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
               write(")")
             }
           },
-          Ast.Tuple(items) => {
+          SurfaceAst.Tuple(items) => {
             write("(")
             emitCommaSeparated(emitPattern, items)
             write(")")
           },
-          Ast.List(items, rest) => {
+          SurfaceAst.List(items, rest) => {
             write("[")
             emitCommaSeparated(emitPattern, items)
             match (rest) {
@@ -203,17 +244,17 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
             }
             write("]")
           },
-          Ast.AllErrors => write("AllErrors"),
+          SurfaceAst.AllErrors => write("AllErrors"),
         }
       },
     )
   }
 
-  let rec emitTypeExpr = (typeExpr: Ast.TypeExpr) => {
+  let rec emitTypeExpr = (typeExpr: SurfaceAst.TypeExpr) => {
     match (typeExpr.kind) {
-      Ast.Hole(_) => write("?"),
-      Ast.Var(name) => write(name.text),
-      Ast.Ref(name, args) => {
+      SurfaceAst.Hole(_) => write("?"),
+      SurfaceAst.Var(name) => write(name.text),
+      SurfaceAst.Ref(name, args) => {
         write(name.text)
         if (args != []) {
           write("<")
@@ -221,17 +262,17 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
           write(">")
         }
       },
-      Ast.Tuple(items) => {
+      SurfaceAst.Tuple(items) => {
         write("(")
         emitCommaSeparated(emitTypeExpr, items)
         write(")")
       },
-      Ast.Record(fields) => {
+      SurfaceAst.Record(fields) => {
         write("{")
         if (fields != []) {
           space()
           emitCommaSeparated(
-            (pair: (Ast.Name, Ast.TypeExpr)) => {
+            (pair: (SurfaceAst.Name, SurfaceAst.TypeExpr)) => {
               let (name, ty) = pair
               write(name.text)
               space()
@@ -245,7 +286,7 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
         }
         write("}")
       },
-      Ast.Arrow(params, result) => {
+      SurfaceAst.Arrow(params, result) => {
         write("(")
         emitCommaSeparated(emitTypeExpr, params)
         write(")")
@@ -254,7 +295,7 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
         space()
         emitTypeExpr(result)
       },
-      Ast.Ptr(inner, stateOpt) => {
+      SurfaceAst.Ptr(inner, stateOpt) => {
         write("Ptr")
         write("<")
         emitTypeExpr(inner)
@@ -268,10 +309,10 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
         }
         write(">")
       },
-      Ast.EffectRow(cases, hasTailWildcard) => {
+      SurfaceAst.EffectRow(cases, hasTailWildcard) => {
         write("[")
         emitCommaSeparated(
-          (effectCase: Ast.EffectCase) => {
+          (effectCase: SurfaceAst.EffectCase) => {
             write(effectCase.name.text)
             match (effectCase.payload) {
               None => void,
@@ -293,75 +334,163 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
         }
         write("]")
       },
-      Ast.UnitType => write("Void"),
+      SurfaceAst.UnitType => write("Void"),
     }
   }
 
-  let rec emitExpr = (expr: Ast.Expr) => {
+  let emitTypeParams = (params: List<SurfaceAst.Name>) => {
+    if (params != []) {
+      write("<")
+      emitCommaSeparated((name: SurfaceAst.Name) => write(name.text), params)
+      write(">")
+    }
+  }
+
+  let emitTypeConstructor = (entry: (SurfaceAst.Name, Option<SurfaceAst.TypeExpr>, Option<SurfaceAst.Annotation>)) => {
+    let (name, payload, annotation) = entry
+    write(name.text)
+    match (payload) {
+      None => void,
+      Some(ty) => {
+        write("(")
+        emitTypeExpr(ty)
+        write(")")
+      },
+    }
+    match (annotation) {
+      None => void,
+      Some(text) => {
+        space()
+        write(text)
+      },
+    }
+  }
+
+  let emitTypeDeclBody = (body: SurfaceAst.TypeDeclBody) => {
+    match (body) {
+      SurfaceAst.Alias(typeExpr) => {
+        space()
+        write("=")
+        space()
+        emitTypeExpr(typeExpr)
+      },
+      SurfaceAst.Variant(cases) => {
+        space()
+        write("=")
+        space()
+        match (cases) {
+          [] => void,
+          [single] => {
+            write("|")
+            space()
+            emitTypeConstructor(single)
+          },
+          [first, ...tail] => {
+            emitTypeConstructor(first)
+            let rec emitTail = (rest: List<(SurfaceAst.Name, Option<SurfaceAst.TypeExpr>, Option<SurfaceAst.Annotation>)>) => {
+              match (rest) {
+                [] => void,
+                [head, ...restTail] => {
+                  space()
+                  write("|")
+                  space()
+                  emitTypeConstructor(head)
+                  emitTail(restTail)
+                },
+              }
+            }
+            emitTail(tail)
+          },
+        }
+      },
+    }
+  }
+
+  let rec emitExpr = (expr: SurfaceAst.Expr) => {
     withAttachments(
       expr.attach,
       () => {
+        let emitRecordItems = (items: List<SurfaceAst.RecordItem>) => {
+          if (items != []) {
+            space()
+            emitCommaSeparated(
+              (item) =>
+                match (item) {
+                  SurfaceAst.Field(name, value) => {
+                    match (value.kind) {
+                      SurfaceAst.Ident({ _, text }) when text == name.text =>
+                        write(name.text),
+                      _ => {
+                        write(name.text)
+                        space()
+                        write("=")
+                        space()
+                        emitExpr(value)
+                      },
+                    }
+                  },
+                  SurfaceAst.Spread(e) => {
+                    write("..")
+                    emitExpr(e)
+                  },
+                },
+              items,
+            )
+            space()
+          }
+        }
+
+        let isConstructorName = (text: String) => {
+          if (String.length(text) == 0) {
+            false
+          } else {
+            let ch = String.charAt(0, text)
+            let code = Char.code(ch)
+            code >= Char.code('A') && code <= Char.code('Z')
+          }
+        }
+
         match (expr.kind) {
-          Ast.Lit(Ast.Int(n)) => write(toString(n)),
-          Ast.Lit(Ast.Bool(b)) => write(if (b) { "true" } else { "false" }),
-          Ast.Lit(Ast.Str(s)) => write("\"" ++ s ++ "\""),
-          Ast.Lit(Ast.Char(c)) => write("'" ++ toString(c) ++ "'"),
-          Ast.Lit(Ast.Unit) => write("()"),
-          Ast.Lit(_) => write("<lit>"),
-          Ast.Ident(name) => write(name.text),
-          Ast.Paren(inner) => {
+          SurfaceAst.Lit(SurfaceAst.Int(n)) => write(toString(n)),
+          SurfaceAst.Lit(SurfaceAst.Bool(b)) => write(if (b) { "true" } else { "false" }),
+          SurfaceAst.Lit(SurfaceAst.Str(s)) => write("\"" ++ s ++ "\""),
+          SurfaceAst.Lit(SurfaceAst.Char(c)) => write("'" ++ toString(c) ++ "'"),
+          SurfaceAst.Lit(SurfaceAst.Unit) => write("()"),
+          SurfaceAst.Lit(_) => write("<lit>"),
+          SurfaceAst.Ident(name) => write(name.text),
+          SurfaceAst.Paren(inner) => {
             write("(")
             emitExpr(inner)
             write(")")
           },
-          Ast.Tuple(items) => {
+          SurfaceAst.Tuple(items) => {
             write("(")
             emitCommaSeparated(emitExpr, items)
             write(")")
           },
-          Ast.Hole(_) => write("?"),
-          Ast.RecordLit(items) => {
+          SurfaceAst.Hole(_) => write("?"),
+          SurfaceAst.RecordLit(items) => {
             write(".{")
-            if (items != []) {
-              space()
-              emitCommaSeparated(
-                (item) =>
-                  match (item) {
-                    Ast.Field(name, value) => {
-                      write(name.text)
-                      space()
-                      write("=")
-                      space()
-                      emitExpr(value)
-                    },
-                    Ast.Spread(e) => {
-                      write("..")
-                      emitExpr(e)
-                    },
-                  },
-                items,
-              )
-              space()
-            }
+            emitRecordItems(items)
             write("}")
           },
-          Ast.Postfix(postfix) => {
+          SurfaceAst.Postfix(postfix) => {
             emitExpr(postfix.target)
-            let rec emitSegments = (segments: List<Ast.PostfixSegment>) => {
+            let rec emitSegments = (segments: List<SurfaceAst.PostfixSegment>) => {
               match (segments) {
                 [] => void,
                 [segment, ...tail] => {
                   match (segment) {
-                    Ast.Call(args) => {
+                    SurfaceAst.Call(args) => {
                       write("(")
                       emitCommaSeparated(emitExpr, args)
                       write(")")
                     },
-                    Ast.Project(name) => {
+                    SurfaceAst.Project(name) => {
                       write(".")
                       write(name.text)
                     },
-                    Ast.Index(indexExpr) => {
+                    SurfaceAst.Index(indexExpr) => {
                       write("[")
                       emitExpr(indexExpr)
                       write("]")
@@ -373,9 +502,9 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
             }
             emitSegments(postfix.segments)
           },
-          Ast.InfixChain(chain) => {
+          SurfaceAst.InfixChain(chain) => {
             emitExpr(chain.first)
-            let rec emitRest = (rest: List<(Ast.Name, Ast.Expr)>) => {
+            let rec emitRest = (rest: List<(SurfaceAst.Name, SurfaceAst.Expr)>) => {
               match (rest) {
                 [] => void,
                 [(op, rhs), ...tail] => {
@@ -389,14 +518,32 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
             }
             emitRest(chain.rest)
           },
-          Ast.Apply(callee, arg) => {
-            emitExpr(callee)
-            write("(")
-            emitExpr(arg)
-            write(")")
+          SurfaceAst.Apply(callee, arg) => {
+            match ((callee.kind, arg.kind)) {
+              (SurfaceAst.Ident(name), SurfaceAst.RecordLit(items))
+                when isConstructorName(name.text) => {
+                  write(name.text)
+                  write("{")
+                  emitRecordItems(items)
+                  write("}")
+                },
+              (SurfaceAst.Ident(name), SurfaceAst.Tuple(items))
+                when isConstructorName(name.text) => {
+                  write(name.text)
+                  write("(")
+                  emitCommaSeparated(emitExpr, items)
+                  write(")")
+                },
+              _ => {
+                emitExpr(callee)
+                write("(")
+                emitExpr(arg)
+                write(")")
+              },
+            }
           },
-          Ast.Block(block) => emitBlock(block),
-          Ast.If(cond, thenExpr, elseExpr) => {
+          SurfaceAst.Block(block) => emitBlock(block),
+          SurfaceAst.If(cond, thenExpr, elseExpr) => {
             write("if")
             space()
             emitExpr(cond)
@@ -412,27 +559,49 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
               },
             }
           },
-          Ast.Fn(fnExpr) => {
-            write("match")
-            space()
-            write("{")
-            if (fnExpr.items != []) {
-              space()
-              emitCommaSeparated(emitFnItem, fnExpr.items)
-              space()
+          SurfaceAst.Fn(fnExpr) => {
+            match (fnExpr.items) {
+              [{
+                kind: SurfaceAst.Clause({
+                  param: { kind: SurfaceAst.Wildcard, _ },
+                  guard: None,
+                  body,
+                  _
+                }),
+                _
+              }] => {
+                write("=>")
+                space()
+                emitBlock(body)
+              },
+              _ => {
+                write("match")
+                space()
+                write("{")
+                if (fnExpr.items != []) {
+                  space()
+                  emitCommaSeparated(emitFnItem, fnExpr.items)
+                  space()
+                }
+                write("}")
+              },
             }
-            write("}")
           },
-          Ast.Match(matchExpr) => {
+          SurfaceAst.Match(matchExpr) => {
             write("match")
             match (matchExpr.scrutinee) {
               None => {
                 space()
               },
               Some(scrutinee) => {
-                write("(")
-                emitExpr(scrutinee)
-                write(")")
+                match (scrutinee.kind) {
+                  SurfaceAst.Tuple(_) => emitExpr(scrutinee),
+                  _ => {
+                    write("(")
+                    emitExprUnparen(scrutinee)
+                    write(")")
+                  },
+                }
                 space()
                 if (matchExpr.arrowSugar) {
                   write("=>")
@@ -448,10 +617,27 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
             }
             write("}")
           },
-          Ast.Let(binding) => {
-            emitBinding(binding)
+          SurfaceAst.Let(binding, body) => {
+            match (binding.name.kind) {
+              SurfaceAst.Wildcard => {
+                emitExpr(binding.value)
+                write(";")
+                space()
+                emitExpr(body)
+              },
+              _ => {
+                write("{")
+                space()
+                emitBinding(binding)
+                write(";")
+                space()
+                emitExpr(body)
+                space()
+                write("}")
+              },
+            }
           },
-          Ast.Assign(assignStmt) => {
+          SurfaceAst.Assign(assignStmt) => {
             emitExpr(assignStmt.target)
             space()
             write("=")
@@ -463,7 +649,14 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     )
   }
 
-  and emitDirective = (directive: Ast.Directive) => {
+  and emitExprUnparen = (expr: SurfaceAst.Expr) => {
+    match (expr.kind) {
+      SurfaceAst.Paren(inner) => emitExprUnparen(inner),
+      _ => emitExpr(expr),
+    }
+  }
+
+  and emitDirective = (directive: SurfaceAst.Directive) => {
     write("@")
     write(directive.name.text)
     write("(")
@@ -471,9 +664,9 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     write(")")
   }
 
-  and emitBlock = (block: Ast.Block) => {
+  and emitBlock = (block: SurfaceAst.Block) => {
     write("{")
-    let hasBody = block.items != [] || block.result != []
+    let hasBody = block.items != []
     if (hasBody) {
       newline()
       indent = indent + 2
@@ -487,41 +680,32 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
         }
       }
 
-      let rec emitItems = (items: List<Ast.BlockItem>) => {
+      let rec emitItems = (items: List<SurfaceAst.BlockItem>) => {
         match (items) {
           [] => void,
           [item, ...tail] => {
             emitSep()
             match (item) {
-              Ast.ExprItem(expr) => {
+              SurfaceAst.ExprItem(expr, terminated) => {
                 emitExpr(expr)
-                match (expr.kind) {
-                  Ast.Assign(_) =>
-                    emitVirtual(";", expr.node.span.end, "implicit statement terminator"),
-                  _ => void,
+                if (terminated) {
+                  write(";")
                 }
               },
-              Ast.TriviaItem(trivia) => emitTrivia(trivia),
-              Ast.Directive(d) => emitDirective(d),
+              SurfaceAst.LetItem(binding, terminated) => {
+                emitBinding(binding)
+                if (terminated) {
+                  write(";")
+                }
+              },
+              SurfaceAst.TriviaItem(trivia) => emitTrivia(trivia),
+              SurfaceAst.Directive(d) => emitDirective(d),
             }
             emitItems(tail)
           },
         }
       }
-
-      let rec emitResults = (results: List<Ast.Expr>) => {
-        match (results) {
-          [] => void,
-          [expr, ...tail] => {
-            emitSep()
-            emitExpr(expr)
-            emitResults(tail)
-          },
-        }
-      }
-
       emitItems(block.items)
-      emitResults(block.result)
 
       indent = indent - 2
       newline()
@@ -529,12 +713,12 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     write("}")
   }
 
-  and emitFnItem = (item: Ast.FnItem) => {
+  and emitFnItem = (item: SurfaceAst.FnItem) => {
     withAttachments(
       item.attach,
       () => {
         match (item.kind) {
-          Ast.Clause(clause) => {
+          SurfaceAst.Clause(clause) => {
             emitPattern(clause.param)
             match (clause.guard) {
               None => void,
@@ -550,17 +734,15 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
             space()
             emitBlock(clause.body)
           },
-          Ast.Include(name) => write(name.text),
-          Ast.Trivia(trivia) => emitTrivia(trivia),
-          Ast.Hole(_) => write("?"),
+          SurfaceAst.Include(name) => write(name.text),
+          SurfaceAst.Trivia(trivia) => emitTrivia(trivia),
+          SurfaceAst.Hole(_) => write("?"),
         }
       },
     )
   }
 
-  and emitBinding = (binding: Ast.LetBinding) => {
-    write("let")
-    space()
+  and emitLetBindingBare = (binding: SurfaceAst.LetBinding) => {
     emitPattern(binding.name)
     match (binding.annotation) {
       None => void,
@@ -575,49 +757,93 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     write("=")
     space()
     emitExpr(binding.value)
-    emitVirtual(";", binding.node.span.end, "implicit statement terminator")
   }
 
-  let emitDecl = (decl: Ast.Decl) => {
-    match (decl) {
-      Ast.LetDecl(letDecl) => {
-        let mut first = true
-        let rec emitBindings = (bindings: List<Ast.LetBinding>) => {
-          match (bindings) {
-            [] => void,
-            [binding, ...tail] => {
-              if (!first) {
-                newline()
-              } else {
-                first = false
-              }
-              emitBinding(binding)
-              emitBindings(tail)
-            },
-          }
-        }
-        emitBindings(letDecl.bindings)
+  and emitBinding = (binding: SurfaceAst.LetBinding) => {
+    write("let")
+    space()
+    emitLetBindingBare(binding)
+  }
+
+  let emitTypeDecl = (typeDecl: SurfaceAst.TypeDecl) => {
+    write(typeDecl.name.text)
+    emitTypeParams(typeDecl.typeParams)
+    match (typeDecl.infection) {
+      None => void,
+      Some(domain) => {
+        space()
+        write("infectious")
+        space()
+        write(domain.text)
       },
-      Ast.TypeDecl(typeDecl) => {
+    }
+    emitTypeDeclBody(typeDecl.body)
+  }
+
+  let emitRecordDecl = (recordDecl: SurfaceAst.RecordDecl) => {
+    write(recordDecl.name.text)
+    emitTypeParams(recordDecl.typeParams)
+    space()
+    write("=")
+    space()
+    write("{")
+    if (recordDecl.fields != []) {
+      space()
+      emitCommaSeparated(
+        (pair: (SurfaceAst.Name, SurfaceAst.TypeExpr)) => {
+          let (name, ty) = pair
+          write(name.text)
+          space()
+          write(":")
+          space()
+          emitTypeExpr(ty)
+        },
+        recordDecl.fields,
+      )
+      space()
+    }
+    write("}")
+  }
+
+  let emitDecl = (decl: SurfaceAst.Decl) => {
+    match (decl) {
+      SurfaceAst.LetDecl(letDecl) => {
+        match (letDecl.bindings) {
+          [] => void,
+          [first, ...tail] => {
+            emitBinding(first)
+            List.forEach(
+              (binding: SurfaceAst.LetBinding) => {
+                newline()
+                emitBinding(binding)
+              },
+              tail,
+            )
+          },
+        }
+      },
+      SurfaceAst.TypeDecl(typeDecl) => {
         write("type")
         space()
-        write(typeDecl.name.text)
-        space()
-        write("= ?")
+        emitTypeDecl(typeDecl)
       },
-      Ast.RecordDecl(recordDecl) => {
+      SurfaceAst.RecordDecl(recordDecl) => {
         write("record")
         space()
-        write(recordDecl.name.text)
-        space()
-        write("= {}")
+        emitRecordDecl(recordDecl)
       },
-      Ast.InfixDecl(infixDecl) => {
-        write("infix")
+      SurfaceAst.InfixDecl(infixDecl) => {
+        match (infixDecl.associativity) {
+          SurfaceAst.Left => write("infixl"),
+          SurfaceAst.Right => write("infixr"),
+          SurfaceAst.NonAssoc => write("infix"),
+        }
+        space()
+        write(toString(infixDecl.precedence))
         space()
         write(infixDecl.name.text)
       },
-      Ast.PrefixDecl(prefixDecl) => {
+      SurfaceAst.PrefixDecl(prefixDecl) => {
         write("prefix")
         space()
         write(prefixDecl.name.text)
@@ -625,49 +851,183 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
     }
   }
 
-  let emitTopItem = (item: Ast.TopItem) => {
+  let emitTopItem = (item: SurfaceAst.TopItem) => {
     match (item) {
-      Ast.DeclGroup(group) => {
-        let mut first = true
-        let rec emitDecls = (decls: List<Ast.Decl>) => {
-          match (decls) {
-            [] => void,
-            [decl, ...tail] => {
-              if (!first) {
-                newline()
-              } else {
-                first = false
-              }
-              emitDecl(decl)
-              emitDecls(tail)
-            },
-          }
+      SurfaceAst.DeclGroup(group) => {
+        if (group.exported) {
+          write("export")
+          space()
         }
-        emitDecls(group.decls)
+        match (group.kind) {
+          SurfaceAst.LetGroup(mods) => {
+            write("let")
+            match (mods) {
+              SurfaceAst.Plain => void,
+              SurfaceAst.Rec => {
+                space()
+                write("rec")
+              },
+              SurfaceAst.Mut => {
+                space()
+                write("mut")
+              },
+            }
+            space()
+            let bindings = List.flatMap(
+              (decl: SurfaceAst.Decl) =>
+                match (decl) {
+                  SurfaceAst.LetDecl(ld) => ld.bindings,
+                  _ => [],
+                },
+              group.decls,
+            )
+            match (bindings) {
+              [] => void,
+              [first, ...rest] => {
+                emitLetBindingBare(first)
+                let rec emitAnd = (items: List<SurfaceAst.LetBinding>) => {
+                  match (items) {
+                    [] => void,
+                    [binding, ...tail] => {
+                      newline()
+                      write("and")
+                      space()
+                      emitLetBindingBare(binding)
+                      emitAnd(tail)
+                    },
+                  }
+                }
+                emitAnd(rest)
+              },
+            }
+          },
+          SurfaceAst.TypeGroup(mods) => {
+            write("type")
+            match (mods) {
+              SurfaceAst.Plain => void,
+              SurfaceAst.Rec => {
+                space()
+                write("rec")
+              },
+            }
+            space()
+            let types = List.filterMap(
+              (decl: SurfaceAst.Decl) =>
+                match (decl) {
+                  SurfaceAst.TypeDecl(td) => Some(td),
+                  _ => None,
+                },
+              group.decls,
+            )
+            match (types) {
+              [] => void,
+              [first, ...rest] => {
+                emitTypeDecl(first)
+                let rec emitAnd = (items: List<SurfaceAst.TypeDecl>) => {
+                  match (items) {
+                    [] => void,
+                    [decl, ...tail] => {
+                      newline()
+                      write("and")
+                      space()
+                      emitTypeDecl(decl)
+                      emitAnd(tail)
+                    },
+                  }
+                }
+                emitAnd(rest)
+              },
+            }
+          },
+          SurfaceAst.RecordGroup(mods) => {
+            write("record")
+            match (mods) {
+              SurfaceAst.Plain => void,
+              SurfaceAst.Rec => {
+                space()
+                write("rec")
+              },
+            }
+            space()
+            let records = List.filterMap(
+              (decl: SurfaceAst.Decl) =>
+                match (decl) {
+                  SurfaceAst.RecordDecl(rd) => Some(rd),
+                  _ => None,
+                },
+              group.decls,
+            )
+            match (records) {
+              [] => void,
+              [first, ...rest] => {
+                emitRecordDecl(first)
+                let rec emitAnd = (items: List<SurfaceAst.RecordDecl>) => {
+                  match (items) {
+                    [] => void,
+                    [decl, ...tail] => {
+                      newline()
+                      write("and")
+                      space()
+                      emitRecordDecl(decl)
+                      emitAnd(tail)
+                    },
+                  }
+                }
+                emitAnd(rest)
+              },
+            }
+          },
+          SurfaceAst.OpGroup => {
+            let mut first = true
+            let rec emitDecls = (decls: List<SurfaceAst.Decl>) => {
+              match (decls) {
+                [] => void,
+                [decl, ...tail] => {
+                  if (!first) {
+                    newline()
+                  } else {
+                    first = false
+                  }
+                  emitDecl(decl)
+                  emitDecls(tail)
+                },
+              }
+            }
+            emitDecls(group.decls)
+          },
+          SurfaceAst.RuleGroup(kind) => {
+            match (kind) {
+              SurfaceAst.Domain => write("domain"),
+              SurfaceAst.Policy => write("policy"),
+              SurfaceAst.Op => write("op"),
+              SurfaceAst.Annotate => write("annotate"),
+            }
+          },
+        }
       },
-      Ast.Import(importDecl) => {
+      SurfaceAst.Import(importDecl) => {
         write("import")
         space()
         write(importDecl.modulePath)
       },
-      Ast.Reexport(reexportDecl) => {
+      SurfaceAst.Reexport(reexportDecl) => {
         write("reexport")
         space()
         write(reexportDecl.modulePath)
       },
-      Ast.Export(_) => write("export"),
-      Ast.Directive(directive) => emitDirective(directive),
-      Ast.Recovery(recovery) =>
-        match (recovery.kind) {
-          Ast.UnknownTopLevel(text) => write(text),
-          Ast.InvalidTopLevel(text) => write(text),
+      SurfaceAst.Export(_) => void,
+      SurfaceAst.Directive(directive) => emitDirective(directive),
+      SurfaceAst.Mark(mark) =>
+        match (mark.kind) {
+          SurfaceAst.UnknownTopLevel(text) => write(text),
+          SurfaceAst.InvalidTopLevel(text) => write(text),
         },
-      Ast.Trivia(trivia) => emitTrivia(trivia),
+      SurfaceAst.Trivia(trivia) => emitTrivia(trivia),
     }
   }
 
   let mut firstTop = true
-  let rec emitProgramItems = (items: List<Ast.TopItem>) => {
+  let rec emitProgramItems = (items: List<SurfaceAst.TopItem>) => {
     match (items) {
       [] => void,
       [item, ...tail] => {
@@ -678,6 +1038,10 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
           firstTop = false
         }
         emitTopItem(item)
+        let endSpan = topItemSpan(item)
+        if (hasTerminatorAfter(endSpan.end)) {
+          write(";")
+        }
         emitProgramItems(tail)
       },
     }
@@ -693,16 +1057,8 @@ let renderWithSettings = (program: Ast.Program, mode: Mode, settings: Settings) 
 
 let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) => {
   let program = Parser.parse(source)
-  let rendered = renderWithSettings(program, mode, settings)
-  if (mode == Real) {
-    if (canonicalNonWs(rendered.text) == canonicalNonWs(source)) {
-      rendered
-    } else {
-      { text: source, virtualArtifacts: [] }
-    }
-  } else {
-    rendered
-  }
+  let rendered = renderWithSettings(program, source, mode, settings)
+  rendered
 }
 
 provide let formatResultWithMode = (source: String, mode: Mode) =>

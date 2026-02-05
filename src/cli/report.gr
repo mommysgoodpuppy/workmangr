@@ -5,7 +5,7 @@ from "list" include List
 from "map" include Map
 from "string" include String
 
-from "../core/ast.gr" include Ast
+from "../core/core_ast.gr" include CoreAst
 from "../core/analysis.gr" include Analysis
 from "../core/infer.gr" include Infer
 from "../core/source.gr" include Source
@@ -30,7 +30,7 @@ let getLineText = (source: String, line: Number) => {
   }
 }
 
-let summarizeNode = (source: String, node: Ast.Expr, analysis: Analysis.Analysis) => {
+let summarizeNode = (source: String, node: CoreAst.Expr, analysis: Analysis.Analysis) => {
   match (Map.get(node.node.id, analysis.infer.nodeTypes)) {
     None => None,
     Some(nodeType) => {
@@ -50,35 +50,22 @@ let summarizeNode = (source: String, node: Ast.Expr, analysis: Analysis.Analysis
   }
 }
 
-let rec collectExprs = (expr: Ast.Expr) =>
+let rec collectExprs = (expr: CoreAst.Expr) =>
   match (expr.kind) {
-    Ast.Lit(_) => [expr],
-    Ast.Ident(_) => [expr],
-    Ast.Hole(_) => [expr],
-    Ast.Block(block) => {
-      let resultExprs = match (block.result) {
-        [] => [],
-        [e, ..._] => collectExprs(e)
-      }
-      [expr, ...resultExprs]
-    },
-    Ast.Fn(fnExpr) => {
+    CoreAst.Mark(_, inner) => [expr, ...collectExprs(inner)],
+    CoreAst.Lit(_) => [expr],
+    CoreAst.Ident(_) => [expr],
+    CoreAst.Hole(_) => [expr],
+    CoreAst.Fn(fnExpr) => {
       let bodyExprs = List.filterMap(
-        (item: Ast.FnItem) =>
+        (item: CoreAst.FnItem) =>
           match (item.kind) {
-            Ast.Clause(clause) =>
-              Some(
-                {
-                  node: clause.body.node,
-                  kind: Ast.Block(clause.body),
-                  attach: clause.attach,
-                }: Ast.Expr,
-              ),
+            CoreAst.Clause(clause) => Some(clause.body),
             _ => None,
           },
         fnExpr.items
       )
-      let rec collectBodies = (items: List<Ast.Expr>) => {
+      let rec collectBodies = (items: List<CoreAst.Expr>) => {
         match (items) {
           [] => [],
           [h, ...t] => List.append(collectExprs(h), collectBodies(t)),
@@ -86,24 +73,36 @@ let rec collectExprs = (expr: Ast.Expr) =>
       }
       [expr, ...collectBodies(bodyExprs)]
     },
-    Ast.Apply(callee, arg) => [expr, ...List.append(collectExprs(callee), collectExprs(arg))],
-    Ast.Paren(inner) => [expr, ...collectExprs(inner)],
+    CoreAst.Apply(callee, arg) => [expr, ...List.append(collectExprs(callee), collectExprs(arg))],
+    CoreAst.Let(binding, body) => {
+      let head = collectExprs(binding.value)
+      let tail = collectExprs(body)
+      [expr, ...List.append(head, tail)]
+    },
+    CoreAst.If(cond, thenExpr, elseOpt) => {
+      let base = List.append(collectExprs(cond), collectExprs(thenExpr))
+      let withElse = match (elseOpt) {
+        None => base,
+        Some(e) => List.append(base, collectExprs(e)),
+      }
+      [expr, ...withElse]
+    },
     _ => [expr]
   }
 
-let rec collectAllExprs = (items: List<Ast.TopItem>) => {
+let rec collectAllExprs = (items: List<CoreAst.TopItem>) => {
   match (items) {
     [] => [],
     [item, ...rest] => {
       let itemExprs = match (item) {
-        Ast.DeclGroup(dg) => {
-          let rec collectFromDecls = (decls: List<Ast.Decl>) => {
+        CoreAst.DeclGroup(dg) => {
+          let rec collectFromDecls = (decls: List<CoreAst.Decl>) => {
             match (decls) {
               [] => [],
               [decl, ...restDecls] => {
                 let declExprs = match (decl) {
-                  Ast.LetDecl(ld) => {
-                    let rec collectFromBindings = (bindings: List<Ast.LetBinding>) => {
+                  CoreAst.LetDecl(ld) => {
+                    let rec collectFromBindings = (bindings: List<CoreAst.LetBinding>) => {
                       match (bindings) {
                         [] => [],
                         [b, ...restBindings] => 

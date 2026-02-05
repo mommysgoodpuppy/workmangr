@@ -8,12 +8,11 @@ from "wasi/process" include Process
 from "list" include List
 
 from "../core/analysis.gr" include Analysis
-from "../core/ast.gr" include Ast
 from "./report.gr" include Report
 from "../frontend/parser.gr" include Parser
 from "../frontend/lower.gr" include Lower
 
-let usage = "Usage: wmgr type <file.wm> | wmgr --ast <file.wm>"
+let usage = "Usage: wmgr type <file.wm> | wmgr ast <file.wm>"
 
 let exitWith = (code: Number, message: String) => {
   print(message)
@@ -58,7 +57,7 @@ let main = () => {
       } else if (
         argCount > 1
         && Array.get(1, args) != "type"
-        && Array.get(1, args) != "--ast"
+        && Array.get(1, args) != "ast"
       ) {
         Some(Array.get(1, args))
       } else {
