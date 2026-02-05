@@ -1,0 +1,50 @@
+module BackendIR
+
+// Flat backend IR that maps directly to Zig constructs.
+// This is the target of the CoreAst -> BackendIR lowering pass.
+
+provide enum Literal {
+  IntLit(Number),
+  BoolLit(Bool),
+  StringLit(String),
+  VoidLit,
+}
+
+provide enum PrimOp {
+  IntAdd,
+  IntSub,
+  IntMul,
+  IntDiv,
+  IntEq,
+  IntNe,
+  IntLt,
+  IntGt,
+  IntLe,
+  IntGe,
+  BoolAnd,
+  BoolOr,
+  BoolNot,
+  Print,
+  Panic,
+}
+
+provide enum rec Expr {
+  Lit(Literal),
+  Var(String),
+  Prim(PrimOp, List<Expr>),
+  Call(Expr, Expr),
+  Lambda(String, Expr),
+  Let(String, Expr, Expr),
+  If(Expr, Expr, Expr),
+  Seq(Expr, Expr),
+}
+
+provide record ValueBinding {
+  name: String,
+  value: Expr,
+}
+
+provide record Module {
+  bindings: List<ValueBinding>,
+  entry: Option<String>,
+}

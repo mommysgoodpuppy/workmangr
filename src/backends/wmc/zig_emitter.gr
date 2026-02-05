@@ -1,0 +1,197 @@
+module ZigEmitter
+
+from "list" include List
+from "string" include String
+
+from "./backend_ir.gr" include BackendIR
+
+// Zig reserved words we need to escape
+let escapeIdent = (name: String) =>
+  match (name) {
+    "_" => "_",
+    "const" => "@\"const\"",
+    "var" => "@\"var\"",
+    "return" => "@\"return\"",
+    "if" => "@\"if\"",
+    "else" => "@\"else\"",
+    "while" => "@\"while\"",
+    "for" => "@\"for\"",
+    "break" => "@\"break\"",
+    "continue" => "@\"continue\"",
+    "true" => "@\"true\"",
+    "false" => "@\"false\"",
+    "error" => "@\"error\"",
+    "test" => "@\"test\"",
+    "pub" => "@\"pub\"",
+    _ => name,
+  }
+
+let mut labelCounter = 0
+
+let freshLabel = () => {
+  let n = labelCounter
+  labelCounter = n + 1
+  "__blk_" ++ toString(n)
+}
+
+let rec emitExpr = (expr: BackendIR.Expr) =>
+  match (expr) {
+    BackendIR.Lit(lit) => emitLiteral(lit),
+    BackendIR.Var(name) => escapeIdent(name),
+    BackendIR.Prim(op, args) => emitPrim(op, args),
+    BackendIR.Call(callee, arg) =>
+      emitExpr(callee) ++ ".func.f(" ++ emitExpr(arg) ++ ")",
+    BackendIR.Lambda(param, body) =>
+      "WmFunc.init(struct { fn f(" ++ escapeIdent(param) ++
+      ": Value) Value { return " ++ emitExpr(body) ++
+      "; } }.f)",
+    BackendIR.Let(name, value, body) => {
+      let label = freshLabel()
+      let binding = if (name == "_") {
+        "_ = " ++ emitExpr(value)
+      } else {
+        "const " ++ escapeIdent(name) ++ " = " ++ emitExpr(value)
+      }
+      label ++ ": { " ++ binding ++
+      "; break :" ++ label ++ " " ++ emitExpr(body) ++ "; }"
+    },
+    BackendIR.If(cond, thenE, elseE) =>
+      "if (" ++ emitExpr(cond) ++ ".toBool()) " ++
+      emitExpr(thenE) ++ " else " ++ emitExpr(elseE),
+    BackendIR.Seq(first, second) => {
+      let label = freshLabel()
+      label ++ ": { _ = " ++ emitExpr(first) ++ "; break :" ++ label ++ " " ++ emitExpr(second) ++ "; }"
+    },
+  }
+
+and emitLiteral = (lit: BackendIR.Literal) =>
+  match (lit) {
+    BackendIR.IntLit(n) => "Value.initInt(" ++ toString(n) ++ ")",
+    BackendIR.BoolLit(b) => if (b) { "Value.initBool(true)" } else { "Value.initBool(false)" },
+    BackendIR.StringLit(s) => "Value.initString(\"" ++ s ++ "\")",
+    BackendIR.VoidLit => "Value.initVoid()",
+  }
+
+and emitPrim = (op: BackendIR.PrimOp, args: List<BackendIR.Expr>) => {
+  match (op) {
+    BackendIR.IntAdd => emitBinPrim("intAdd", args),
+    BackendIR.IntSub => emitBinPrim("intSub", args),
+    BackendIR.IntMul => emitBinPrim("intMul", args),
+    BackendIR.IntDiv => emitBinPrim("intDiv", args),
+    BackendIR.IntEq => emitBinPrim("intEq", args),
+    BackendIR.IntNe => emitBinPrim("intNe", args),
+    BackendIR.IntLt => emitBinPrim("intLt", args),
+    BackendIR.IntGt => emitBinPrim("intGt", args),
+    BackendIR.IntLe => emitBinPrim("intLe", args),
+    BackendIR.IntGe => emitBinPrim("intGe", args),
+    BackendIR.BoolAnd => emitBinPrim("boolAnd", args),
+    BackendIR.BoolOr => emitBinPrim("boolOr", args),
+    BackendIR.BoolNot => {
+      match (args) {
+        [a] => "rt.boolNot(" ++ emitExpr(a) ++ ")",
+        _ => "rt.boolNot(Value.initVoid())",
+      }
+    },
+    BackendIR.Print => {
+      match (args) {
+        [a] => "rt.print(" ++ emitExpr(a) ++ ")",
+        _ => "rt.print(Value.initVoid())",
+      }
+    },
+    BackendIR.Panic => {
+      match (args) {
+        [a] => "rt.panic_wm(" ++ emitExpr(a) ++ ")",
+        _ => "rt.panic_wm(Value.initVoid())",
+      }
+    },
+  }
+}
+
+and emitBinPrim = (fnName: String, args: List<BackendIR.Expr>) =>
+  match (args) {
+    [a, b] => "rt." ++ fnName ++ "(" ++ emitExpr(a) ++ ", " ++ emitExpr(b) ++ ")",
+    _ => "rt." ++ fnName ++ "(Value.initVoid(), Value.initVoid())",
+  }
+
+let emitBinding = (binding: BackendIR.ValueBinding) =>
+  "const wm_" ++ escapeIdent(binding.name) ++ " = " ++ emitExpr(binding.value) ++ ";\n"
+
+let rec emitBindings = (bindings: List<BackendIR.ValueBinding>) =>
+  match (bindings) {
+    [] => "",
+    [b, ...rest] => emitBinding(b) ++ emitBindings(rest),
+  }
+
+let runtime = () =>
+  "const std = @import(\"std\");\n\n" ++
+  "const Value = union(enum) {\n" ++
+  "    int: i64,\n" ++
+  "    boolean: bool,\n" ++
+  "    string: []const u8,\n" ++
+  "    void_val: void,\n" ++
+  "    func: WmFunc,\n\n" ++
+  "    pub fn initInt(n: i64) Value { return .{ .int = n }; }\n" ++
+  "    pub fn initBool(b: bool) Value { return .{ .boolean = b }; }\n" ++
+  "    pub fn initString(s: []const u8) Value { return .{ .string = s }; }\n" ++
+  "    pub fn initVoid() Value { return .{ .void_val = {} }; }\n" ++
+  "    pub fn toBool(self: Value) bool {\n" ++
+  "        return switch (self) {\n" ++
+  "            .boolean => |b| b,\n" ++
+  "            .int => |n| n != 0,\n" ++
+  "            else => true,\n" ++
+  "        };\n" ++
+  "    }\n" ++
+  "};\n\n" ++
+  "const WmFunc = struct {\n" ++
+  "    f: *const fn (Value) Value,\n" ++
+  "    pub fn init(f: *const fn (Value) Value) Value { return .{ .func = .{ .f = f } }; }\n" ++
+  "    pub fn call(self: WmFunc, args: anytype) Value { return self.f(args[0]); }\n" ++
+  "};\n\n" ++
+  "const rt = struct {\n" ++
+  "    fn intAdd(a: Value, b: Value) Value { return Value.initInt(a.int + b.int); }\n" ++
+  "    fn intSub(a: Value, b: Value) Value { return Value.initInt(a.int - b.int); }\n" ++
+  "    fn intMul(a: Value, b: Value) Value { return Value.initInt(a.int * b.int); }\n" ++
+  "    fn intDiv(a: Value, b: Value) Value { return Value.initInt(@divTrunc(a.int, b.int)); }\n" ++
+  "    fn intEq(a: Value, b: Value) Value { return Value.initBool(a.int == b.int); }\n" ++
+  "    fn intNe(a: Value, b: Value) Value { return Value.initBool(a.int != b.int); }\n" ++
+  "    fn intLt(a: Value, b: Value) Value { return Value.initBool(a.int < b.int); }\n" ++
+  "    fn intGt(a: Value, b: Value) Value { return Value.initBool(a.int > b.int); }\n" ++
+  "    fn intLe(a: Value, b: Value) Value { return Value.initBool(a.int <= b.int); }\n" ++
+  "    fn intGe(a: Value, b: Value) Value { return Value.initBool(a.int >= b.int); }\n" ++
+  "    fn boolAnd(a: Value, b: Value) Value { return Value.initBool(a.toBool() and b.toBool()); }\n" ++
+  "    fn boolOr(a: Value, b: Value) Value { return Value.initBool(a.toBool() or b.toBool()); }\n" ++
+  "    fn boolNot(a: Value) Value { return Value.initBool(!a.toBool()); }\n" ++
+  "    fn print(v: Value) Value {\n" ++
+  "        switch (v) {\n" ++
+  "            .int => |n| std.debug.print(\"{d}\\n\", .{n}),\n" ++
+  "            .boolean => |b| std.debug.print(\"{s}\\n\", .{if (b) \"true\" else \"false\"}),\n" ++
+  "            .string => |s| std.debug.print(\"{s}\\n\", .{s}),\n" ++
+  "            .void_val => std.debug.print(\"void\\n\", .{}),\n" ++
+  "            .func => std.debug.print(\"<function>\\n\", .{}),\n" ++
+  "        }\n" ++
+  "        return Value.initVoid();\n" ++
+  "    }\n" ++
+  "    fn panic_wm(v: Value) Value {\n" ++
+  "        switch (v) {\n" ++
+  "            .string => |s| @panic(s),\n" ++
+  "            else => @panic(\"workman panic\"),\n" ++
+  "        }\n" ++
+  "    }\n" ++
+  "};\n\n"
+
+let emitMain = (entry: Option<String>) =>
+  match (entry) {
+    Some(name) =>
+      "pub fn main() void {\n" ++
+      "    _ = wm_" ++ escapeIdent(name) ++ ".func.f(Value.initVoid());\n" ++
+      "}\n",
+    None =>
+      "pub fn main() void {}\n",
+  }
+
+provide let emit = (mod: BackendIR.Module) => {
+  let rt = runtime()
+  let bindings = emitBindings(mod.bindings)
+  let mainFn = emitMain(mod.entry)
+  rt ++ bindings ++ mainFn
+}

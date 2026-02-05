@@ -1,0 +1,31 @@
+module TestWmc
+
+from "map" include Map
+from "../../frontend/frontend.gr" include Frontend
+from "../../core/infer.gr" include Infer
+from "../../core/types.gr" include Types
+from "./lower_backend.gr" include LowerBackend
+from "./zig_emitter.gr" include ZigEmitter
+
+let source = "let main = => {
+  let x = 1 + 1;
+  print(x);
+};"
+
+let program = Frontend.parseAndLower(source)
+
+// Seed builtins into the type environment
+let env = Map.make()
+// Infer stubs Tuple type as TNumber, so + applied to Tuple([1,1]) sees arg as TNumber
+Map.set("+", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+Map.set("-", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+Map.set("*", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+Map.set("/", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+// print : Number -> Void
+Map.set("print", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TVoid) }: Types.Scheme, env)
+
+let infer = Infer.inferProgramWithEnv(program, env)
+let backendModule = LowerBackend.lowerProgram(program)
+let zigSource = ZigEmitter.emit(backendModule)
+
+print(zigSource)
