@@ -1,0 +1,233 @@
+module LowerTyped
+
+from "list" include List
+from "map" include Map
+from "string" include String
+from "runtime/unsafe/panic" include Panic
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/types.gr" include Types
+from "../../core/infer.gr" include Infer
+from "./backend_ir.gr" include BackendIR
+
+// Convert inference type to backend type
+let rec toBType = (t: Types.Type) =>
+  match (t) {
+    Types.TNumber => BackendIR.BInt,
+    Types.TVoid => BackendIR.BVoid,
+    Types.TVar(_) => BackendIR.BUnknown,
+    Types.TFun(a, b) => BackendIR.BFun(toBType(a), toBType(b)),
+  }
+
+// Resolve a node's type from the infer state
+let resolveNodeType = (nodeId: Number, state: Infer.InferState) => {
+  match (Map.get(nodeId, state.nodeTypes)) {
+    Some(t) => toBType(Types.applySubstType(state.subst, t)),
+    None => BackendIR.BUnknown,
+  }
+}
+
+// Map known operator names to prim ops
+let lookupPrimOp = (name: String) =>
+  match (name) {
+    "+" => Some(BackendIR.IntAdd),
+    "-" => Some(BackendIR.IntSub),
+    "*" => Some(BackendIR.IntMul),
+    "/" => Some(BackendIR.IntDiv),
+    "==" => Some(BackendIR.IntEq),
+    "!=" => Some(BackendIR.IntNe),
+    "<" => Some(BackendIR.IntLt),
+    ">" => Some(BackendIR.IntGt),
+    "<=" => Some(BackendIR.IntLe),
+    ">=" => Some(BackendIR.IntGe),
+    "&&" => Some(BackendIR.BoolAnd),
+    "||" => Some(BackendIR.BoolOr),
+    _ => None,
+  }
+
+let lookupBuiltin = (name: String) =>
+  match (name) {
+    "print" => Some(BackendIR.Print),
+    "panic" => Some(BackendIR.Panic),
+    _ => None,
+  }
+
+// Type of a prim op result
+let primResultType = (op: BackendIR.PrimOp) =>
+  match (op) {
+    BackendIR.IntAdd => BackendIR.BInt,
+    BackendIR.IntSub => BackendIR.BInt,
+    BackendIR.IntMul => BackendIR.BInt,
+    BackendIR.IntDiv => BackendIR.BInt,
+    BackendIR.IntEq => BackendIR.BBool,
+    BackendIR.IntNe => BackendIR.BBool,
+    BackendIR.IntLt => BackendIR.BBool,
+    BackendIR.IntGt => BackendIR.BBool,
+    BackendIR.IntLe => BackendIR.BBool,
+    BackendIR.IntGe => BackendIR.BBool,
+    BackendIR.BoolAnd => BackendIR.BBool,
+    BackendIR.BoolOr => BackendIR.BBool,
+    BackendIR.BoolNot => BackendIR.BBool,
+    BackendIR.Print => BackendIR.BVoid,
+    BackendIR.Panic => BackendIR.BVoid,
+  }
+
+// Returns (Expr, BType) tuple — avoids record field access issues in rec functions
+let rec lowerExpr = (expr: CoreAst.Expr, state: Infer.InferState) => {
+  let ty = resolveNodeType(expr.node.id, state)
+  let e = match (expr.kind) {
+    CoreAst.Mark(_, inner) => {
+      let (innerE, _innerTy) = lowerExpr(inner, state)
+      innerE
+    },
+
+    CoreAst.Lit(lit) =>
+      match (lit) {
+        CoreAst.Int(n) => BackendIR.Lit(BackendIR.IntLit(n)),
+        CoreAst.Bool(b) => BackendIR.Lit(BackendIR.BoolLit(b)),
+        CoreAst.Str(s) => BackendIR.Lit(BackendIR.StringLit(s)),
+        CoreAst.Unit => BackendIR.Lit(BackendIR.VoidLit),
+        CoreAst.Char(_) => BackendIR.Lit(BackendIR.VoidLit),
+        CoreAst.Byte(_) => BackendIR.Lit(BackendIR.VoidLit),
+      },
+
+    CoreAst.Ident(name) => BackendIR.Var(name.text),
+
+    CoreAst.Apply(callee, arg) => lowerApply(callee, arg, state),
+
+    CoreAst.Fn(fnExpr) => lowerFn(fnExpr, state),
+
+    CoreAst.Let(binding, body) => {
+      let bindingName = match (binding.name.kind) {
+        CoreAst.Var(name) => name.text,
+        _ => "_",
+      }
+      let (valE, _valTy) = lowerExpr(binding.value, state)
+      let (bodyE, _bodyTy) = lowerExpr(body, state)
+      BackendIR.Let(bindingName, valE, bodyE)
+    },
+
+    CoreAst.If(cond, thenExpr, elseOpt) => {
+      let (condE, _) = lowerExpr(cond, state)
+      let (thenE, _) = lowerExpr(thenExpr, state)
+      let elseE = match (elseOpt) {
+        Some(e) => { let (eE, _) = lowerExpr(e, state); eE },
+        None => BackendIR.Lit(BackendIR.VoidLit),
+      }
+      BackendIR.If(condE, thenE, elseE)
+    },
+
+    CoreAst.Tuple(exprs) => {
+      match (exprs) {
+        [] => BackendIR.Lit(BackendIR.VoidLit),
+        [only] => {
+          let (onlyE, _) = lowerExpr(only, state)
+          onlyE
+        },
+        _ => BackendIR.Lit(BackendIR.VoidLit),
+      }
+    },
+
+    CoreAst.Hole(_) => BackendIR.Lit(BackendIR.VoidLit),
+
+    _ => Panic.panic("LowerTyped: unsupported CoreAst expression kind"),
+  }
+  (e, ty)
+}
+
+and lowerApply = (callee: CoreAst.Expr, arg: CoreAst.Expr, state: Infer.InferState) => {
+  match (callee.kind) {
+    CoreAst.Ident(name) => {
+      match (lookupPrimOp(name.text)) {
+        Some(op) => {
+          let args = match (arg.kind) {
+            CoreAst.Tuple(exprs) => List.map((e) => { let (eE, _) = lowerExpr(e, state); eE }, exprs),
+            _ => { let (aE, _) = lowerExpr(arg, state); [aE] },
+          }
+          BackendIR.Prim(op, args)
+        },
+        None =>
+          match (lookupBuiltin(name.text)) {
+            Some(builtin) => { let (aE, _) = lowerExpr(arg, state); BackendIR.Prim(builtin, [aE]) },
+            None => { let (aE, _) = lowerExpr(arg, state); BackendIR.Call(BackendIR.Var(name.text), aE) },
+          },
+      }
+    },
+    _ => {
+      let (cE, _) = lowerExpr(callee, state)
+      let (aE, _) = lowerExpr(arg, state)
+      BackendIR.Call(cE, aE)
+    },
+  }
+}
+
+and lowerFn = (fnExpr: CoreAst.FnExpr, state: Infer.InferState) => {
+  match (fnExpr.items) {
+    [item] =>
+      match (item.kind) {
+        CoreAst.Clause(clause) => {
+          let paramName = match (clause.param.kind) {
+            CoreAst.Var(name) => name.text,
+            CoreAst.Wildcard => "_",
+            _ => "_",
+          }
+          let (bodyE, _) = lowerExpr(clause.body, state)
+          BackendIR.Lambda(paramName, bodyE)
+        },
+        _ => Panic.panic("LowerTyped: unsupported fn item kind"),
+      },
+    _ => Panic.panic("LowerTyped: multi-clause functions not yet supported"),
+  }
+}
+
+let lowerBinding = (binding: CoreAst.LetBinding, state: Infer.InferState) => {
+  let name = match (binding.name.kind) {
+    CoreAst.Var(n) => n.text,
+    _ => "_",
+  }
+  let (valE, valTy) = lowerExpr(binding.value, state)
+  { name, value: { expr: valE, ty: valTy }: BackendIR.TExpr }: BackendIR.TValueBinding
+}
+
+let rec lowerTopItems = (items: List<CoreAst.TopItem>, state: Infer.InferState) => {
+  match (items) {
+    [] => [],
+    [item, ...rest] => {
+      let bindings = match (item) {
+        CoreAst.DeclGroup(dg) => {
+          let rec lowerDecls = (decls: List<CoreAst.Decl>) => {
+            match (decls) {
+              [] => [],
+              [decl, ...restDecls] => {
+                let bs = match (decl) {
+                  CoreAst.LetDecl(ld) => List.map((b) => lowerBinding(b, state), ld.bindings),
+                  _ => [],
+                }
+                List.append(bs, lowerDecls(restDecls))
+              },
+            }
+          }
+          lowerDecls(dg.decls)
+        },
+        _ => [],
+      }
+      List.append(bindings, lowerTopItems(rest, state))
+    },
+  }
+}
+
+let findEntry = (bindings: List<BackendIR.TValueBinding>) => {
+  let rec search = (bs: List<BackendIR.TValueBinding>) =>
+    match (bs) {
+      [] => None,
+      [b, ...rest] =>
+        if (b.name == "main") { Some("main") } else { search(rest) },
+    }
+  search(bindings)
+}
+
+provide let lowerProgram = (program: CoreAst.Program, state: Infer.InferState) => {
+  let bindings = lowerTopItems(program.items, state)
+  let entry = findEntry(bindings)
+  { bindings, entry }: BackendIR.TModule
+}

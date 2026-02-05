@@ -3,6 +3,16 @@ module BackendIR
 // Flat backend IR that maps directly to Zig constructs.
 // This is the target of the CoreAst -> BackendIR lowering pass.
 
+// Backend type representation — resolved from inference
+provide enum rec BType {
+  BInt,
+  BBool,
+  BVoid,
+  BString,
+  BFun(BType, BType),
+  BUnknown,
+}
+
 provide enum Literal {
   IntLit(Number),
   BoolLit(Bool),
@@ -39,12 +49,28 @@ provide enum rec Expr {
   Seq(Expr, Expr),
 }
 
+// Typed wrapper — attaches a resolved type to an expression
+provide record TExpr {
+  expr: Expr,
+  ty: BType,
+}
+
 provide record ValueBinding {
   name: String,
   value: Expr,
 }
 
+provide record TValueBinding {
+  name: String,
+  value: TExpr,
+}
+
 provide record Module {
   bindings: List<ValueBinding>,
+  entry: Option<String>,
+}
+
+provide record TModule {
+  bindings: List<TValueBinding>,
   entry: Option<String>,
 }

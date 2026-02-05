@@ -1,6 +1,6 @@
 # Workman Syntax Guide
 
-A practical guide to Workman's syntax for humans and LLMs. Workman is a
+A practical guide to Workman's syntax. Workman is a
 functional language that blends TypeScript-style familiarity with ML-style type
 inference and pattern matching.
 
@@ -22,8 +22,6 @@ inference and pattern matching.
 
 ---
 
-protip, always use agent tools to typecheck, workmans lsp is very optimized and comprehensive
-
 ## Comments
 
 Both styles are valid:
@@ -40,10 +38,10 @@ Both styles are valid:
 **No top-level function calls allowed.** Create a `main` function:
 
 ```workman
--- ❌ WRONG: Top-level call
+-- error: Top-level call
 print("hello");
 
--- ✅ CORRECT: Use main function
+-- Create a main function instead
 let main = () => {
   print("hello")
 };

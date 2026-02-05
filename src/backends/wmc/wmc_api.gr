@@ -1,0 +1,62 @@
+module WmcApi
+
+from "array" include Array
+from "map" include Map
+from "string" include String
+from "wasi/process" include Process
+from "fs" include Fs
+from "path" include Path
+
+from "../../frontend/frontend.gr" include Frontend
+from "../../core/infer.gr" include Infer
+from "../../core/types.gr" include Types
+from "./lower_typed.gr" include LowerTyped
+from "./zig_emitter_typed.gr" include ZigEmitterTyped
+
+let escapeJson = (s: String) => {
+  let step1 = String.replaceAll("\\", "\\\\", s)
+  let step2 = String.replaceAll("\"", "\\\"", step1)
+  let step3 = String.replaceAll("\n", "\\n", step2)
+  let step4 = String.replaceAll("\r", "\\r", step3)
+  String.replaceAll("\t", "\\t", step4)
+}
+
+let compileToZig = (source: String) => {
+  let program = Frontend.parseAndLower(source)
+
+  // Seed builtins into the type environment
+  let env = Map.make()
+  Map.set("+", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+  Map.set("-", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+  Map.set("*", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+  Map.set("/", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TNumber) }: Types.Scheme, env)
+  Map.set("print", { quantifiers: [], ty: Types.TFun(Types.TNumber, Types.TVoid) }: Types.Scheme, env)
+
+  let inferState = Infer.inferProgramWithEnv(program, env)
+  let backendModule = LowerTyped.lowerProgram(program, inferState)
+  let zigSource = ZigEmitterTyped.emit(backendModule)
+  zigSource
+}
+
+let main = () => {
+  match (Process.argv()) {
+    Err(_) => print("{\"success\":false,\"error\":\"Failed to read argv\"}"),
+    Ok(args) => {
+      let argArray = args
+      if (Array.length(argArray) < 2) {
+        print("{\"success\":false,\"error\":\"Usage: wmc_api <file.wm>\"}")
+      } else {
+        let filePath = Array.get(1, argArray)
+        match (Fs.Utf8.readFile(Path.fromString(filePath))) {
+          Err(_) => print("{\"success\":false,\"error\":\"Failed to read file\"}"),
+          Ok(source) => {
+            let zigSource = compileToZig(source)
+            print("{\"success\":true,\"zigSource\":\"" ++ escapeJson(zigSource) ++ "\"}")
+          }
+        }
+      }
+    }
+  }
+}
+
+main()

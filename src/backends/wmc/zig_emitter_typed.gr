@@ -1,0 +1,354 @@
+module ZigEmitterTyped
+
+from "list" include List
+from "string" include String
+
+from "./backend_ir.gr" include BackendIR
+
+// Zig reserved words we need to escape
+let escapeIdent = (name: String) =>
+  match (name) {
+    "_" => "_",
+    "const" => "@\"const\"",
+    "var" => "@\"var\"",
+    "return" => "@\"return\"",
+    "if" => "@\"if\"",
+    "else" => "@\"else\"",
+    "while" => "@\"while\"",
+    "for" => "@\"for\"",
+    "break" => "@\"break\"",
+    "continue" => "@\"continue\"",
+    "true" => "@\"true\"",
+    "false" => "@\"false\"",
+    "error" => "@\"error\"",
+    "test" => "@\"test\"",
+    "pub" => "@\"pub\"",
+    _ => name,
+  }
+
+let mut labelCounter = 0
+
+let freshLabel = () => {
+  let n = labelCounter
+  labelCounter = n + 1
+  "__blk_" ++ toString(n)
+}
+
+let indent = (n) => {
+  let rec go = (i, acc) =>
+    if (i <= 0) { acc } else { go(i - 1, acc ++ "    ") }
+  go(n, "")
+}
+
+// Check if a type is a concrete native type (not boxed Value)
+let isNative = (ty: BackendIR.BType) =>
+  match (ty) {
+    BackendIR.BInt => true,
+    BackendIR.BBool => true,
+    BackendIR.BVoid => true,
+    BackendIR.BString => true,
+    _ => false,
+  }
+
+// Zig type name for a BType
+let zigType = (ty: BackendIR.BType) =>
+  match (ty) {
+    BackendIR.BInt => "i64",
+    BackendIR.BBool => "bool",
+    BackendIR.BVoid => "void",
+    BackendIR.BString => "[]const u8",
+    BackendIR.BFun(_, _) => "Value",
+    BackendIR.BUnknown => "Value",
+  }
+
+// Emit a wrap: native value -> Value (for when we need to box)
+let emitWrap = (code: String, ty: BackendIR.BType) =>
+  match (ty) {
+    BackendIR.BInt => "Value.initInt(" ++ code ++ ")",
+    BackendIR.BBool => "Value.initBool(" ++ code ++ ")",
+    BackendIR.BVoid => "Value.initVoid()",
+    BackendIR.BString => "Value.initString(" ++ code ++ ")",
+    _ => code,
+  }
+
+// Emit an unwrap: Value -> native (for when we need to unbox)
+let emitUnwrap = (code: String, ty: BackendIR.BType) =>
+  match (ty) {
+    BackendIR.BInt => code ++ ".int",
+    BackendIR.BBool => code ++ ".boolean",
+    BackendIR.BString => code ++ ".string",
+    _ => code,
+  }
+
+// Emit a native binary int op directly: a + b instead of rt.intAdd(a, b)
+let nativeIntOp = (op: BackendIR.PrimOp) =>
+  match (op) {
+    BackendIR.IntAdd => Some("+"),
+    BackendIR.IntSub => Some("-"),
+    BackendIR.IntMul => Some("*"),
+    BackendIR.IntEq => Some("=="),
+    BackendIR.IntNe => Some("!="),
+    BackendIR.IntLt => Some("<"),
+    BackendIR.IntGt => Some(">"),
+    BackendIR.IntLe => Some("<="),
+    BackendIR.IntGe => Some(">="),
+    _ => None,
+  }
+
+// All variables hold Value. Prim ops are inlined to native arithmetic wrapped back to Value.
+// e.g. IntAdd(Lit(1), Lit(1)) => Value.initInt(1 + 1) — box/extract is elided for literals
+
+// Emit the raw i64 value of an expr (elides box-extract for literals)
+let rec emitRawInt = (expr: BackendIR.Expr, depth: Number) =>
+  match (expr) {
+    BackendIR.Lit(BackendIR.IntLit(n)) => toString(n),
+    _ => emitE(expr, depth) ++ ".int",
+  }
+
+// Emit the raw bool value of an expr
+and emitRawBool = (expr: BackendIR.Expr, depth: Number) =>
+  match (expr) {
+    BackendIR.Lit(BackendIR.BoolLit(b)) => if (b) { "true" } else { "false" },
+    _ => emitE(expr, depth) ++ ".toBool()",
+  }
+
+and emitTExpr = (texpr: BackendIR.TExpr, depth: Number) =>
+  emitE(texpr.expr, depth)
+
+and emitE = (expr: BackendIR.Expr, depth: Number) =>
+  match (expr) {
+    BackendIR.Lit(lit) => emitLit(lit),
+    BackendIR.Var(name) => escapeIdent(name),
+    BackendIR.Prim(op, args) => emitPrimInlined(op, args, depth),
+    BackendIR.Call(callee, arg) =>
+      emitE(callee, depth) ++ ".func.f(" ++ emitE(arg, depth) ++ ")",
+    BackendIR.Lambda(param, body) => {
+      let inner = depth + 1
+      let i = indent(inner)
+      let i0 = indent(depth)
+      "WmFunc.init(struct {\n" ++
+      i ++ "fn f(" ++ escapeIdent(param) ++ ": Value) Value {\n" ++
+      i ++ "    return " ++ emitE(body, inner + 1) ++ ";\n" ++
+      i ++ "}\n" ++
+      i0 ++ "}.f)"
+    },
+    BackendIR.Let(name, value, body) => {
+      let label = freshLabel()
+      let i = indent(depth)
+      let binding = if (name == "_") {
+        "_ = " ++ emitE(value, depth)
+      } else {
+        "const " ++ escapeIdent(name) ++ " = " ++ emitE(value, depth)
+      }
+      label ++ ": {\n" ++
+      i ++ "    " ++ binding ++ ";\n" ++
+      i ++ "    break :" ++ label ++ " " ++ emitE(body, depth) ++ ";\n" ++
+      i ++ "}"
+    },
+    BackendIR.If(cond, thenE, elseE) =>
+      "if (" ++ emitE(cond, depth) ++ ".toBool()) " ++
+      emitE(thenE, depth) ++ " else " ++ emitE(elseE, depth),
+    BackendIR.Seq(first, second) => {
+      let label = freshLabel()
+      let i = indent(depth)
+      label ++ ": {\n" ++
+      i ++ "    _ = " ++ emitE(first, depth) ++ ";\n" ++
+      i ++ "    break :" ++ label ++ " " ++ emitE(second, depth) ++ ";\n" ++
+      i ++ "}"
+    },
+  }
+
+and emitLit = (lit: BackendIR.Literal) =>
+  match (lit) {
+    BackendIR.IntLit(n) => "Value.initInt(" ++ toString(n) ++ ")",
+    BackendIR.BoolLit(b) => if (b) { "Value.initBool(true)" } else { "Value.initBool(false)" },
+    BackendIR.StringLit(s) => "Value.initString(\"" ++ s ++ "\")",
+    BackendIR.VoidLit => "Value.initVoid()",
+  }
+
+// Inlined prim ops: extract native, do op, wrap back to Value
+// e.g. IntAdd => Value.initInt(a.int + b.int)
+and emitPrimInlined = (op: BackendIR.PrimOp, args: List<BackendIR.Expr>, depth: Number) => {
+  match (op) {
+    BackendIR.IntAdd => emitInlinedIntBinOp("+", args, depth),
+    BackendIR.IntSub => emitInlinedIntBinOp("-", args, depth),
+    BackendIR.IntMul => emitInlinedIntBinOp("*", args, depth),
+    BackendIR.IntDiv => {
+      match (args) {
+        [a, b] =>
+          "Value.initInt(@divTrunc(" ++ emitRawInt(a, depth) ++ ", " ++ emitRawInt(b, depth) ++ "))",
+        _ => emitPrimBoxed(op, args, depth),
+      }
+    },
+    BackendIR.IntEq => emitInlinedCmpOp("==", args, depth),
+    BackendIR.IntNe => emitInlinedCmpOp("!=", args, depth),
+    BackendIR.IntLt => emitInlinedCmpOp("<", args, depth),
+    BackendIR.IntGt => emitInlinedCmpOp(">", args, depth),
+    BackendIR.IntLe => emitInlinedCmpOp("<=", args, depth),
+    BackendIR.IntGe => emitInlinedCmpOp(">=", args, depth),
+    BackendIR.BoolAnd => {
+      match (args) {
+        [a, b] =>
+          "Value.initBool(" ++ emitRawBool(a, depth) ++ " and " ++ emitRawBool(b, depth) ++ ")",
+        _ => emitPrimBoxed(op, args, depth),
+      }
+    },
+    BackendIR.BoolOr => {
+      match (args) {
+        [a, b] =>
+          "Value.initBool(" ++ emitRawBool(a, depth) ++ " or " ++ emitRawBool(b, depth) ++ ")",
+        _ => emitPrimBoxed(op, args, depth),
+      }
+    },
+    BackendIR.BoolNot => {
+      match (args) {
+        [a] => "Value.initBool(!" ++ emitRawBool(a, depth) ++ ")",
+        _ => emitPrimBoxed(op, args, depth),
+      }
+    },
+    BackendIR.Print => {
+      match (args) {
+        [a] => "rt.print(" ++ emitE(a, depth) ++ ")",
+        _ => "rt.print(Value.initVoid())",
+      }
+    },
+    BackendIR.Panic => {
+      match (args) {
+        [a] => "rt.panic_wm(" ++ emitE(a, depth) ++ ")",
+        _ => "rt.panic_wm(Value.initVoid())",
+      }
+    },
+  }
+}
+
+// Value.initInt(a.int + b.int) — elides box-extract for literals
+and emitInlinedIntBinOp = (zigOp: String, args: List<BackendIR.Expr>, depth: Number) => {
+  match (args) {
+    [a, b] =>
+      "Value.initInt(" ++ emitRawInt(a, depth) ++ " " ++ zigOp ++ " " ++ emitRawInt(b, depth) ++ ")",
+    _ => "Value.initVoid()",
+  }
+}
+
+// Value.initBool(a.int == b.int) — elides box-extract for literals
+and emitInlinedCmpOp = (zigOp: String, args: List<BackendIR.Expr>, depth: Number) => {
+  match (args) {
+    [a, b] =>
+      "Value.initBool(" ++ emitRawInt(a, depth) ++ " " ++ zigOp ++ " " ++ emitRawInt(b, depth) ++ ")",
+    _ => "Value.initBool(false)",
+  }
+}
+
+and emitPrimBoxed = (op: BackendIR.PrimOp, args: List<BackendIR.Expr>, depth: Number) => {
+  let fnName = match (op) {
+    BackendIR.IntAdd => "intAdd",
+    BackendIR.IntSub => "intSub",
+    BackendIR.IntMul => "intMul",
+    BackendIR.IntDiv => "intDiv",
+    BackendIR.IntEq => "intEq",
+    BackendIR.IntNe => "intNe",
+    BackendIR.IntLt => "intLt",
+    BackendIR.IntGt => "intGt",
+    BackendIR.IntLe => "intLe",
+    BackendIR.IntGe => "intGe",
+    BackendIR.BoolAnd => "boolAnd",
+    BackendIR.BoolOr => "boolOr",
+    BackendIR.BoolNot => "boolNot",
+    BackendIR.Print => "print",
+    BackendIR.Panic => "panic_wm",
+  }
+  match (args) {
+    [a, b] =>
+      "rt." ++ fnName ++ "(" ++ emitE(a, depth) ++ ", " ++ emitE(b, depth) ++ ")",
+    [a] =>
+      "rt." ++ fnName ++ "(" ++ emitE(a, depth) ++ ")",
+    _ =>
+      "rt." ++ fnName ++ "(Value.initVoid(), Value.initVoid())",
+  }
+}
+
+let emitTBinding = (binding: BackendIR.TValueBinding) =>
+  "const wm_" ++ escapeIdent(binding.name) ++ " = " ++ emitTExpr(binding.value, 0) ++ ";\n"
+
+let rec emitTBindings = (bindings: List<BackendIR.TValueBinding>) =>
+  match (bindings) {
+    [] => "",
+    [b, ...rest] => emitTBinding(b) ++ emitTBindings(rest),
+  }
+
+let emitMain = (entry: Option<String>) =>
+  match (entry) {
+    Some(name) =>
+      "pub fn main() void {\n" ++
+      "    _ = wm_" ++ escapeIdent(name) ++ ".func.f(Value.initVoid());\n" ++
+      "}\n",
+    None =>
+      "pub fn main() void {}\n",
+  }
+
+let runtime = () =>
+  "const Value = union(enum) {\n" ++
+  "    int: i64,\n" ++
+  "    boolean: bool,\n" ++
+  "    string: []const u8,\n" ++
+  "    void_val: void,\n" ++
+  "    func: WmFunc,\n\n" ++
+  "    pub fn initInt(n: i64) Value { return .{ .int = n }; }\n" ++
+  "    pub fn initBool(b: bool) Value { return .{ .boolean = b }; }\n" ++
+  "    pub fn initString(s: []const u8) Value { return .{ .string = s }; }\n" ++
+  "    pub fn initVoid() Value { return .{ .void_val = {} }; }\n" ++
+  "    pub fn toBool(self: Value) bool {\n" ++
+  "        return switch (self) {\n" ++
+  "            .boolean => |b| b,\n" ++
+  "            .int => |n| n != 0,\n" ++
+  "            else => true,\n" ++
+  "        };\n" ++
+  "    }\n" ++
+  "};\n\n" ++
+  "const WmFunc = struct {\n" ++
+  "    f: *const fn (Value) Value,\n" ++
+  "    pub fn init(f: *const fn (Value) Value) Value { return .{ .func = .{ .f = f } }; }\n" ++
+  "    pub fn call(self: WmFunc, args: anytype) Value { return self.f(args[0]); }\n" ++
+  "};\n\n" ++
+  "const rt = struct {\n" ++
+  "    fn intAdd(a: Value, b: Value) Value { return Value.initInt(a.int + b.int); }\n" ++
+  "    fn intSub(a: Value, b: Value) Value { return Value.initInt(a.int - b.int); }\n" ++
+  "    fn intMul(a: Value, b: Value) Value { return Value.initInt(a.int * b.int); }\n" ++
+  "    fn intDiv(a: Value, b: Value) Value { return Value.initInt(@divTrunc(a.int, b.int)); }\n" ++
+  "    fn intEq(a: Value, b: Value) Value { return Value.initBool(a.int == b.int); }\n" ++
+  "    fn intNe(a: Value, b: Value) Value { return Value.initBool(a.int != b.int); }\n" ++
+  "    fn intLt(a: Value, b: Value) Value { return Value.initBool(a.int < b.int); }\n" ++
+  "    fn intGt(a: Value, b: Value) Value { return Value.initBool(a.int > b.int); }\n" ++
+  "    fn intLe(a: Value, b: Value) Value { return Value.initBool(a.int <= b.int); }\n" ++
+  "    fn intGe(a: Value, b: Value) Value { return Value.initBool(a.int >= b.int); }\n" ++
+  "    fn boolAnd(a: Value, b: Value) Value { return Value.initBool(a.toBool() and b.toBool()); }\n" ++
+  "    fn boolOr(a: Value, b: Value) Value { return Value.initBool(a.toBool() or b.toBool()); }\n" ++
+  "    fn boolNot(a: Value) Value { return Value.initBool(!a.toBool()); }\n" ++
+  "    fn print(v: Value) Value {\n" ++
+  "        switch (v) {\n" ++
+  "            .int => |n| std.debug.print(\"{d}\\n\", .{n}),\n" ++
+  "            .boolean => |b| std.debug.print(\"{s}\\n\", .{if (b) \"true\" else \"false\"}),\n" ++
+  "            .string => |s| std.debug.print(\"{s}\\n\", .{s}),\n" ++
+  "            .void_val => std.debug.print(\"void\\n\", .{}),\n" ++
+  "            .func => std.debug.print(\"<function>\\n\", .{}),\n" ++
+  "        }\n" ++
+  "        return Value.initVoid();\n" ++
+  "    }\n" ++
+  "    fn panic_wm(v: Value) Value {\n" ++
+  "        switch (v) {\n" ++
+  "            .string => |s| @panic(s),\n" ++
+  "            else => @panic(\"workman panic\"),\n" ++
+  "        }\n" ++
+  "    }\n" ++
+  "};\n\n"
+
+provide let emit = (mod: BackendIR.TModule) => {
+  let rt = runtime()
+  let bindings = emitTBindings(mod.bindings)
+  let mainFn = emitMain(mod.entry)
+  "const std = @import(\"std\");\n\n" ++
+  "// ── user code ────────────────────────────────────────\n\n" ++
+  bindings ++
+  "\n// ── runtime ─────────────────────────────────────────\n\n" ++
+  mainFn ++ "\n" ++ rt
+}

@@ -34,33 +34,55 @@ let freshLabel = () => {
   "__blk_" ++ toString(n)
 }
 
+let indent = (n) => {
+  let rec go = (i, acc) =>
+    if (i <= 0) { acc } else { go(i - 1, acc ++ "    ") }
+  go(n, "")
+}
+
 let rec emitExpr = (expr: BackendIR.Expr) =>
+  emitExprI(expr, 0)
+
+and emitExprI = (expr: BackendIR.Expr, depth: Number) =>
   match (expr) {
     BackendIR.Lit(lit) => emitLiteral(lit),
     BackendIR.Var(name) => escapeIdent(name),
-    BackendIR.Prim(op, args) => emitPrim(op, args),
+    BackendIR.Prim(op, args) => emitPrimI(op, args, depth),
     BackendIR.Call(callee, arg) =>
-      emitExpr(callee) ++ ".func.f(" ++ emitExpr(arg) ++ ")",
-    BackendIR.Lambda(param, body) =>
-      "WmFunc.init(struct { fn f(" ++ escapeIdent(param) ++
-      ": Value) Value { return " ++ emitExpr(body) ++
-      "; } }.f)",
+      emitExprI(callee, depth) ++ ".func.f(" ++ emitExprI(arg, depth) ++ ")",
+    BackendIR.Lambda(param, body) => {
+      let inner = depth + 1
+      let i = indent(inner)
+      let i0 = indent(depth)
+      "WmFunc.init(struct {\n" ++
+      i ++ "fn f(" ++ escapeIdent(param) ++ ": Value) Value {\n" ++
+      i ++ "    return " ++ emitExprI(body, inner + 1) ++ ";\n" ++
+      i ++ "}\n" ++
+      i0 ++ "}.f)"
+    },
     BackendIR.Let(name, value, body) => {
       let label = freshLabel()
+      let i = indent(depth)
       let binding = if (name == "_") {
-        "_ = " ++ emitExpr(value)
+        "_ = " ++ emitExprI(value, depth)
       } else {
-        "const " ++ escapeIdent(name) ++ " = " ++ emitExpr(value)
+        "const " ++ escapeIdent(name) ++ " = " ++ emitExprI(value, depth)
       }
-      label ++ ": { " ++ binding ++
-      "; break :" ++ label ++ " " ++ emitExpr(body) ++ "; }"
+      label ++ ": {\n" ++
+      i ++ "    " ++ binding ++ ";\n" ++
+      i ++ "    break :" ++ label ++ " " ++ emitExprI(body, depth) ++ ";\n" ++
+      i ++ "}"
     },
     BackendIR.If(cond, thenE, elseE) =>
-      "if (" ++ emitExpr(cond) ++ ".toBool()) " ++
-      emitExpr(thenE) ++ " else " ++ emitExpr(elseE),
+      "if (" ++ emitExprI(cond, depth) ++ ".toBool()) " ++
+      emitExprI(thenE, depth) ++ " else " ++ emitExprI(elseE, depth),
     BackendIR.Seq(first, second) => {
       let label = freshLabel()
-      label ++ ": { _ = " ++ emitExpr(first) ++ "; break :" ++ label ++ " " ++ emitExpr(second) ++ "; }"
+      let i = indent(depth)
+      label ++ ": {\n" ++
+      i ++ "    _ = " ++ emitExprI(first, depth) ++ ";\n" ++
+      i ++ "    break :" ++ label ++ " " ++ emitExprI(second, depth) ++ ";\n" ++
+      i ++ "}"
     },
   }
 
@@ -72,44 +94,44 @@ and emitLiteral = (lit: BackendIR.Literal) =>
     BackendIR.VoidLit => "Value.initVoid()",
   }
 
-and emitPrim = (op: BackendIR.PrimOp, args: List<BackendIR.Expr>) => {
+and emitPrimI = (op: BackendIR.PrimOp, args: List<BackendIR.Expr>, depth: Number) => {
   match (op) {
-    BackendIR.IntAdd => emitBinPrim("intAdd", args),
-    BackendIR.IntSub => emitBinPrim("intSub", args),
-    BackendIR.IntMul => emitBinPrim("intMul", args),
-    BackendIR.IntDiv => emitBinPrim("intDiv", args),
-    BackendIR.IntEq => emitBinPrim("intEq", args),
-    BackendIR.IntNe => emitBinPrim("intNe", args),
-    BackendIR.IntLt => emitBinPrim("intLt", args),
-    BackendIR.IntGt => emitBinPrim("intGt", args),
-    BackendIR.IntLe => emitBinPrim("intLe", args),
-    BackendIR.IntGe => emitBinPrim("intGe", args),
-    BackendIR.BoolAnd => emitBinPrim("boolAnd", args),
-    BackendIR.BoolOr => emitBinPrim("boolOr", args),
+    BackendIR.IntAdd => emitBinPrimI("intAdd", args, depth),
+    BackendIR.IntSub => emitBinPrimI("intSub", args, depth),
+    BackendIR.IntMul => emitBinPrimI("intMul", args, depth),
+    BackendIR.IntDiv => emitBinPrimI("intDiv", args, depth),
+    BackendIR.IntEq => emitBinPrimI("intEq", args, depth),
+    BackendIR.IntNe => emitBinPrimI("intNe", args, depth),
+    BackendIR.IntLt => emitBinPrimI("intLt", args, depth),
+    BackendIR.IntGt => emitBinPrimI("intGt", args, depth),
+    BackendIR.IntLe => emitBinPrimI("intLe", args, depth),
+    BackendIR.IntGe => emitBinPrimI("intGe", args, depth),
+    BackendIR.BoolAnd => emitBinPrimI("boolAnd", args, depth),
+    BackendIR.BoolOr => emitBinPrimI("boolOr", args, depth),
     BackendIR.BoolNot => {
       match (args) {
-        [a] => "rt.boolNot(" ++ emitExpr(a) ++ ")",
+        [a] => "rt.boolNot(" ++ emitExprI(a, depth) ++ ")",
         _ => "rt.boolNot(Value.initVoid())",
       }
     },
     BackendIR.Print => {
       match (args) {
-        [a] => "rt.print(" ++ emitExpr(a) ++ ")",
+        [a] => "rt.print(" ++ emitExprI(a, depth) ++ ")",
         _ => "rt.print(Value.initVoid())",
       }
     },
     BackendIR.Panic => {
       match (args) {
-        [a] => "rt.panic_wm(" ++ emitExpr(a) ++ ")",
+        [a] => "rt.panic_wm(" ++ emitExprI(a, depth) ++ ")",
         _ => "rt.panic_wm(Value.initVoid())",
       }
     },
   }
 }
 
-and emitBinPrim = (fnName: String, args: List<BackendIR.Expr>) =>
+and emitBinPrimI = (fnName: String, args: List<BackendIR.Expr>, depth: Number) =>
   match (args) {
-    [a, b] => "rt." ++ fnName ++ "(" ++ emitExpr(a) ++ ", " ++ emitExpr(b) ++ ")",
+    [a, b] => "rt." ++ fnName ++ "(" ++ emitExprI(a, depth) ++ ", " ++ emitExprI(b, depth) ++ ")",
     _ => "rt." ++ fnName ++ "(Value.initVoid(), Value.initVoid())",
   }
 
@@ -123,7 +145,6 @@ let rec emitBindings = (bindings: List<BackendIR.ValueBinding>) =>
   }
 
 let runtime = () =>
-  "const std = @import(\"std\");\n\n" ++
   "const Value = union(enum) {\n" ++
   "    int: i64,\n" ++
   "    boolean: bool,\n" ++
@@ -193,5 +214,6 @@ provide let emit = (mod: BackendIR.Module) => {
   let rt = runtime()
   let bindings = emitBindings(mod.bindings)
   let mainFn = emitMain(mod.entry)
-  rt ++ bindings ++ mainFn
+  "const std = @import(\"std\");\n\n" ++
+  bindings ++ "\n" ++ mainFn ++ "\n" ++ rt
 }
