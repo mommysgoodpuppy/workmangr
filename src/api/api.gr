@@ -74,18 +74,31 @@ let tokenToJson = (tok: Lexer.Token) => {
     Lexer.EOF => "EOF",
   }
   let kindStr = Lexer.tokenKindToString(tok.kind)
-  let spanJson = "{\"line\":" ++ toString(tok.span.line) ++ 
-                 ",\"col\":" ++ toString(tok.span.col) ++ 
-                 ",\"start\":" ++ toString(tok.span.start) ++ 
-                 ",\"end\":" ++ toString(tok.span.end) ++ "}"
+  let spanJson = "{\"line\":"
+    ++ toString(tok.span.line)
+    ++ ",\"col\":"
+    ++ toString(tok.span.col)
+    ++ ",\"start\":"
+    ++ toString(tok.span.start)
+    ++ ",\"end\":"
+    ++ toString(tok.span.end)
+    ++ "}"
   let mateJson = match (tok.mate) {
     None => "null",
     Some(m) => toString(m),
   }
-  "{\"kind\":\"" ++ escapeJson(kindName) ++ "\"," ++
-  "\"text\":\"" ++ escapeJson(kindStr) ++ "\"," ++
-  "\"span\":" ++ spanJson ++ "," ++
-  "\"mate\":" ++ mateJson ++ "}"
+  "{\"kind\":\""
+    ++ escapeJson(kindName)
+    ++ "\","
+    ++ "\"text\":\""
+    ++ escapeJson(kindStr)
+    ++ "\","
+    ++ "\"span\":"
+    ++ spanJson
+    ++ ","
+    ++ "\"mate\":"
+    ++ mateJson
+    ++ "}"
 }
 
 let expectedTopItemKindToString = (kind: SurfaceAst.ExpectedTopItemKind) => {
@@ -103,7 +116,8 @@ let expectedTopItemKindToString = (kind: SurfaceAst.ExpectedTopItemKind) => {
 
 let expectedKindToString = (kind: SurfaceAst.ExpectedKind) => {
   match (kind) {
-    SurfaceAst.ExpectTopItem(tk) => "TopItem(" ++ expectedTopItemKindToString(tk) ++ ")",
+    SurfaceAst.ExpectTopItem(tk) =>
+      "TopItem(" ++ expectedTopItemKindToString(tk) ++ ")",
     SurfaceAst.ExpectExpr => "Expr",
     SurfaceAst.ExpectPattern => "Pattern",
     SurfaceAst.ExpectTypeExpr => "TypeExpr",
@@ -116,7 +130,7 @@ let rec joinStrings = (sep: String, items: List<String>) => {
   match (items) {
     [] => "",
     [single] => single,
-    [first, ...rest] => first ++ sep ++ joinStrings(sep, rest)
+    [first, ...rest] => first ++ sep ++ joinStrings(sep, rest),
   }
 }
 
@@ -150,9 +164,9 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Hole(_) => "Hole",
       SurfaceAst.If(_, _, _) => "If",
       SurfaceAst.Let(_, _) => "Let",
-      SurfaceAst.Assign(_) => "Assign"
+      SurfaceAst.Assign(_) => "Assign",
     }
-    
+
     let childrenJson = match (expr.kind) {
       SurfaceAst.Block(block) => {
         let bodyJson = exprToJson(block.body, depth + 1)
@@ -160,16 +174,20 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       },
       SurfaceAst.Fn(fnExpr) => {
         let clauseBodies = List.filterMap(
-          (item: SurfaceAst.FnItem) =>
-            match (item.kind) {
-              SurfaceAst.Clause(clause) => Some(
+          (item: SurfaceAst.FnItem) => match (item.kind) {
+            SurfaceAst.Clause(clause) =>
+              Some(
                 exprToJson(
-                  { node: clause.body.node, kind: SurfaceAst.Block(clause.body), attach: clause.attach },
-                  depth + 1,
+                  {
+                    node: clause.body.node,
+                    kind: SurfaceAst.Block(clause.body),
+                    attach: clause.attach,
+                  },
+                  depth + 1
                 ),
               ),
-              _ => None,
-            },
+            _ => None,
+          },
           fnExpr.items
         )
         ",\"children\":[" ++ joinStrings(",", clauseBodies) ++ "]"
@@ -180,16 +198,20 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
           Some(s) => [exprToJson(s, depth + 1)],
         }
         let clauseBodies = List.filterMap(
-          (item: SurfaceAst.FnItem) =>
-            match (item.kind) {
-              SurfaceAst.Clause(clause) => Some(
+          (item: SurfaceAst.FnItem) => match (item.kind) {
+            SurfaceAst.Clause(clause) =>
+              Some(
                 exprToJson(
-                  { node: clause.body.node, kind: SurfaceAst.Block(clause.body), attach: clause.attach },
-                  depth + 1,
+                  {
+                    node: clause.body.node,
+                    kind: SurfaceAst.Block(clause.body),
+                    attach: clause.attach,
+                  },
+                  depth + 1
                 ),
               ),
-              _ => None,
-            },
+            _ => None,
+          },
           m.bundle.items
         )
         let allChildren = List.append(scrutineeJson, clauseBodies)
@@ -210,18 +232,22 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
         let bodyJson = exprToJson(body, depth + 1)
         ",\"children\":[" ++ valueJson ++ "," ++ bodyJson ++ "]"
       },
-      SurfaceAst.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
+      SurfaceAst.Paren(inner) =>
+        ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
       SurfaceAst.Tuple(exprs) => {
-        let tupleExprs = List.map((e) => exprToJson(e, depth + 1), exprs)
+        let tupleExprs = List.map(e => exprToJson(e, depth + 1), exprs)
         ",\"children\":[" ++ joinStrings(",", tupleExprs) ++ "]"
       },
       SurfaceAst.Seq(exprs) => {
-        let seqExprs = List.map((e) => exprToJson(e, depth + 1), exprs)
+        let seqExprs = List.map(e => exprToJson(e, depth + 1), exprs)
         ",\"children\":[" ++ joinStrings(",", seqExprs) ++ "]"
       },
       SurfaceAst.InfixChain(chain) => {
         let firstJson = exprToJson(chain.first, depth + 1)
-        let restJsons = List.map(((_, e)) => exprToJson(e, depth + 1), chain.rest)
+        let restJsons = List.map(
+          ((_, e)) => exprToJson(e, depth + 1),
+          chain.rest
+        )
         let allExprs = [firstJson, ...restJsons]
         ",\"children\":[" ++ joinStrings(",", allExprs) ++ "]"
       },
@@ -230,18 +256,31 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
         let thenJson = exprToJson(thenE, depth + 1)
         let elseJson = match (elseE) {
           Some(e) => exprToJson(e, depth + 1),
-          None => "null"
+          None => "null",
         }
-        ",\"children\":[" ++ condJson ++ "," ++ thenJson ++ "," ++ elseJson ++ "]"
+        ",\"children\":["
+          ++ condJson
+          ++ ","
+          ++ thenJson
+          ++ ","
+          ++ elseJson
+          ++ "]"
       },
-      _ => ""
+      _ => "",
     }
-    
-    "{\"id\":" ++ toString(expr.node.id) ++ 
-    ",\"kind\":\"" ++ escapeJson(kindName) ++ "\"" ++ 
-    ",\"span\":{\"start\":" ++ toString(expr.node.span.start) ++ 
-    ",\"end\":" ++ toString(expr.node.span.end) ++ "}" ++
-    childrenJson ++ "}"
+
+    "{\"id\":"
+      ++ toString(expr.node.id)
+      ++ ",\"kind\":\""
+      ++ escapeJson(kindName)
+      ++ "\""
+      ++ ",\"span\":{\"start\":"
+      ++ toString(expr.node.span.start)
+      ++ ",\"end\":"
+      ++ toString(expr.node.span.end)
+      ++ "}"
+      ++ childrenJson
+      ++ "}"
   }
 }
 
@@ -253,50 +292,75 @@ let topItemToJson = (item: SurfaceAst.TopItem) => {
         SurfaceAst.TypeGroup(_) => "TypeGroup",
         SurfaceAst.RecordGroup(_) => "RecordGroup",
         SurfaceAst.OpGroup => "OpGroup",
-        SurfaceAst.RuleGroup(_) => "RuleGroup"
+        SurfaceAst.RuleGroup(_) => "RuleGroup",
       }
-      
+
       // Serialize declarations with their bindings and expressions
       let declsJson = match (dg.kind) {
         SurfaceAst.LetGroup(_) => {
-          let declStrs = List.map((decl) => {
+          let declStrs = List.map(decl => {
             match (decl) {
               SurfaceAst.LetDecl(ld) => {
-                let bindingStrs = List.map((b: SurfaceAst.LetBinding) => {
-                  let valueJson = exprToJson(b.value, 0)
-                  "{\"kind\":\"LetBinding\",\"id\":" ++ toString(b.node.id) ++ 
-                  ",\"span\":{\"start\":" ++ toString(b.node.span.start) ++ 
-                  ",\"end\":" ++ toString(b.node.span.end) ++ "},\"value\":" ++ valueJson ++ "}"
-                }, ld.bindings)
-                "{\"kind\":\"LetDecl\",\"bindings\":[" ++ joinStrings(",", bindingStrs) ++ "]}"
+                let bindingStrs = List.map(
+                  (b: SurfaceAst.LetBinding) => {
+                    let valueJson = exprToJson(b.value, 0)
+                    "{\"kind\":\"LetBinding\",\"id\":"
+                      ++ toString(b.node.id)
+                      ++ ",\"span\":{\"start\":"
+                      ++ toString(b.node.span.start)
+                      ++ ",\"end\":"
+                      ++ toString(b.node.span.end)
+                      ++ "},\"value\":"
+                      ++ valueJson
+                      ++ "}"
+                  },
+                  ld.bindings
+                )
+                "{\"kind\":\"LetDecl\",\"bindings\":["
+                  ++ joinStrings(",", bindingStrs)
+                  ++ "]}"
               },
-              _ => "{}"
+              _ => "{}",
             }
           }, dg.decls)
           ",\"decls\":[" ++ joinStrings(",", declStrs) ++ "]"
         },
         SurfaceAst.TypeGroup(_) | SurfaceAst.RecordGroup(_) => {
-          let declStrs = List.map((decl) => {
+          let declStrs = List.map(decl => {
             match (decl) {
-              SurfaceAst.TypeDecl(td) => 
-                "{\"kind\":\"TypeDecl\",\"id\":" ++ toString(td.node.id) ++ 
-                ",\"span\":{\"start\":" ++ toString(td.node.span.start) ++ 
-                ",\"end\":" ++ toString(td.node.span.end) ++ 
-                "},\"name\":\"" ++ escapeJson(td.name.text) ++ "\"}",
-              SurfaceAst.RecordDecl(rd) => 
-                "{\"kind\":\"RecordDecl\",\"id\":" ++ toString(rd.node.id) ++ 
-                ",\"span\":{\"start\":" ++ toString(rd.node.span.start) ++ 
-                ",\"end\":" ++ toString(rd.node.span.end) ++ 
-                "},\"name\":\"" ++ escapeJson(rd.name.text) ++ "\"}",
-              _ => "{}"
+              SurfaceAst.TypeDecl(td) =>
+                "{\"kind\":\"TypeDecl\",\"id\":"
+                  ++ toString(td.node.id)
+                  ++ ",\"span\":{\"start\":"
+                  ++ toString(td.node.span.start)
+                  ++ ",\"end\":"
+                  ++ toString(td.node.span.end)
+                  ++ "},\"name\":\""
+                  ++ escapeJson(td.name.text)
+                  ++ "\"}",
+              SurfaceAst.RecordDecl(rd) =>
+                "{\"kind\":\"RecordDecl\",\"id\":"
+                  ++ toString(rd.node.id)
+                  ++ ",\"span\":{\"start\":"
+                  ++ toString(rd.node.span.start)
+                  ++ ",\"end\":"
+                  ++ toString(rd.node.span.end)
+                  ++ "},\"name\":\""
+                  ++ escapeJson(rd.name.text)
+                  ++ "\"}",
+              _ => "{}",
             }
           }, dg.decls)
           ",\"decls\":[" ++ joinStrings(",", declStrs) ++ "]"
         },
-        _ => ""
+        _ => "",
       }
-      
-      "{\"type\":\"DeclGroup\",\"kind\":\"" ++ kindStr ++ "\"" ++ declsJson ++ "}"
+
+      "{\"type\":\"DeclGroup\",\"kind\":\""
+        ++ kindStr
+        ++ "\""
+        ++ declsJson
+        ++ "}"
     },
     SurfaceAst.Mark(mark) => {
       let (kindStr, text) = match (mark.kind) {
@@ -304,87 +368,120 @@ let topItemToJson = (item: SurfaceAst.TopItem) => {
         SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
         SurfaceAst.MissingSemicolon => ("MissingSemicolon", ""),
         SurfaceAst.MissingRBrace => ("MissingRBrace", ""),
+        SurfaceAst.MissingToken(raw) => ("MissingToken", raw),
+        SurfaceAst.MissingExpr(raw) => ("MissingExpr", raw),
+        SurfaceAst.MissingPattern(raw) => ("MissingPattern", raw),
+        SurfaceAst.MissingTypeExpr(raw) => ("MissingTypeExpr", raw),
+        SurfaceAst.MissingBlock(raw) => ("MissingBlock", raw),
+        SurfaceAst.FormattingMismatch(raw) => ("FormattingMismatch", raw),
+        SurfaceAst.UnexpectedToken(raw) => ("UnexpectedToken", raw),
       }
-      "{\"type\":\"Mark\",\"kind\":\"" ++ kindStr ++ "\",\"text\":\""
-      ++ escapeJson(text) ++ "\",\"expected\":\""
-      ++ expectedKindToString(mark.expected) ++ "\"}"
+      "{\"type\":\"Mark\",\"kind\":\""
+        ++ kindStr
+        ++ "\",\"text\":\""
+        ++ escapeJson(text)
+        ++ "\",\"expected\":\""
+        ++ expectedKindToString(mark.expected)
+        ++ "\"}"
     },
-    _ => "{\"type\":\"Other\"}"
+    _ => "{\"type\":\"Other\"}",
   }
 }
 
 let programToJson = (program: SurfaceAst.Program) => {
   let items = List.map(topItemToJson, program.items)
   let itemsJson = "[" ++ joinStrings(",", items) ++ "]"
-  "{\"core\":" ++ (if (program.core) { "true" } else { "false" }) ++ 
-  ",\"items\":" ++ itemsJson ++ "}"
+  "{\"core\":"
+    ++ (if (program.core) {
+      "true"
+    } else {
+      "false"
+    })
+    ++ ",\"items\":"
+    ++ itemsJson
+    ++ "}"
 }
 
 let nodeTypesToJson = (nodeTypes: Map.Map<Number, Types.Type>) => {
   let pairs = Map.toList(nodeTypes)
-  let items = List.map(
-    ((id, ty)) => {
-      let typeStr = Types.typeToString(ty)
-      "{\"id\":" ++ toString(id) ++ ",\"type\":\"" ++ escapeJson(typeStr) ++ "\"}"
-    },
-    pairs
-  )
+  let items = List.map(((id, ty)) => {
+    let typeStr = Types.typeToString(ty)
+    "{\"id\":" ++ toString(id) ++ ",\"type\":\"" ++ escapeJson(typeStr) ++ "\"}"
+  }, pairs)
   "[" ++ joinStrings(",", items) ++ "]"
 }
 
 let topBindingsToJson = (bindings: Map.Map<String, Types.Scheme>) => {
   let pairs = Map.toList(bindings)
-  let items = List.map(
-    ((name, _scheme)) => {
-      "{\"name\":\"" ++ escapeJson(name) ++ "\",\"type\":\"<inferred>\"}"
-    },
-    pairs
-  )
+  let items = List.map(((name, _scheme)) => {
+    "{\"name\":\"" ++ escapeJson(name) ++ "\",\"type\":\"<inferred>\"}"
+  }, pairs)
   "[" ++ joinStrings(",", items) ++ "]"
 }
 
 let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
-  "{\"kind\":\"" ++ escapeJson(artifact.kind) ++ "\"," ++
-  "\"text\":\"" ++ escapeJson(artifact.text) ++ "\"," ++
-  "\"start\":" ++ toString(artifact.start) ++ "," ++
-  "\"end\":" ++ toString(artifact.end) ++ "," ++
-  "\"reason\":\"" ++ escapeJson(artifact.reason) ++ "\"}"
+  "{\"kind\":\""
+    ++ escapeJson(artifact.kind)
+    ++ "\","
+    ++ "\"text\":\""
+    ++ escapeJson(artifact.text)
+    ++ "\","
+    ++ "\"start\":"
+    ++ toString(artifact.start)
+    ++ ","
+    ++ "\"end\":"
+    ++ toString(artifact.end)
+    ++ ","
+    ++ "\"reason\":\""
+    ++ escapeJson(artifact.reason)
+    ++ "\"}"
 }
 
 let virtualArtifactsToJson = (artifacts: List<Formatter.VirtualArtifact>) =>
   "[" ++ joinStrings(",", List.map(virtualArtifactToJson, artifacts)) ++ "]"
 
-let errorClueToJson = (clue: Error.ErrorClue) =>
-  match (clue) {
-    Error.Expected(text) =>
-      "{\"kind\":\"Expected\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
-    Error.Received(text) =>
-      "{\"kind\":\"Received\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
-    Error.Incomplete(text) =>
-      "{\"kind\":\"Incomplete\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
-    Error.Note(text) =>
-      "{\"kind\":\"Note\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
-    Error.Hint(text) =>
-      "{\"kind\":\"Hint\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
-  }
+let errorClueToJson = (clue: Error.ErrorClue) => match (clue) {
+  Error.Expected(text) =>
+    "{\"kind\":\"Expected\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
+  Error.Received(text) =>
+    "{\"kind\":\"Received\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
+  Error.Incomplete(text) =>
+    "{\"kind\":\"Incomplete\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
+  Error.Note(text) =>
+    "{\"kind\":\"Note\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
+  Error.Hint(text) =>
+    "{\"kind\":\"Hint\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
+}
 
-let errorStageToString = (stage: Error.Stage) =>
-  match (stage) {
-    Error.Lexing => "Lexing",
-    Error.Parsing => "Parsing",
-    Error.Lowering => "Lowering",
-    Error.TypeInference => "TypeInference",
-  }
+let errorStageToString = (stage: Error.Stage) => match (stage) {
+  Error.Lexing => "Lexing",
+  Error.Parsing => "Parsing",
+  Error.Lowering => "Lowering",
+  Error.TypeInference => "TypeInference",
+}
 
 let compilerErrorToJson = (err: Error.CompilerError) => {
-  let clues = "[" ++ joinStrings(",", List.map(errorClueToJson, err.clues)) ++ "]"
-  "{\"stage\":\"" ++ errorStageToString(err.stage) ++ "\"," ++
-  "\"message\":\"" ++ escapeJson(err.message) ++ "\"," ++
-  "\"span\":{\"line\":" ++ toString(err.span.line) ++
-  ",\"col\":" ++ toString(err.span.col) ++
-  ",\"start\":" ++ toString(err.span.start) ++
-  ",\"end\":" ++ toString(err.span.end) ++ "}," ++
-  "\"clues\":" ++ clues ++ "}"
+  let clues = "["
+    ++ joinStrings(",", List.map(errorClueToJson, err.clues))
+    ++ "]"
+  "{\"stage\":\""
+    ++ errorStageToString(err.stage)
+    ++ "\","
+    ++ "\"message\":\""
+    ++ escapeJson(err.message)
+    ++ "\","
+    ++ "\"span\":{\"line\":"
+    ++ toString(err.span.line)
+    ++ ",\"col\":"
+    ++ toString(err.span.col)
+    ++ ",\"start\":"
+    ++ toString(err.span.start)
+    ++ ",\"end\":"
+    ++ toString(err.span.end)
+    ++ "},"
+    ++ "\"clues\":"
+    ++ clues
+    ++ "}"
 }
 
 let markToJson = (mark: SurfaceAst.Mark) => {
@@ -401,55 +498,97 @@ let markToJson = (mark: SurfaceAst.Mark) => {
     SurfaceAst.FormattingMismatch(raw) => ("FormattingMismatch", raw),
     SurfaceAst.UnexpectedToken(raw) => ("UnexpectedToken", raw),
   }
-  "{\"kind\":\"" ++ kind ++ "\"," ++
-  "\"text\":\"" ++ escapeJson(text) ++ "\"," ++
-  "\"expected\":\"" ++ expectedKindToString(mark.expected) ++ "\"," ++
-  "\"span\":{\"line\":" ++ toString(mark.node.span.line) ++
-  ",\"col\":" ++ toString(mark.node.span.col) ++
-  ",\"start\":" ++ toString(mark.node.span.start) ++
-  ",\"end\":" ++ toString(mark.node.span.end) ++ "}}"
+  "{\"kind\":\""
+    ++ kind
+    ++ "\","
+    ++ "\"text\":\""
+    ++ escapeJson(text)
+    ++ "\","
+    ++ "\"expected\":\""
+    ++ expectedKindToString(mark.expected)
+    ++ "\","
+    ++ "\"span\":{\"line\":"
+    ++ toString(mark.node.span.line)
+    ++ ",\"col\":"
+    ++ toString(mark.node.span.col)
+    ++ ",\"start\":"
+    ++ toString(mark.node.span.start)
+    ++ ",\"end\":"
+    ++ toString(mark.node.span.end)
+    ++ "}}"
 }
 
 let markedErrorToJson = (entry: Error.MarkedError) => {
-  "{\"mark\":" ++ markToJson(entry.mark) ++
-  ",\"diagnostic\":" ++ compilerErrorToJson(entry.error) ++ "}"
+  "{\"mark\":"
+    ++ markToJson(entry.mark)
+    ++ ",\"diagnostic\":"
+    ++ compilerErrorToJson(entry.error)
+    ++ "}"
 }
 
-let topLevelMarkToJson = (item: SurfaceAst.TopItem) =>
-  match (item) {
-    SurfaceAst.Mark(mark) => {
-      let (kind, text) = match (mark.kind) {
-        SurfaceAst.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
-        SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
-      }
-      Some(
-        "{\"kind\":\"" ++ kind ++ "\"," ++
-        "\"text\":\"" ++ escapeJson(text) ++ "\"," ++
-        "\"expected\":\"" ++ expectedKindToString(mark.expected) ++ "\"," ++
-        "\"span\":{\"line\":" ++ toString(mark.node.span.line) ++
-        ",\"col\":" ++ toString(mark.node.span.col) ++
-        ",\"start\":" ++ toString(mark.node.span.start) ++
-        ",\"end\":" ++ toString(mark.node.span.end) ++ "}}",
-      )
-    },
-    _ => None,
-  }
+let topLevelMarkToJson = (item: SurfaceAst.TopItem) => match (item) {
+  SurfaceAst.Mark(mark) => {
+    let (kind, text) = match (mark.kind) {
+      SurfaceAst.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
+      SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
+      SurfaceAst.MissingSemicolon => ("MissingSemicolon", ""),
+      SurfaceAst.MissingRBrace => ("MissingRBrace", ""),
+      SurfaceAst.MissingToken(raw) => ("MissingToken", raw),
+      SurfaceAst.MissingExpr(raw) => ("MissingExpr", raw),
+      SurfaceAst.MissingPattern(raw) => ("MissingPattern", raw),
+      SurfaceAst.MissingTypeExpr(raw) => ("MissingTypeExpr", raw),
+      SurfaceAst.MissingBlock(raw) => ("MissingBlock", raw),
+      SurfaceAst.FormattingMismatch(raw) => ("FormattingMismatch", raw),
+      SurfaceAst.UnexpectedToken(raw) => ("UnexpectedToken", raw),
+    }
+    Some(
+      "{\"kind\":\""
+        ++ kind
+        ++ "\","
+        ++ "\"text\":\""
+        ++ escapeJson(text)
+        ++ "\","
+        ++ "\"expected\":\""
+        ++ expectedKindToString(mark.expected)
+        ++ "\","
+        ++ "\"span\":{\"line\":"
+        ++ toString(mark.node.span.line)
+        ++ ",\"col\":"
+        ++ toString(mark.node.span.col)
+        ++ ",\"start\":"
+        ++ toString(mark.node.span.start)
+        ++ ",\"end\":"
+        ++ toString(mark.node.span.end)
+        ++ "}}",
+    )
+  },
+  _ => None,
+}
 
 let markBundleToJson = (
   parseResult: Parser.ParseResult,
   diagnostics: List<Error.CompilerError>,
   marked: List<Error.MarkedError>,
 ) => {
-  let topLevel = "[" ++
-    joinStrings(
+  let topLevel = "["
+    ++ joinStrings(
       ",",
-      List.filterMap(topLevelMarkToJson, parseResult.program.items),
-    ) ++ "]"
-  let diag = "[" ++ joinStrings(",", List.map(compilerErrorToJson, diagnostics)) ++ "]"
-  let markedJson = "[" ++ joinStrings(",", List.map(markedErrorToJson, marked)) ++ "]"
-  "{\"topLevel\":" ++ topLevel ++
-  ",\"diagnostics\":" ++ diag ++
-  ",\"entries\":" ++ markedJson ++ "}"
+      List.filterMap(topLevelMarkToJson, parseResult.program.items)
+    )
+    ++ "]"
+  let diag = "["
+    ++ joinStrings(",", List.map(compilerErrorToJson, diagnostics))
+    ++ "]"
+  let markedJson = "["
+    ++ joinStrings(",", List.map(markedErrorToJson, marked))
+    ++ "]"
+  "{\"topLevel\":"
+    ++ topLevel
+    ++ ",\"diagnostics\":"
+    ++ diag
+    ++ ",\"entries\":"
+    ++ markedJson
+    ++ "}"
 }
 
 // Global store for the last compilation (for querying nodes by ID)
@@ -462,15 +601,15 @@ provide let compileToJson = (source: String) => {
   // Tokenize
   let tokens = Lexer.lex(source)
   let tokensJson = "[" ++ joinStrings(",", List.map(tokenToJson, tokens)) ++ "]"
-  
+
   // Parse
   let parseResult = Parser.parseResult(source)
   let parsed = parseResult.program
-  
+
   // Index the parsed (surface) AST into a NodeStore
   let surfaceStore = Indexer.indexProgram(parsed)
   let surfaceStoreJson = NS.storeToJson(surfaceStore)
-  
+
   // Lower
   let lowered = Lower.lowerProgram(parsed)
   let diagnostics = Error.getErrors()
@@ -479,7 +618,7 @@ provide let compileToJson = (source: String) => {
   let formattedResult = Formatter.formatResultWithProgramMode(
     parsed,
     source,
-    Formatter.Real,
+    Formatter.Real
   )
   let formatterDiagnostics = Error.getErrors()
   let formatterMarkedDiagnostics = Error.getMarkedErrors()
@@ -487,50 +626,75 @@ provide let compileToJson = (source: String) => {
   let virtualResult = Formatter.formatResultWithProgramMode(
     parsed,
     source,
-    Formatter.Virtual,
+    Formatter.Virtual
   )
   let virtualDiagnostics = Error.getErrors()
   let virtualMarkedDiagnostics = Error.getMarkedErrors()
   Error.clearErrors()
-  let fixResult = Formatter.formatResultWithProgramMode(parsed, source, Formatter.Fix)
+  let fixResult = Formatter.formatResultWithProgramMode(
+    parsed,
+    source,
+    Formatter.Fix
+  )
   let fixDiagnostics = Error.getErrors()
   let fixMarkedDiagnostics = Error.getMarkedErrors()
   Error.clearErrors()
-  let formattedTokens =
-    "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(formattedResult.text))) ++ "]"
-  let virtualTokens =
-    "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(virtualResult.text))) ++ "]"
-  let fixTokens =
-    "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(fixResult.text))) ++ "]"
-  
+  let formattedTokens = "["
+    ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(formattedResult.text)))
+    ++ "]"
+  let virtualTokens = "["
+    ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(virtualResult.text)))
+    ++ "]"
+  let fixTokens = "["
+    ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(fixResult.text)))
+    ++ "]"
+
   // Index the lowered AST into a NodeStore
   let loweredStore = CoreIndexer.indexProgram(lowered)
   lastStore = Some(loweredStore)
   let loweredStoreJson = NS.storeToJson(loweredStore)
   let allDiagnostics = List.append(
     diagnostics,
-    List.append(formatterDiagnostics, List.append(virtualDiagnostics, fixDiagnostics)),
+    List.append(
+      formatterDiagnostics,
+      List.append(virtualDiagnostics, fixDiagnostics)
+    )
   )
   let allMarked = List.append(
     markedDiagnostics,
     List.append(
       formatterMarkedDiagnostics,
-      List.append(virtualMarkedDiagnostics, fixMarkedDiagnostics),
-    ),
+      List.append(virtualMarkedDiagnostics, fixMarkedDiagnostics)
+    )
   )
   let marksJson = markBundleToJson(parseResult, allDiagnostics, allMarked)
-  
-  "{\"tokens\":" ++ tokensJson ++
-  ",\"surfaceNodeStore\":" ++ surfaceStoreJson ++
-  ",\"loweredNodeStore\":" ++ loweredStoreJson ++
-  ",\"marks\":" ++ marksJson ++
-  ",\"formatted\":\"" ++ escapeJson(formattedResult.text) ++ "\"" ++
-  ",\"formattedTokens\":" ++ formattedTokens ++
-  ",\"formattedVirtual\":\"" ++ escapeJson(virtualResult.text) ++ "\"" ++
-  ",\"formattedVirtualTokens\":" ++ virtualTokens ++
-  ",\"formattedFix\":\"" ++ escapeJson(fixResult.text) ++ "\"" ++
-  ",\"formattedFixTokens\":" ++ fixTokens ++
-  ",\"formattedVirtualArtifacts\":" ++ virtualArtifactsToJson(virtualResult.virtualArtifacts) ++ "}"
+
+  "{\"tokens\":"
+    ++ tokensJson
+    ++ ",\"surfaceNodeStore\":"
+    ++ surfaceStoreJson
+    ++ ",\"loweredNodeStore\":"
+    ++ loweredStoreJson
+    ++ ",\"marks\":"
+    ++ marksJson
+    ++ ",\"formatted\":\""
+    ++ escapeJson(formattedResult.text)
+    ++ "\""
+    ++ ",\"formattedTokens\":"
+    ++ formattedTokens
+    ++ ",\"formattedVirtual\":\""
+    ++ escapeJson(virtualResult.text)
+    ++ "\""
+    ++ ",\"formattedVirtualTokens\":"
+    ++ virtualTokens
+    ++ ",\"formattedFix\":\""
+    ++ escapeJson(fixResult.text)
+    ++ "\""
+    ++ ",\"formattedFixTokens\":"
+    ++ fixTokens
+    ++ ",\"formattedVirtualArtifacts\":"
+    ++ virtualArtifactsToJson(virtualResult.virtualArtifacts)
+    ++ "}"
 }
 
 // Query a node by ID from the last compilation
@@ -540,9 +704,9 @@ provide let getNodeJson = (id: Number) => {
     Some(store) => {
       match (NS.getNode(store, id)) {
         None => "{\"error\":\"Node not found\"}",
-        Some(node) => NS.nodeInfoToJson(node)
+        Some(node) => NS.nodeInfoToJson(node),
       }
-    }
+    },
   }
 }
 
@@ -552,15 +716,22 @@ let main = () => {
     Ok(args) => {
       let argCount = Array.length(args)
       if (argCount < 2) {
-        print("{\"success\":false,\"error\":\"Usage: grain --include-dirs src src/api/api.gr -- <file.wm>\"}")
+        print(
+          "{\"success\":false,\"error\":\"Usage: grain --include-dirs src src/api/api.gr -- <file.wm>\"}"
+        )
       } else {
         let filePath = Array.get(1, args)
         match (Fs.Utf8.readFile(Path.fromString(filePath))) {
-          Err(_) => print("{\"success\":false,\"error\":\"Failed to read file: " ++ escapeJson(filePath) ++ "\"}"),
-          Ok(source) => print(compileToJson(source))
+          Err(_) =>
+            print(
+              "{\"success\":false,\"error\":\"Failed to read file: "
+                ++ escapeJson(filePath)
+                ++ "\"}"
+            ),
+          Ok(source) => print(compileToJson(source)),
         }
       }
-    }
+    },
   }
 }
 
