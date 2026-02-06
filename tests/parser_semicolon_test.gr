@@ -1,21 +1,18 @@
-module TestParserSemicolon
+module ParserSemicolonTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
 
 from "list" include List
-from "runtime/unsafe/panic" include Panic
-use Panic.{ panic }
-from "../core/surface_ast.gr" include SurfaceAst
+from "../src/core/surface_ast.gr" include SurfaceAst
 use SurfaceAst.*
-from "./parser.gr" include Parser
+from "../src/core/error.gr" include Error
+use Error.{ clearErrors, getMarkedErrors }
+from "../src/frontend/parser.gr" include Parser
 
-let assertOk = (cond: Bool, message: String) => {
-  if (!cond) {
-    panic(message)
-  } else {
-    void
-  }
-}
+setSourceFile("./tests/parser_semicolon_test.gr")
 
-let main = () => {
+test("parser semicolon mark smoke", () => {
   let source = "let a = 1\nlet b = 2;"
   let _ = Parser.parseResult(source)
 
@@ -31,6 +28,24 @@ let main = () => {
   let _ = Parser.parseResult("let x = { let y = 1;")
   let _ = Parser.parseResult("oops ; let ok = 1;")
 
+  clearErrors()
+  let _ = Parser.parseResult("let main = => {}")
+  let marked = getMarkedErrors()
+  let hasMissingTopLevelSemi = List.some(
+    (entry: Error.MarkedError) => match (entry) {
+      { mark, _ } => match (mark.kind) {
+        SurfaceAst.MissingSemicolon => true,
+        _ => false,
+      },
+    },
+    marked,
+  )
+  assertTrue(
+    hasMissingTopLevelSemi,
+  )
+})
+
+test("parser folds block body into let", () => {
   let foldedSource = "let x = { let y = 1; y };"
   let foldedProgram = Parser.parse(foldedSource)
   let foldedOk = match (foldedProgram.items) {
@@ -53,11 +68,10 @@ let main = () => {
     },
     _ => false,
   }
-  assertOk(
-    foldedOk,
-    "expected block body to fold into Let(binding, body)",
-  )
+  assertTrue(foldedOk)
+})
 
+test("parser treats top-level semicolon as sequencing in let RHS", () => {
   let seqSource = "let x = (1; 2);"
   let seqProgram = Parser.parse(seqSource)
   let seqOk = match (seqProgram.items) {
@@ -80,12 +94,8 @@ let main = () => {
     },
     _ => false,
   }
-  assertOk(
-    seqOk,
-    "expected top-level ';' to parse as sequencing in let RHS",
-  )
+  assertTrue(seqOk)
+})
 
-  print("parser semicolon Mark test passed")
-}
-
-main()
+let results = runTests()
+printResultsAndExit(results)
