@@ -161,7 +161,7 @@ let main = => {
 
   let expectedVirtual =
     "
-let main = => {
+let main = () => {
   let x = ?
 };
 "
@@ -177,9 +177,6 @@ let start: Location = .{ x= 0, y= 0 };
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
   let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
 
-  print(canonicalNonWs(source))
-  print(canonicalNonWs(realOut))
-
   let expectedVirtual =
     "
 let start : Location = .{ x = 0, y = 0 };
@@ -191,7 +188,7 @@ let start : Location = .{ x = 0, y = 0 };
   ])
 })
 
-test("formatter modes handle missing semicolon and brace", () => {
+test("formatter modes handle missing semicolon and brace 2", () => {
   let source =
     "
 let main = => {
@@ -202,7 +199,7 @@ let main = => {
 
   let expectedVirtual =
     "
-let main = => {
+let main = () => {
 };
 " 
   all([
@@ -236,6 +233,14 @@ and
   let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
 
 
+  let expectedFix =
+    "
+let _ = 25
+and _ = 67;
+let _ = {
+  let _ = 25
+  and _ = 67
+" 
 
   let expectedVirtual =
     "
@@ -249,7 +254,7 @@ let _ = {
 " 
   all([
     assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
-    assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
+    assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(fixOut)),
     assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
   ])
 })

@@ -151,6 +151,7 @@ and provide enum MarkKind {
 and provide enum BlockItem {
   ExprItem(Expr),
   LetItem(LetBinding),
+  DeclGroup(DeclGroup),
   Semicolon,
   MarkItem(Mark),
   TriviaItem(Trivia), // includes comments AND islands
@@ -283,7 +284,7 @@ and provide record PrefixDecl {
   name: Name,
 }
 
-provide record rec ImportDecl {
+and provide record ImportDecl {
   node: Node,
   modulePath: String,
   alias: Option<Name>,

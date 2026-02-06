@@ -267,6 +267,33 @@ let renderWithSettings = (
             patternHasHole(b.name)
             || match (b.annotation) { Some(t) => typeHasHole(t), None => false }
             || exprHasHole(b.value),
+          SurfaceAst.DeclGroup(group) =>
+            match (group.kind) {
+              SurfaceAst.LetGroup(_) => {
+                let bindings = List.flatMap(
+                  (decl: SurfaceAst.Decl) =>
+                    match (decl) {
+                      SurfaceAst.LetDecl(ld) => ld.bindings,
+                      _ => [],
+                    },
+                  group.decls,
+                )
+                let rec anyBindingHole = (items: List<SurfaceAst.LetBinding>) =>
+                  match (items) {
+                    [] => false,
+                    [binding, ...rest] =>
+                      patternHasHole(binding.name)
+                      || match (binding.annotation) {
+                        Some(t) => typeHasHole(t),
+                        None => false,
+                      }
+                      || exprHasHole(binding.value)
+                      || anyBindingHole(rest),
+                  }
+                anyBindingHole(bindings)
+              },
+              _ => false,
+            },
           SurfaceAst.Semicolon => false,
           _ => false,
         }
@@ -892,13 +919,17 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
             match (fnExpr.items) {
               [{
                 kind: SurfaceAst.Clause({
-                  param: { kind: SurfaceAst.Wildcard, _ },
+                  param: { node: paramNode, kind: SurfaceAst.Wildcard, _ },
                   guard: None,
                   body,
                   _
                 }),
                 _
               }] => {
+                if (mode == Virtual && settings.allowVirtualInsertions) {
+                  emitVirtual("()", paramNode.span.start, "inferred unit parameter")
+                  space()
+                }
                 write("=>")
                 space()
                 emitBlock(body)
@@ -1017,12 +1048,41 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
           !patternHasHole(binding.name)
           && match (binding.annotation) { Some(t) => !typeHasHole(t), None => true }
           && !exprHasHole(binding.value),
+        Some(SurfaceAst.DeclGroup(group)) => {
+          let bindingIsDecidableLocal = (binding: SurfaceAst.LetBinding) =>
+            binding.hasEq
+            && !patternHasHole(binding.name)
+            && match (binding.annotation) { Some(t) => !typeHasHole(t), None => true }
+            && !exprHasHole(binding.value)
+            && !exprHasMissingRBrace(binding.value)
+          let rec anyBindingUndecidable = (items: List<SurfaceAst.LetBinding>) =>
+            match (items) {
+              [] => false,
+              [binding, ...rest] =>
+                (!bindingIsDecidableLocal(binding)) || anyBindingUndecidable(rest),
+            }
+          match (group.kind) {
+            SurfaceAst.LetGroup(_) => {
+              let bindings = List.flatMap(
+                (decl: SurfaceAst.Decl) =>
+                  match (decl) {
+                    SurfaceAst.LetDecl(ld) => ld.bindings,
+                    _ => [],
+                  },
+                group.decls,
+              )
+              !anyBindingUndecidable(bindings)
+            },
+            _ => false,
+          }
+        },
         _ => false,
       }
     let prevStmtIsConcrete = (prevOpt: Option<SurfaceAst.BlockItem>) =>
       match (prevOpt) {
         Some(SurfaceAst.ExprItem(expr)) => hasConcreteTokenEndingAt(expr.node.span.end),
         Some(SurfaceAst.LetItem(binding)) => hasConcreteTokenEndingAt(binding.node.span.end),
+        Some(SurfaceAst.DeclGroup(group)) => hasConcreteTokenEndingAt(group.node.span.end),
         _ => false,
       }
     if (hasBody) {
@@ -1045,6 +1105,7 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
             match (item) {
               SurfaceAst.ExprItem(_)
               | SurfaceAst.LetItem(_)
+              | SurfaceAst.DeclGroup(_)
               | SurfaceAst.TriviaItem(_)
               | SurfaceAst.Directive(_)
               | SurfaceAst.Semicolon => true,
@@ -1068,6 +1129,55 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
               SurfaceAst.LetItem(binding) => {
                 emitSep()
                 emitBinding(binding)
+                emitItems(tail, Some(item))
+              },
+              SurfaceAst.DeclGroup(group) => {
+                emitSep()
+                match (group.kind) {
+                  SurfaceAst.LetGroup(mods) => {
+                    write("let")
+                    match (mods) {
+                      SurfaceAst.Plain => void,
+                      SurfaceAst.Rec => {
+                        space()
+                        write("rec")
+                      },
+                      SurfaceAst.Mut => {
+                        space()
+                        write("mut")
+                      },
+                    }
+                    space()
+                    let bindings = List.flatMap(
+                      (decl: SurfaceAst.Decl) =>
+                        match (decl) {
+                          SurfaceAst.LetDecl(ld) => ld.bindings,
+                          _ => [],
+                        },
+                      group.decls,
+                    )
+                    match (bindings) {
+                      [] => void,
+                      [first, ...rest] => {
+                        emitLetBindingBare(first)
+                        let rec emitAnd = (items: List<SurfaceAst.LetBinding>) => {
+                          match (items) {
+                            [] => void,
+                            [binding, ...tailBindings] => {
+                              newline()
+                              write("and")
+                              space()
+                              emitLetBindingBare(binding)
+                              emitAnd(tailBindings)
+                            },
+                          }
+                        }
+                        emitAnd(rest)
+                      },
+                    }
+                  },
+                  _ => void,
+                }
                 emitItems(tail, Some(item))
               },
               SurfaceAst.Semicolon => {

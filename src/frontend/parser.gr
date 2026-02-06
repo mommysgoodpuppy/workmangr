@@ -189,10 +189,10 @@ let recoverMissingTopLevelSemicolon = (
 ) => {
   let atTok = currentToken(state)
   let errSpan = Source.makeSpan(
-    anchorSpan.line,
-    anchorSpan.col,
-    anchorSpan.end,
-    anchorSpan.end
+    atTok.span.line,
+    atTok.span.col,
+    atTok.span.start,
+    atTok.span.start
   )
   let (markId, state1) = freshId(state)
   let mark: SurfaceAst.Mark = {
@@ -662,6 +662,20 @@ let blockItemsToBody = (
     state: ParseState,
     bodyOpt: Option<SurfaceAst.Expr>,
   ) => {
+    let bindingsFromDeclGroup = (group: SurfaceAst.DeclGroup) => {
+      match (group.kind) {
+        SurfaceAst.LetGroup(_) =>
+          List.flatMap(
+            (decl: SurfaceAst.Decl) =>
+              match (decl) {
+                SurfaceAst.LetDecl(ld) => ld.bindings,
+                _ => [],
+              },
+            group.decls,
+          ),
+        _ => [],
+      }
+    }
     match (remaining) {
       [] => (bodyOpt, state),
       [item, ...tail] => {
@@ -713,6 +727,32 @@ let blockItemsToBody = (
             }
             let (letExpr, state3) = makeLetExpr(state2, binding, body)
             (Some(letExpr), state3)
+          },
+          SurfaceAst.DeclGroup(group) => {
+            let bindings = bindingsFromDeclGroup(group)
+            match (bindings) {
+              [] => (nextOpt, state1),
+              _ => {
+                let (body, state2) = match (nextOpt) {
+                  Some(b) => (b, state1),
+                  None => makeUnitExpr(state1, group.node.span),
+                }
+                let rec wrap = (
+                  remainingBindings: List<SurfaceAst.LetBinding>,
+                  inner: SurfaceAst.Expr,
+                  stateX: ParseState,
+                ) => match (remainingBindings) {
+                  [] => (inner, stateX),
+                  [binding, ...rest] => {
+                    let (letExpr, stateY) = makeLetExpr(stateX, binding, inner)
+                    wrap(rest, letExpr, stateY)
+                  },
+                }
+                let reversedBindings = List.reverse(bindings)
+                let (finalExpr, state3) = wrap(reversedBindings, body, state2)
+                (Some(finalExpr), state3)
+              },
+            }
           },
           SurfaceAst.Semicolon |
           SurfaceAst.MarkItem(_) |
@@ -955,6 +995,7 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
   let blockItemSpan = (item: SurfaceAst.BlockItem) => match (item) {
     SurfaceAst.ExprItem(expr) => expr.node.span,
     SurfaceAst.LetItem(binding) => binding.node.span,
+    SurfaceAst.DeclGroup(group) => group.node.span,
     SurfaceAst.MarkItem(mark) => mark.node.span,
     SurfaceAst.TriviaItem(trivia) => trivia.node.span,
     SurfaceAst.Directive(directive) => directive.name.node.span,
@@ -1493,14 +1534,14 @@ and parseTopLevels = (state: ParseState) => {
         let (exportId, state1b) = freshId(state1)
         let (inner, state2) = parseTopLevels(state1b)
         match (inner) {
-          [DeclGroup(dg), ...rest] => {
+          [SurfaceAst.DeclGroup(dg), ...rest] => {
             // Create Export node for the export keyword
             let exportNode = Export(
               { node: { id: exportId, span: exportTok.span }, },
             )
             // Mark DeclGroup as exported
             let exportedDg = { ...dg, exported: true }
-            ([exportNode, DeclGroup(exportedDg), ...rest], state2)
+            ([exportNode, SurfaceAst.DeclGroup(exportedDg), ...rest], state2)
           },
           [] => {
             let exportRecovery: SurfaceAst.Mark = {
@@ -1681,8 +1722,7 @@ and parseLetGroup: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
     bindings = [binding, ...bindings]
     currentState = state_temp2
   }
-  let reversedBindings = List.reverse(bindings)
-  let (lastBinding, stateAfterBindings) = match (List.head(reversedBindings)) {
+  let (lastBinding, stateAfterBindings) = match (List.head(bindings)) {
     Some(b) => (b, currentState),
     None => {
       let (pat, stateP) = makeWildcardPattern(currentState, letTok.span)
@@ -1703,8 +1743,9 @@ and parseLetGroup: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
       (binding, stateB)
     },
   }
+  let reversedBindings = List.reverse(bindings)
   let span = spanFromTokens(letTok.span, lastBinding.node.span)
-  let topLevel = DeclGroup(
+  let topLevel: SurfaceAst.TopItem = SurfaceAst.DeclGroup(
     {
       node: { id, span },
       exported: false,
@@ -1834,7 +1875,7 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
   let fullSpan = spanFromTokens(typeTok.span, lastSpan)
   let (typeDeclId, state7) = freshId(state6)
   let (nameId, state8) = freshId(state7)
-  let topLevel = DeclGroup(
+  let topLevel: SurfaceAst.TopItem = SurfaceAst.DeclGroup(
     {
       node: { id, span: fullSpan },
       exported: false,
@@ -1901,7 +1942,7 @@ and parseRecordDef = (state: ParseState) => {
   let fullSpan = spanFromTokens(recordTok.span, rbraceTok.span)
   let (recordDeclId, state9) = freshId(state8)
   let (nameId, state10) = freshId(state9)
-  let topLevel = DeclGroup(
+  let topLevel: SurfaceAst.TopItem = SurfaceAst.DeclGroup(
     {
       node: { id, span: fullSpan },
       exported: false,
@@ -1972,21 +2013,23 @@ and parseBlockItems = (state: ParseState) => {
         ([item, ...restItems], state3)
       },
       Lexer.LitName("let") => {
-        let (letTok, state_temp) = expectKeyword("let", state)
-        let (binding, state1) = parseBinding(state_temp, Some(letTok.span))
+        let (topItem, state1) = parseLetGroup(state)
+        let group = match (topItem) {
+          SurfaceAst.DeclGroup(group) => group,
+          _ => panic("parseLetGroup produced a non-decl-group item"),
+        }
+        let blockItem: SurfaceAst.BlockItem = SurfaceAst.DeclGroup(group)
         if (kindIs(currentToken(state1).kind, Lexer.SemiColon)) {
           let state1b = dropToken(state1)
-          let item = SurfaceAst.LetItem(binding)
           let (restItems, state2) = parseBlockItems(state1b)
-          ([item, SurfaceAst.Semicolon, ...restItems], state2)
+          ([blockItem, SurfaceAst.Semicolon, ...restItems], state2)
         } else {
-          let item = SurfaceAst.LetItem(binding)
           let (markItem, state1b) = makeMissingSemicolonItem(
             state1,
-            binding.node.span
+            group.node.span
           )
           let (restItems, state2) = parseBlockItems(state1b)
-          ([item, markItem, ...restItems], state2)
+          ([blockItem, markItem, ...restItems], state2)
         }
       },
       _ => {
