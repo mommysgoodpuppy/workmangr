@@ -266,30 +266,6 @@ let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) 
   }
 }
 
-let consumeBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) =>
-  if (kindIs(currentToken(state).kind, Lexer.SemiColon)) {
-    dropToken(state)
-  } else if (kindIs(currentToken(state).kind, Lexer.EOF) || kindIs(
-    currentToken(state).kind,
-    Lexer.RBrace,
-  )) {
-    state
-  } else {
-    recoverMissingBlockSemicolon(state, anchorSpan)
-  }
-
-let consumeBlockTerminator = (state: ParseState, anchorSpan: Source.Span) =>
-  if (kindIs(currentToken(state).kind, Lexer.SemiColon)) {
-    (dropToken(state), true)
-  } else if (kindIs(currentToken(state).kind, Lexer.EOF) || kindIs(
-    currentToken(state).kind,
-    Lexer.RBrace,
-  )) {
-    (state, false)
-  } else {
-    (recoverMissingBlockSemicolon(state, anchorSpan), false)
-  }
-
 let startsBlockStatement = (tok: Lexer.Token) =>
   match (tok.kind) {
     Lexer.LitName("let") => true,
@@ -502,6 +478,17 @@ let blockItemsToBody = (
   state: ParseState,
   fallbackSpan: Source.Span,
 ) => {
+  let hasTerminatorAfter = (tail: List<SurfaceAst.BlockItem>) =>
+    match (tail) {
+      [SurfaceAst.Semicolon, ..._] => true,
+      [SurfaceAst.MarkItem(mark), ..._] =>
+        match (mark.kind) {
+          SurfaceAst.MissingSemicolon => true,
+          _ => false,
+        },
+      _ => false,
+    }
+
   let rec fold = (
     remaining: List<SurfaceAst.BlockItem>,
     state: ParseState,
@@ -512,8 +499,8 @@ let blockItemsToBody = (
       [item, ...tail] => {
         let (nextOpt, state1) = fold(tail, state, bodyOpt)
         match (item) {
-          SurfaceAst.ExprItem(expr, terminated) => {
-            if (terminated) {
+          SurfaceAst.ExprItem(expr) => {
+            if (hasTerminatorAfter(tail)) {
               let (body, state2) = match (nextOpt) {
                 Some(b) => (b, state1),
                 None => makeUnitExpr(state1, expr.node.span),
@@ -546,7 +533,7 @@ let blockItemsToBody = (
               }
             }
           },
-          SurfaceAst.LetItem(binding, _terminated) => {
+          SurfaceAst.LetItem(binding) => {
             let (body, state2) = match (nextOpt) {
               Some(b) => (b, state1),
               None => makeUnitExpr(state1, binding.node.span),
@@ -554,7 +541,11 @@ let blockItemsToBody = (
             let (letExpr, state3) = makeLetExpr(state2, binding, body)
             (Some(letExpr), state3)
           },
-          SurfaceAst.TriviaItem(_) | SurfaceAst.Directive(_) => (nextOpt, state1),
+          SurfaceAst.Semicolon
+          | SurfaceAst.MarkItem(_)
+          | SurfaceAst.TriviaItem(_)
+          | SurfaceAst.Directive(_) =>
+            (nextOpt, state1),
         }
       },
     }
@@ -763,7 +754,7 @@ and parseTerm: Parser<SurfaceAst.Expr> = state => {
       let span = spanFromTokens(tok.span, body.node.span)
       let bodyBlock = match (body.kind) {
         Block(b) => b,
-        _ => { node: body.node, items: [SurfaceAst.ExprItem(body, false)], body },
+        _ => { node: body.node, items: [SurfaceAst.ExprItem(body)], body },
       }
       let (patId, state4) = freshId(state3)
       let wildcardPat: SurfaceAst.Pattern = {
@@ -805,14 +796,36 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
   let (id, state1) = freshId(state)
   let (lbraceTok, state2) = expectSimple(Lexer.LBrace, state1)
   let (items, state3) = parseBlockItems(state2)
-  let (rbraceTok, state4) = expectSimpleOrRecover(
-    Lexer.RBrace,
-    state3,
-    "to close block",
-  )
+  let tokAfterItems = currentToken(state3)
+  let (items2, rbraceTok, state4) = if (kindIs(tokAfterItems.kind, Lexer.RBrace)) {
+    let (rbraceTok, state4) = expectSimple(Lexer.RBrace, state3)
+    (items, rbraceTok, state4)
+  } else {
+    let (markId, state4) = freshId(state3)
+    let mark: SurfaceAst.Mark = {
+      node: { id: markId, span: tokAfterItems.span },
+      kind: SurfaceAst.MissingRBrace,
+      expected: SurfaceAst.ExpectToken,
+    }
+    let markItem: SurfaceAst.BlockItem = Error.createError(
+      Error.Parsing,
+      tokAfterItems.span,
+      "Expected '}' to close block",
+      SurfaceAst.MarkItem(mark),
+      clues=[Error.Expected("}"), Error.Received(Lexer.tokenKindToString(tokAfterItems.kind))],
+    )
+    let syntheticSpan = Source.makeSpan(
+      tokAfterItems.span.line,
+      tokAfterItems.span.col,
+      tokAfterItems.span.start,
+      tokAfterItems.span.start,
+    )
+    let rbraceTok: Lexer.Token = { kind: Lexer.RBrace, span: syntheticSpan, mate: None }
+    (List.append(items, [markItem]), rbraceTok, state4)
+  }
   let span = spanFromTokens(lbraceTok.span, rbraceTok.span)
-  let (body, state5) = blockItemsToBody(items, state4, span)
-  let expr = makeExpr(id, span, Block({ node: { id, span }, items, body }))
+  let (body, state5) = blockItemsToBody(items2, state4, span)
+  let expr = makeExpr(id, span, Block({ node: { id, span }, items: items2, body }))
   (expr, state5)
 }
 and parsePrimary: Parser<SurfaceAst.Expr> = state => {
@@ -1059,7 +1072,7 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
       }
       let bodyBlock = match (bodyExpr.kind) {
         Block(b) => b,
-        _ => { node: bodyExpr.node, items: [SurfaceAst.ExprItem(bodyExpr, false)], body: bodyExpr },
+        _ => { node: bodyExpr.node, items: [SurfaceAst.ExprItem(bodyExpr)], body: bodyExpr },
       }
       let (clauseId, state5) = freshId(state4)
       let clause: SurfaceAst.FnClause = {
@@ -1566,26 +1579,31 @@ and parseRecordDef = (state: ParseState) => {
   (topLevel, state11)
 }
 and parseBlockItems = (state: ParseState) => {
+  let makeMissingSemicolonItem = (stateX: ParseState, anchorSpan: Source.Span) => {
+    let atTok = currentToken(stateX)
+    let (id, state1) = freshId(stateX)
+    let mark: SurfaceAst.Mark = {
+      node: { id, span: atTok.span },
+      kind: SurfaceAst.MissingSemicolon,
+      expected: SurfaceAst.ExpectToken,
+    }
+    let item: SurfaceAst.BlockItem = Error.createError(
+      Error.Parsing,
+      atTok.span,
+      "Expected ';' after statement",
+      SurfaceAst.MarkItem(mark),
+      clues=[
+        Error.Expected(";"),
+        Error.Received(Lexer.tokenKindToString(atTok.kind)),
+      ],
+    )
+    (item, state1)
+  }
+
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.RBrace => ([], state),
-    Lexer.EOF =>
-      if (state.tolerant) {
-        Error.createError(
-          Error.Parsing,
-          tok.span,
-          "Expected '}' to close block",
-          ([], state),
-          clues=[Error.Expected("}"), Error.Received("EOF")],
-        )
-      } else {
-        Error.createPanicError(
-          Error.Parsing,
-          tok.span,
-          "Expected '}' to close block",
-          [Error.Received("EOF")]
-        )
-      },
+    Lexer.EOF => ([], state),
     Lexer.SemiColon => parseBlockItems(dropToken(state)),
     Lexer.Comma => parseBlockItems(dropToken(state)),
     Lexer.LineComment(text) => {
@@ -1599,10 +1617,17 @@ and parseBlockItems = (state: ParseState) => {
     Lexer.LitName("let") => {
       let (letTok, state_temp) = expectKeyword("let", state)
       let (binding, state1) = parseBinding(state_temp, Some(letTok.span), false)
-      let (state1b, terminated) = consumeBlockTerminator(state1, binding.node.span)
-      let item = SurfaceAst.LetItem(binding, terminated)
-      let (restItems, state2) = parseBlockItems(state1b)
-      ([item, ...restItems], state2)
+      if (kindIs(currentToken(state1).kind, Lexer.SemiColon)) {
+        let state1b = dropToken(state1)
+        let item = SurfaceAst.LetItem(binding)
+        let (restItems, state2) = parseBlockItems(state1b)
+        ([item, SurfaceAst.Semicolon, ...restItems], state2)
+      } else {
+        let item = SurfaceAst.LetItem(binding)
+        let (markItem, state1b) = makeMissingSemicolonItem(state1, binding.node.span)
+        let (restItems, state2) = parseBlockItems(state1b)
+        ([item, markItem, ...restItems], state2)
+      }
     },
     _ => {
       let (expr, state1) = parseExprNoSeq(state)
@@ -1623,10 +1648,7 @@ and parseBlockItems = (state: ParseState) => {
         } else {
           parseExprNoSeq(stateAssign0)
         }
-        let (stateAssign2, terminated) = consumeBlockTerminator(
-          stateAssign1,
-          assignValue.node.span,
-        )
+        let stateAssign2 = stateAssign1
         let (exprId, stateAssign3) = freshId(stateAssign2)
         let span = spanFromTokens(expr.node.span, assignValue.node.span)
         let assignExpr = makeExpr(
@@ -1634,14 +1656,49 @@ and parseBlockItems = (state: ParseState) => {
           span,
           SurfaceAst.Assign({ target: expr, value: assignValue }),
         )
-        let item = SurfaceAst.ExprItem(assignExpr, terminated)
-        let (restItems, stateEnd) = parseBlockItems(stateAssign3)
-        ([item, ...restItems], stateEnd)
+        if (kindIs(currentToken(stateAssign3).kind, Lexer.SemiColon)) {
+          let stateAssign4 = dropToken(stateAssign3)
+          let item = SurfaceAst.ExprItem(assignExpr)
+          let (restItems, stateEnd) = parseBlockItems(stateAssign4)
+          ([item, SurfaceAst.Semicolon, ...restItems], stateEnd)
+        } else if (
+          kindIs(currentToken(stateAssign3).kind, Lexer.RBrace)
+          || kindIs(currentToken(stateAssign3).kind, Lexer.EOF)
+        ) {
+          let item = SurfaceAst.ExprItem(assignExpr)
+          let (restItems, stateEnd) = parseBlockItems(stateAssign3)
+          ([item, ...restItems], stateEnd)
+        } else {
+          let item = SurfaceAst.ExprItem(assignExpr)
+          let (markItem, stateAssign4) = makeMissingSemicolonItem(
+            stateAssign3,
+            assignValue.node.span,
+          )
+          let (restItems, stateEnd) = parseBlockItems(stateAssign4)
+          ([item, markItem, ...restItems], stateEnd)
+        }
       } else {
-        let (stateExprStmt, terminated) = consumeBlockTerminator(state1, expr.node.span)
-        let item = SurfaceAst.ExprItem(expr, terminated)
-        let (restItems, stateEnd) = parseBlockItems(stateExprStmt)
-        ([item, ...restItems], stateEnd)
+        if (kindIs(currentToken(state1).kind, Lexer.SemiColon)) {
+          let stateExprStmt = dropToken(state1)
+          let item = SurfaceAst.ExprItem(expr)
+          let (restItems, stateEnd) = parseBlockItems(stateExprStmt)
+          ([item, SurfaceAst.Semicolon, ...restItems], stateEnd)
+        } else if (
+          kindIs(currentToken(state1).kind, Lexer.RBrace)
+          || kindIs(currentToken(state1).kind, Lexer.EOF)
+        ) {
+          let item = SurfaceAst.ExprItem(expr)
+          let (restItems, stateEnd) = parseBlockItems(state1)
+          ([item, ...restItems], stateEnd)
+        } else {
+          let item = SurfaceAst.ExprItem(expr)
+          let (markItem, stateExprStmt) = makeMissingSemicolonItem(
+            state1,
+            expr.node.span,
+          )
+          let (restItems, stateEnd) = parseBlockItems(stateExprStmt)
+          ([item, markItem, ...restItems], stateEnd)
+        }
       }
     },
   }

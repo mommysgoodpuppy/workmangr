@@ -111,9 +111,40 @@ and provide record Block {
   items: List<BlockItem>,
   body: Expr,
 }
+and provide enum ExpectedTopItemKind {
+  TopItemAny,
+  TopItemDeclGroup,
+  TopItemImport,
+  TopItemReexport,
+  TopItemExport,
+  TopItemDirective,
+  TopItemTrivia,
+  TopItemMark,
+}
+and provide enum ExpectedKind {
+  ExpectTopItem(ExpectedTopItemKind),
+  ExpectExpr,
+  ExpectPattern,
+  ExpectTypeExpr,
+  ExpectToken,
+  ExpectBlock,
+}
+and provide record Mark {
+  node: Node,
+  kind: MarkKind,
+  expected: ExpectedKind,
+}
+and provide enum MarkKind {
+  UnknownTopLevel(String),
+  InvalidTopLevel(String),
+  MissingSemicolon,
+  MissingRBrace,
+}
 and provide enum BlockItem {
-  ExprItem(Expr, Bool), // Bool indicates explicit semicolon terminator
-  LetItem(LetBinding, Bool), // Bool indicates explicit semicolon terminator
+  ExprItem(Expr),
+  LetItem(LetBinding),
+  Semicolon,
+  MarkItem(Mark),
   TriviaItem(Trivia), // includes comments AND islands
   Directive(Directive),
 }
@@ -287,33 +318,6 @@ and provide enum RuleKind {
   Policy,
   Op,
   Annotate,
-}
-and provide enum ExpectedTopItemKind {
-  TopItemAny,
-  TopItemDeclGroup,
-  TopItemImport,
-  TopItemReexport,
-  TopItemExport,
-  TopItemDirective,
-  TopItemTrivia,
-  TopItemMark,
-}
-and provide enum ExpectedKind {
-  ExpectTopItem(ExpectedTopItemKind),
-  ExpectExpr,
-  ExpectPattern,
-  ExpectTypeExpr,
-  ExpectToken,
-  ExpectBlock,
-}
-and provide record Mark {
-  node: Node,
-  kind: MarkKind,
-  expected: ExpectedKind,
-}
-and provide enum MarkKind {
-  UnknownTopLevel(String),
-  InvalidTopLevel(String),
 }
 and provide enum TopItem {
   Directive(Directive),

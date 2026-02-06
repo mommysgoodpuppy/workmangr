@@ -22,6 +22,7 @@ let canonicalNonWs = (text: String) => {
 provide enum Mode {
   Real,
   Virtual,
+  Fix,
 }
 
 provide record VirtualArtifact {
@@ -39,10 +40,12 @@ provide record FormatResult {
 
 record Settings {
   allowVirtualInsertions: Bool,
+  allowFixSemicolons: Bool,
 }
 
-let realSettings = { allowVirtualInsertions: false }
-let virtualSettings = { allowVirtualInsertions: true }
+let realSettings = { allowVirtualInsertions: false, allowFixSemicolons: false }
+let virtualSettings = { allowVirtualInsertions: true, allowFixSemicolons: false }
+let fixSettings = { allowVirtualInsertions: false, allowFixSemicolons: true }
 
 let rec spaces = (n: Number) => {
   if (n <= 0) {
@@ -104,6 +107,170 @@ let renderWithSettings = (
       SurfaceAst.Directive(directive) => directive.name.node.span,
       SurfaceAst.Mark(mark) => mark.node.span,
       SurfaceAst.Trivia(trivia) => trivia.node.span,
+    }
+
+  let rec patternHasHole = (pat: SurfaceAst.Pattern) =>
+    match (pat.kind) {
+      SurfaceAst.Hole(_) => true,
+      SurfaceAst.Wildcard | SurfaceAst.Var(_) | SurfaceAst.Pin(_) | SurfaceAst.Lit(_) =>
+        false,
+      SurfaceAst.Constructor(_, args) => anyPattern(args),
+      SurfaceAst.Tuple(items) => anyPattern(items),
+      SurfaceAst.List(items, restOpt) =>
+        anyPattern(items)
+        || match (restOpt) { Some(r) => patternHasHole(r), None => false },
+      SurfaceAst.AllErrors => false,
+    }
+
+  and anyPattern = (items: List<SurfaceAst.Pattern>) =>
+    match (items) {
+      [] => false,
+      [x, ...xs] => patternHasHole(x) || anyPattern(xs),
+    }
+
+  and fnItemHasHole = (item: SurfaceAst.FnItem) =>
+    match (item.kind) {
+      SurfaceAst.Clause(clause) =>
+        patternHasHole(clause.param)
+        || match (clause.guard) { Some(g) => exprHasHole(g), None => false }
+        || exprHasHole(clause.body.body),
+      SurfaceAst.Hole(_) => true,
+      _ => false,
+    }
+
+  and fnHasHole = (fn: SurfaceAst.FnExpr) => anyFnItemList(fn.items)
+
+  and anyFnItemList = (items: List<SurfaceAst.FnItem>) =>
+    match (items) {
+      [] => false,
+      [x, ...xs] => fnItemHasHole(x) || anyFnItemList(xs),
+    }
+
+  and exprHasHole = (expr: SurfaceAst.Expr) =>
+    match (expr.kind) {
+      SurfaceAst.Hole(_) => true,
+      SurfaceAst.Lit(_) | SurfaceAst.Ident(_) => false,
+      SurfaceAst.Fn(fn) => fnHasHole(fn),
+      SurfaceAst.Match(matchExpr) =>
+        match (matchExpr.scrutinee) {
+          Some(e) => exprHasHole(e),
+          None => false,
+        }
+        || fnHasHole(matchExpr.bundle),
+      SurfaceAst.Apply(callee, arg) => exprHasHole(callee) || exprHasHole(arg),
+      SurfaceAst.InfixChain(chain) =>
+        exprHasHole(chain.first)
+        || anyInfixRest(chain.rest),
+      SurfaceAst.Postfix(postfix) =>
+        exprHasHole(postfix.target)
+        || anyPostfixSegments(postfix.segments),
+      SurfaceAst.Block(block) =>
+        exprHasHole(block.body)
+        || anyBlockItems(block.items),
+      SurfaceAst.Paren(inner) => exprHasHole(inner),
+      SurfaceAst.Tuple(items) => anyExprList(items),
+      SurfaceAst.RecordLit(items) =>
+        anyRecordItems(items),
+      SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
+        exprHasHole(cond)
+        || exprHasHole(thenExpr)
+        || match (elseExprOpt) { Some(e) => exprHasHole(e), None => false },
+      SurfaceAst.Let(binding, body) =>
+        patternHasHole(binding.name)
+        || match (binding.annotation) { Some(t) => typeHasHole(t), None => false }
+        || exprHasHole(binding.value)
+        || exprHasHole(body),
+      SurfaceAst.Assign(assignExpr) =>
+        exprHasHole(assignExpr.target) || exprHasHole(assignExpr.value),
+    }
+
+  and anyExprList = (items: List<SurfaceAst.Expr>) =>
+    match (items) {
+      [] => false,
+      [x, ...xs] => exprHasHole(x) || anyExprList(xs),
+    }
+
+  and anyInfixRest = (items: List<(SurfaceAst.Name, SurfaceAst.Expr)>) =>
+    match (items) {
+      [] => false,
+      [(_op, rhs), ...xs] => exprHasHole(rhs) || anyInfixRest(xs),
+    }
+
+  and anyPostfixSegments = (items: List<SurfaceAst.PostfixSegment>) =>
+    match (items) {
+      [] => false,
+      [seg, ...xs] => {
+        let hasHole = match (seg) {
+          SurfaceAst.Call(args) => anyExprList(args),
+          SurfaceAst.Project(_) => false,
+          SurfaceAst.Index(idx) => exprHasHole(idx),
+        }
+        hasHole || anyPostfixSegments(xs)
+      },
+    }
+
+  and anyRecordItems = (items: List<SurfaceAst.RecordItem>) =>
+    match (items) {
+      [] => false,
+      [item, ...xs] => {
+        let hasHole = match (item) {
+          SurfaceAst.Field(_, value) => exprHasHole(value),
+          SurfaceAst.Spread(value) => exprHasHole(value),
+        }
+        hasHole || anyRecordItems(xs)
+      },
+    }
+
+  and anyBlockItems = (items: List<SurfaceAst.BlockItem>) =>
+    match (items) {
+      [] => false,
+      [item, ...xs] => {
+        let hasHole = match (item) {
+          SurfaceAst.ExprItem(e) => exprHasHole(e),
+          SurfaceAst.LetItem(b) =>
+            patternHasHole(b.name)
+            || match (b.annotation) { Some(t) => typeHasHole(t), None => false }
+            || exprHasHole(b.value),
+          SurfaceAst.Semicolon => false,
+          _ => false,
+        }
+        hasHole || anyBlockItems(xs)
+      },
+    }
+
+  and typeHasHole = (ty: SurfaceAst.TypeExpr) =>
+    match (ty.kind) {
+      SurfaceAst.Hole(_) => true,
+      SurfaceAst.Var(_) => false,
+      SurfaceAst.Ref(_, args) => anyTypeList(args),
+      SurfaceAst.Tuple(items) => anyTypeList(items),
+      SurfaceAst.Record(fields) => anyTypeFieldList(fields),
+      SurfaceAst.Arrow(params, ret) =>
+        anyTypeList(params) || typeHasHole(ret),
+      SurfaceAst.Ptr(inner, _) => typeHasHole(inner),
+      SurfaceAst.EffectRow(cases, _hasTail) => anyEffectCases(cases),
+      SurfaceAst.UnitType => false,
+    }
+
+  and anyTypeList = (items: List<SurfaceAst.TypeExpr>) =>
+    match (items) {
+      [] => false,
+      [x, ...xs] => typeHasHole(x) || anyTypeList(xs),
+    }
+
+  and anyTypeFieldList = (items: List<(SurfaceAst.Name, SurfaceAst.TypeExpr)>) =>
+    match (items) {
+      [] => false,
+      [(_name, ty), ...xs] => typeHasHole(ty) || anyTypeFieldList(xs),
+    }
+
+  and anyEffectCases = (items: List<SurfaceAst.EffectCase>) =>
+    match (items) {
+      [] => false,
+      [ecase, ...xs] => {
+        let hasHole = match (ecase.payload) { Some(p) => typeHasHole(p), None => false }
+        hasHole || anyEffectCases(xs)
+      },
     }
   let mut chunks: List<String> = []
   let mut artifacts: List<VirtualArtifact> = []
@@ -197,12 +364,21 @@ let renderWithSettings = (
     }
   }
 
+  let shouldEmitInferredHole = () => mode == Virtual
+
+  let emitHole = (hole: SurfaceAst.Hole) =>
+    match (hole.origin) {
+      SurfaceAst.UserTyped => write("?"),
+      SurfaceAst.Inferred =>
+        if (shouldEmitInferredHole()) { write("?") } else { void },
+    }
+
 let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
     withAttachments(
       pattern.attach,
       () => {
         match (pattern.kind) {
-          SurfaceAst.Hole(_) => write("?"),
+          SurfaceAst.Hole(hole) => emitHole(hole),
           SurfaceAst.Wildcard => write("_"),
           SurfaceAst.Var(name) => write(name.text),
           SurfaceAst.Pin(name) => {
@@ -252,7 +428,7 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
 
   let rec emitTypeExpr = (typeExpr: SurfaceAst.TypeExpr) => {
     match (typeExpr.kind) {
-      SurfaceAst.Hole(_) => write("?"),
+      SurfaceAst.Hole(hole) => emitHole(hole),
       SurfaceAst.Var(name) => write(name.text),
       SurfaceAst.Ref(name, args) => {
         write(name.text)
@@ -468,7 +644,7 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
             emitCommaSeparated(emitExpr, items)
             write(")")
           },
-          SurfaceAst.Hole(_) => write("?"),
+          SurfaceAst.Hole(hole) => emitHole(hole),
           SurfaceAst.RecordLit(items) => {
             write(".{")
             emitRecordItems(items)
@@ -667,6 +843,29 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
   and emitBlock = (block: SurfaceAst.Block) => {
     write("{")
     let hasBody = block.items != []
+    let rec hasMissingRBrace = (items: List<SurfaceAst.BlockItem>) =>
+      match (items) {
+        [] => false,
+        [item, ...rest] =>
+          match (item) {
+            SurfaceAst.MarkItem(mark) =>
+              match (mark.kind) {
+                SurfaceAst.MissingRBrace => true,
+                _ => hasMissingRBrace(rest),
+              },
+            _ => hasMissingRBrace(rest),
+          },
+      }
+    let missingRBrace = hasMissingRBrace(block.items)
+    let canFixSemicolonAfter = (prevOpt: Option<SurfaceAst.BlockItem>) =>
+      match (prevOpt) {
+        Some(SurfaceAst.ExprItem(expr)) => !exprHasHole(expr),
+        Some(SurfaceAst.LetItem(binding)) =>
+          !patternHasHole(binding.name)
+          && match (binding.annotation) { Some(t) => !typeHasHole(t), None => true }
+          && !exprHasHole(binding.value),
+        _ => false,
+      }
     if (hasBody) {
       newline()
       indent = indent + 2
@@ -680,37 +879,84 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
         }
       }
 
-      let rec emitItems = (items: List<SurfaceAst.BlockItem>) => {
+      let rec hasNextConcrete = (items: List<SurfaceAst.BlockItem>) =>
+        match (items) {
+          [] => false,
+          [item, ...rest] =>
+            match (item) {
+              SurfaceAst.ExprItem(_)
+              | SurfaceAst.LetItem(_)
+              | SurfaceAst.TriviaItem(_)
+              | SurfaceAst.Directive(_)
+              | SurfaceAst.Semicolon => true,
+              SurfaceAst.MarkItem(_) => hasNextConcrete(rest),
+            },
+        }
+
+      let rec emitItems = (
+        items: List<SurfaceAst.BlockItem>,
+        prevStmt: Option<SurfaceAst.BlockItem>,
+      ) => {
         match (items) {
           [] => void,
           [item, ...tail] => {
-            emitSep()
             match (item) {
-              SurfaceAst.ExprItem(expr, terminated) => {
+              SurfaceAst.ExprItem(expr) => {
+                emitSep()
                 emitExpr(expr)
-                if (terminated) {
-                  write(";")
-                }
+                emitItems(tail, Some(item))
               },
-              SurfaceAst.LetItem(binding, terminated) => {
+              SurfaceAst.LetItem(binding) => {
+                emitSep()
                 emitBinding(binding)
-                if (terminated) {
-                  write(";")
-                }
+                emitItems(tail, Some(item))
               },
-              SurfaceAst.TriviaItem(trivia) => emitTrivia(trivia),
-              SurfaceAst.Directive(d) => emitDirective(d),
+              SurfaceAst.Semicolon => {
+                write(";")
+                emitItems(tail, prevStmt)
+              },
+              SurfaceAst.MarkItem(mark) => {
+                match (mark.kind) {
+                  SurfaceAst.MissingSemicolon => {
+                    if (mode == Virtual && settings.allowVirtualInsertions) {
+                      if (hasNextConcrete(tail)) {
+                        write(";")
+                      }
+                    } else if (mode == Fix && settings.allowFixSemicolons) {
+                      if (canFixSemicolonAfter(prevStmt) && hasNextConcrete(tail)) {
+                        write(";")
+                      }
+                    }
+                  },
+                  SurfaceAst.MissingRBrace => void,
+                  _ => void,
+                }
+                emitItems(tail, prevStmt)
+              },
+              SurfaceAst.TriviaItem(trivia) => {
+                emitSep()
+                emitTrivia(trivia)
+                emitItems(tail, prevStmt)
+              },
+              SurfaceAst.Directive(d) => {
+                emitSep()
+                emitDirective(d)
+                emitItems(tail, prevStmt)
+              },
             }
-            emitItems(tail)
           },
         }
       }
-      emitItems(block.items)
+      emitItems(block.items, None)
 
       indent = indent - 2
-      newline()
+      if (!(missingRBrace && (mode == Real || mode == Fix))) {
+        newline()
+      }
     }
-    write("}")
+    if (!(missingRBrace && (mode == Real || mode == Fix))) {
+      write("}")
+    }
   }
 
   and emitFnItem = (item: SurfaceAst.FnItem) => {
@@ -736,7 +982,7 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
           },
           SurfaceAst.Include(name) => write(name.text),
           SurfaceAst.Trivia(trivia) => emitTrivia(trivia),
-          SurfaceAst.Hole(_) => write("?"),
+          SurfaceAst.Hole(hole) => emitHole(hole),
         }
       },
     )
@@ -1021,6 +1267,8 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
         match (mark.kind) {
           SurfaceAst.UnknownTopLevel(text) => write(text),
           SurfaceAst.InvalidTopLevel(text) => write(text),
+          SurfaceAst.MissingSemicolon => void,
+          SurfaceAst.MissingRBrace => void,
         },
       SurfaceAst.Trivia(trivia) => emitTrivia(trivia),
     }
@@ -1040,6 +1288,10 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
         emitTopItem(item)
         let endSpan = topItemSpan(item)
         if (hasTerminatorAfter(endSpan.end)) {
+          write(";")
+        } else if (mode == Virtual && settings.allowVirtualInsertions) {
+          write(";")
+        } else if (mode == Fix && settings.allowFixSemicolons) {
           write(";")
         }
         emitProgramItems(tail)
@@ -1065,6 +1317,7 @@ provide let formatResultWithMode = (source: String, mode: Mode) =>
   match (mode) {
     Real => formatResultWithSettings(source, mode, realSettings),
     Virtual => formatResultWithSettings(source, mode, virtualSettings),
+    Fix => formatResultWithSettings(source, mode, fixSettings),
   }
 
 provide let formatWithMode = (source: String, mode: Mode) => {
