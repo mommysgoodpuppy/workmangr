@@ -1056,6 +1056,15 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
       )
       (expr, state2)
     },
+    Lexer.LitBool(value) => {
+      let state2 = dropToken(state1)
+      let expr: SurfaceAst.Expr = makeExpr(
+        id,
+        tok.span,
+        Lit(SurfaceAst.Bool(value))
+      )
+      (expr, state2)
+    },
     Lexer.LitName(name) => {
       if (name == "match") {
         parseMatch(state1)

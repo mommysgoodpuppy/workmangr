@@ -212,6 +212,48 @@ let main = => {
   ])
 })
 
+test("format virtual difficult", () => {
+  let source =
+    "
+let 
+=
+25
+and 
+=
+67
+let 
+= 
+{
+let 
+=
+25
+and 
+=
+67
+"
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
+  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+
+
+
+  let expectedVirtual =
+    "
+let _ = 25
+and _ = 67;
+
+let _ = {
+  let _ = 25
+  and _ = 67
+};
+" 
+  all([
+    assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
+    assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
+    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
+  ])
+})
+
 test("formatter modes mode handles incomplete top level statement", () => {
   let source =
     "

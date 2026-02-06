@@ -481,12 +481,21 @@ provide let compileToJson = (source: String) => {
     source,
     Formatter.Real,
   )
+  let formatterDiagnostics = Error.getErrors()
+  let formatterMarkedDiagnostics = Error.getMarkedErrors()
+  Error.clearErrors()
   let virtualResult = Formatter.formatResultWithProgramMode(
     parsed,
     source,
     Formatter.Virtual,
   )
+  let virtualDiagnostics = Error.getErrors()
+  let virtualMarkedDiagnostics = Error.getMarkedErrors()
+  Error.clearErrors()
   let fixResult = Formatter.formatResultWithProgramMode(parsed, source, Formatter.Fix)
+  let fixDiagnostics = Error.getErrors()
+  let fixMarkedDiagnostics = Error.getMarkedErrors()
+  Error.clearErrors()
   let formattedTokens =
     "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(formattedResult.text))) ++ "]"
   let virtualTokens =
@@ -498,7 +507,18 @@ provide let compileToJson = (source: String) => {
   let loweredStore = CoreIndexer.indexProgram(lowered)
   lastStore = Some(loweredStore)
   let loweredStoreJson = NS.storeToJson(loweredStore)
-  let marksJson = markBundleToJson(parseResult, diagnostics, markedDiagnostics)
+  let allDiagnostics = List.append(
+    diagnostics,
+    List.append(formatterDiagnostics, List.append(virtualDiagnostics, fixDiagnostics)),
+  )
+  let allMarked = List.append(
+    markedDiagnostics,
+    List.append(
+      formatterMarkedDiagnostics,
+      List.append(virtualMarkedDiagnostics, fixMarkedDiagnostics),
+    ),
+  )
+  let marksJson = markBundleToJson(parseResult, allDiagnostics, allMarked)
   
   "{\"tokens\":" ++ tokensJson ++
   ",\"surfaceNodeStore\":" ++ surfaceStoreJson ++

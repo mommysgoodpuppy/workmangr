@@ -20,6 +20,23 @@ let canonicalNonWs = (text: String) => {
   String.replaceAll("\r", "", noLf)
 }
 
+let truncate = (text: String, max: Number) => {
+  if (String.length(text) <= max) {
+    text
+  } else {
+    String.slice(0, end=max, text) ++ "..."
+  }
+}
+
+let sliceWithContext = (text: String, start: Number, end: Number, context: Number) => {
+  let len = String.length(text)
+  let left = if (start > context) { start - context } else { 0 }
+  let right = if (end + context < len) { end + context } else { len }
+  let prefix = if (left > 0) { "..." } else { "" }
+  let suffix = if (right < len) { "..." } else { "" }
+  prefix ++ String.slice(left, end=right, text) ++ suffix
+}
+
 provide enum Mode {
   Real,
   Virtual,
@@ -1613,7 +1630,7 @@ let alignRealIfNeeded = (source: String, rendered) => {
     }
 
     if (prefix == sourceLen && prefix == formattedLen) {
-      (formattedText, false, 0, 0)
+      (formattedText, false, 0, 0, 0, 0)
     } else {
       let sourceStart =
         if (prefix < sourceLen) {
@@ -1645,7 +1662,7 @@ let alignRealIfNeeded = (source: String, rendered) => {
       let suffixText =
         String.slice(formattedEnd, end=String.length(formattedText), formattedText)
       let merged = prefixText ++ middleText ++ suffixText
-      (merged, true, sourceStart, sourceEnd)
+      (merged, true, sourceStart, sourceEnd, formattedStart, formattedEnd)
     }
   }
 
@@ -1654,9 +1671,12 @@ let alignRealIfNeeded = (source: String, rendered) => {
     let mut changed = false
     let mut lastStart = 0
     let mut lastEnd = 0
+    let mut lastFormattedStart = 0
+    let mut lastFormattedEnd = 0
     let mut attempts = 0
     while (attempts < 4) {
-      let (next, didChange, start, end) = alignOnce(sourceText, current)
+      let (next, didChange, start, end, fmtStart, fmtEnd) =
+        alignOnce(sourceText, current)
       if (!didChange) {
         break
       }
@@ -1664,12 +1684,15 @@ let alignRealIfNeeded = (source: String, rendered) => {
       changed = true
       lastStart = start
       lastEnd = end
+      lastFormattedStart = fmtStart
+      lastFormattedEnd = fmtEnd
       attempts = attempts + 1
     }
-    (current, changed, lastStart, lastEnd)
+    (current, changed, lastStart, lastEnd, lastFormattedStart, lastFormattedEnd)
   }
 
-  let (aligned, didChange, mismatchStart, mismatchEnd) = alignReal(source, rendered.text)
+  let (aligned, didChange, mismatchStart, mismatchEnd, mismatchFmtStart, mismatchFmtEnd) =
+    alignReal(source, rendered.text)
   if (didChange) {
     let lc = Source.offsetToLineCol(source, mismatchStart)
     let span = Source.makeSpan(lc.line, lc.col, mismatchStart, mismatchEnd)
@@ -1678,11 +1701,20 @@ let alignRealIfNeeded = (source: String, rendered) => {
       kind: SurfaceAst.FormattingMismatch("real formatter divergence"),
       expected: SurfaceAst.ExpectToken,
     }
+    let expectedSlice = sliceWithContext(source, mismatchStart, mismatchEnd, 5)
+    let actualSlice = sliceWithContext(rendered.text, mismatchFmtStart, mismatchFmtEnd, 5)
+    let expectedRaw = if (String.length(expectedSlice) == 0) { "<empty>" } else { expectedSlice }
+    let actualRaw = if (String.length(actualSlice) == 0) { "<empty>" } else { actualSlice }
+    let expected = truncate(expectedRaw, 120)
+    let actual = truncate(actualRaw, 120)
+    let diff =
+      "\n-   " ++ actual ++
+      "\n+   " ++ expected
     let _ =
       Error.createMarkedError(
         Error.Parsing,
         mark,
-        "Formatter could not preserve all tokens; left opaque segment",
+        "Formatter could not preserve all tokens; left opaque segment" ++ diff,
         void,
       )
     { ...rendered, text: aligned }
