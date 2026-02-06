@@ -94,15 +94,18 @@ let main = () => {
     "expected block body to fold into Let(binding, body)",
   )
 
-  let seqSource = "let x = 1; 2;"
+  let seqSource = "let x = (1; 2);"
   let seqProgram = Parser.parse(seqSource)
   let seqOk = match (seqProgram.items) {
     [SurfaceAst.DeclGroup(dg)] => match (dg.decls) {
       [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
         [binding] => match (binding.value.kind) {
-          SurfaceAst.Let(seqBinding, seqBody) =>
-            match ((seqBinding.value.kind, seqBody.kind)) {
-              (SurfaceAst.Lit(SurfaceAst.Int(1)), SurfaceAst.Lit(SurfaceAst.Int(2))) => true,
+          SurfaceAst.Seq(items) =>
+            match (items) {
+              [
+                { kind: SurfaceAst.Lit(SurfaceAst.Int(1)), _ },
+                { kind: SurfaceAst.Lit(SurfaceAst.Int(2)), _ },
+              ] => true,
               _ => false,
             },
           _ => false,

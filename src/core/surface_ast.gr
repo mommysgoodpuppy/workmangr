@@ -71,6 +71,7 @@ provide enum rec ExprKind {
   Paren(Expr),
   Tuple(List<Expr>),
   RecordLit(List<RecordItem>),
+  Seq(List<Expr>),
   Hole(Hole),
   If(Expr, Expr, Option<Expr>),
   Let(LetBinding, Expr),

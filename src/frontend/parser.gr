@@ -33,7 +33,6 @@ record ParseState {
   tokens: List<Lexer.Token>,
   nextId: Number, // token id
   allTokens: List<Lexer.Token>,
-  tolerant: Bool,
   missingSemicolons: List<MissingSemicolonRecovery>,
 }
 
@@ -204,32 +203,22 @@ let recoverMissingTopLevelSemicolon = (
   anchorSpan: Source.Span,
 ) => {
   let atTok = currentToken(state)
-  if (state.tolerant) {
-    let recovery: MissingSemicolonRecovery = {
-      text: ";",
-      start: anchorSpan.end,
-      end: anchorSpan.end,
-      line: atTok.span.line,
-      col: atTok.span.col,
-      reason: "required top-level terminator",
-    }
-    let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
-    Error.createError(
-      Error.Parsing,
-      atTok.span,
-      "Expected ';' after top-level declaration",
-      updated,
-      clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
-    )
-  } else {
-    Error.createError(
-      Error.Parsing,
-      atTok.span,
-      "Expected ';' after top-level declaration",
-      state,
-      clues=[Error.Received(Lexer.tokenKindToString(atTok.kind))],
-    )
+  let recovery: MissingSemicolonRecovery = {
+    text: ";",
+    start: anchorSpan.end,
+    end: anchorSpan.end,
+    line: atTok.span.line,
+    col: atTok.span.col,
+    reason: "required top-level terminator",
   }
+  let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
+  Error.createError(
+    Error.Parsing,
+    atTok.span,
+    "Expected ';' after top-level declaration",
+    updated,
+    clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
+  )
 }
 
 let consumeTopLevelSemicolon = (state: ParseState, anchorSpan: Source.Span) =>
@@ -254,32 +243,22 @@ let topItemSpan = (item: SurfaceAst.TopItem) =>
 
 let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) => {
   let atTok = currentToken(state)
-  if (state.tolerant) {
-    let recovery: MissingSemicolonRecovery = {
-      text: ";",
-      start: anchorSpan.end,
-      end: anchorSpan.end,
-      line: atTok.span.line,
-      col: atTok.span.col,
-      reason: "required statement terminator",
-    }
-    let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
-    Error.createError(
-      Error.Parsing,
-      atTok.span,
-      "Expected ';' after statement",
-      updated,
-      clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
-    )
-  } else {
-    Error.createError(
-      Error.Parsing,
-      atTok.span,
-      "Expected ';' after statement",
-      state,
-      clues=[Error.Received(Lexer.tokenKindToString(atTok.kind))],
-    )
+  let recovery: MissingSemicolonRecovery = {
+    text: ";",
+    start: anchorSpan.end,
+    end: anchorSpan.end,
+    line: atTok.span.line,
+    col: atTok.span.col,
+    reason: "required statement terminator",
   }
+  let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
+  Error.createError(
+    Error.Parsing,
+    atTok.span,
+    "Expected ';' after statement",
+    updated,
+    clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
+  )
 }
 
 let startsBlockStatement = (tok: Lexer.Token) =>
@@ -322,6 +301,14 @@ let isOpaqueLineStart = (state: ParseState) => {
         None => false,
       }
     },
+    _ => false,
+  }
+}
+
+let isOpaqueTopLevelStart = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LitName(name) when !isKeywordName(name) => true,
     _ => false,
   }
 }
@@ -505,7 +492,7 @@ let expectSimpleOrRecover = (expected, state: ParseState, context: String) => {
   let tok = currentToken(state)
   if (kindIs(tok.kind, expected)) {
     expectSimple(expected, state)
-  } else if (state.tolerant) {
+  } else {
     let syntheticSpan = Source.makeSpan(tok.span.line, tok.span.col, tok.span.start, tok.span.start)
     let synthetic: Lexer.Token = { kind: expected, span: syntheticSpan, mate: None }
     let recoveryTok: Lexer.Token = Error.createError(
@@ -519,13 +506,6 @@ let expectSimpleOrRecover = (expected, state: ParseState, context: String) => {
       ],
     )
     (recoveryTok, state)
-  } else {
-    Error.createPanicError(
-      Error.Parsing,
-      tok.span,
-      "Expected " ++ Lexer.tokenKindToString(expected) ++ " " ++ context,
-      [Error.Received(Lexer.tokenKindToString(tok.kind))]
-    )
   }
 }
 
@@ -617,9 +597,7 @@ let blockItemsToBody = (
 }
 
 //parse
-let rec parseExpr: Parser<SurfaceAst.Expr> = state => parseExprWithSeq(state, true)
-and parseExprNoSeq: Parser<SurfaceAst.Expr> = state => parseExprWithSeq(state, false)
-and parseExprWithSeq = (state: ParseState, allowSeq: Bool) => {
+let rec parseExpr: Parser<SurfaceAst.Expr> = state => {
   let (leadingTrivia, state0) = takeLeadingGapTrivia(state, [])
   let (coreExpr: SurfaceAst.Expr, coreState) = parseInfix(state0)
   let (expr, state1) = match (currentToken(coreState).kind) {
@@ -628,7 +606,7 @@ and parseExprWithSeq = (state: ParseState, allowSeq: Bool) => {
       let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.FatArrow, stateAfterId)
       let (opId, state2b) = freshId(state2)
-      let (rhs, state3): (SurfaceAst.Expr, ParseState) = parseExprWithSeq(state2b, allowSeq)
+      let (rhs, state3): (SurfaceAst.Expr, ParseState) = parseExpr(state2b)
       let span = spanFromTokens(coreExpr.node.span, rhs.node.span)
       let node: SurfaceAst.Expr = makeExpr(
         id,
@@ -647,7 +625,7 @@ and parseExprWithSeq = (state: ParseState, allowSeq: Bool) => {
       let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.PipeArrow, stateAfterId)
       let (opId, state2b) = freshId(state2)
-      let (rhs, state3) = parseExprWithSeq(state2b, allowSeq)
+      let (rhs, state3) = parseExpr(state2b)
       let span = spanFromTokens(coreExpr.node.span, rhs.node.span)
       let node = makeExpr(
         id,
@@ -665,27 +643,7 @@ and parseExprWithSeq = (state: ParseState, allowSeq: Bool) => {
   }
   let (trailingTrivia, state2) = takeTrailingGapTriviaOnLine(expr.node.span.line, state1, [])
   let exprWithAttach = withExprAttachments(expr, leadingTrivia, trailingTrivia)
-  if (allowSeq && kindIs(currentToken(state2).kind, Lexer.SemiColon)) {
-    let stateAfterSemi = dropToken(state2)
-    if (isValueBoundary(currentToken(stateAfterSemi))) {
-      (exprWithAttach, state2)
-    } else {
-      let (rhs, state4) = parseExprWithSeq(stateAfterSemi, allowSeq)
-      let (pat, state5) = makeWildcardPattern(state4, exprWithAttach.node.span)
-      let (bindingId, state6) = freshId(state5)
-      let binding: SurfaceAst.LetBinding = {
-        node: { id: bindingId, span: exprWithAttach.node.span },
-        name: pat,
-        annotation: None,
-        hasEq: true,
-        value: exprWithAttach,
-      }
-      let (letExpr, state7) = makeLetExpr(state6, binding, rhs)
-      (letExpr, state7)
-    }
-  } else {
-    (exprWithAttach, state2)
-  }
+  (exprWithAttach, state2)
 }
 and parseInfix: Parser<SurfaceAst.Expr> = state => {
   let (expr: Expr, state1) = parseTerm(state)
@@ -1039,6 +997,38 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
           let span = spanFromTokens(tok.span, rparenTok.span)
           let expr: SurfaceAst.Expr = makeExpr(id, span, Tuple(List.reverse(exprs)))
           (expr, state4)
+        } else if (kindIs(currentToken(state3).kind, Lexer.SemiColon)) {
+          let mut exprs = [inner]
+          let mut currentState = state3
+          while (kindIs(currentToken(currentState).kind, Lexer.SemiColon)) {
+            let (_, state_temp) = expectSimple(Lexer.SemiColon, currentState)
+            let nextTok = currentToken(state_temp)
+            if (isValueBoundary(nextTok) || isOpaqueLineStart(state_temp)) {
+              let (holeExpr, state_after) = makeInferredExprHole(
+                state_temp,
+                nextTok.span,
+                "Expected expression after ';' in sequence",
+                [
+                  Error.Expected("expression"),
+                  Error.Received(Lexer.tokenKindToString(nextTok.kind)),
+                ],
+              )
+              exprs = [holeExpr, ...exprs]
+              currentState = state_after
+            } else {
+              let (nextExpr, state_next) = parseExpr(state_temp)
+              exprs = [nextExpr, ...exprs]
+              currentState = state_next
+            }
+          }
+          let (rparenTok, state4) = expectSimpleOrRecover(
+            Lexer.RParen,
+            currentState,
+            "to close sequence",
+          )
+          let span = spanFromTokens(tok.span, rparenTok.span)
+          let expr: SurfaceAst.Expr = makeExpr(id, span, Seq(List.reverse(exprs)))
+          (expr, state4)
         } else {
           let (rparenTok, state4) = expectSimpleOrRecover(
             Lexer.RParen,
@@ -1157,24 +1147,15 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
       (expr, state7)
     },
     _ => {
-      if (state.tolerant) {
-        makeInferredExprHole(
-          state,
-          tok.span,
-          "Expected expression",
-          [
-            Error.Expected("expression"),
-            Error.Received(Lexer.tokenKindToString(tok.kind)),
-          ],
-        )
-      } else {
-        Error.createPanicError(
-          Error.Parsing,
-          tok.span,
-          "Expected expression",
-          [Error.Received(Lexer.tokenKindToString(tok.kind))]
-        )
-      }
+      makeInferredExprHole(
+        state,
+        tok.span,
+        "Expected expression",
+        [
+          Error.Expected("expression"),
+          Error.Received(Lexer.tokenKindToString(tok.kind)),
+        ],
+      )
     },
   }
 }
@@ -1204,7 +1185,7 @@ and parseIf = (state: ParseState) => {
 and parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
   //print(tok)
-  if (state.tolerant && isOpaqueLineStart(state)) {
+  if (isOpaqueTopLevelStart(state)) {
     let (trivia, state1) = consumeOpaqueLine(state)
     let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
     let (rest, state2) = parseTopLevels(state1)
@@ -1297,33 +1278,16 @@ and parseTopLevels = (state: ParseState) => {
       ([typeDef, ...rest], state2)
     },
     _ => {
-      // Unknown in top-level context: mark as Mark and continue.
-      let state1 = dropToken(state)
-      let (id, state2) = freshId(state1)
-      let mark: SurfaceAst.Mark = {
-        node: { id, span: tok.span },
-        kind: SurfaceAst.UnknownTopLevel(Lexer.tokenKindToString(tok.kind)),
-        expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemAny),
-      }
-      let topRecovery: SurfaceAst.TopItem = Error.createError(
-        Error.Parsing,
-        tok.span,
-        "Unexpected token at top-level",
-        SurfaceAst.Mark(mark),
-        clues=[
-          Error.Expected("declaration or directive"),
-          Error.Received(Lexer.tokenKindToString(tok.kind)),
-        ],
-      )
-      let (rest, state3) = parseTopLevels(state2)
-      ([topRecovery, ...rest], state3)
+      let (trivia, state1) = consumeOpaqueLine(state)
+      let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
+      let (rest, state2) = parseTopLevels(state1)
+      ([topTrivia, ...rest], state2)
     },
   }
 }
 and parseBinding = (
   state: ParseState,
   startSpanOpt: Option<Source.Span>,
-  allowSeq: Bool,
 ) => {
   let (id, state1) = freshId(state)
   let (pattern, state2) = parsePattern(state1)
@@ -1346,10 +1310,7 @@ and parseBinding = (
   let (state4, hasEq) = if (kindIs(currentToken(state3).kind, Lexer.Eq)) {
     let (_, nextState) = expectSimple(Lexer.Eq, state3)
     (nextState, true)
-  } else if (
-    state3.tolerant
-    && (isValueBoundary(currentToken(state3)) || isOpaqueLineStart(state3))
-  ) {
+  } else if (isValueBoundary(currentToken(state3)) || isOpaqueLineStart(state3)) {
     let recoveryState = Error.createError(
       Error.Parsing,
       currentToken(state3).span,
@@ -1371,7 +1332,6 @@ and parseBinding = (
   }
   let (value, state5): (SurfaceAst.Expr, ParseState) = if (
     hasEq
-    && state4.tolerant
     && (isValueBoundary(currentToken(state4)) || isOpaqueLineStart(state4))
   ) {
     makeInferredExprHole(
@@ -1384,7 +1344,7 @@ and parseBinding = (
       ],
     )
   } else if (hasEq) {
-    parseExprWithSeq(state4, allowSeq)
+    parseExpr(state4)
   } else {
     makeInferredExprHole(
       state4,
@@ -1426,12 +1386,12 @@ and parseLetGroup: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
   let (id, state1) = freshId(state)
   let (letTok, state2) = expectKeyword("let", state1)
   let (mods, state3) = parseLetMods(state2)
-  let (firstBinding, state4) = parseBinding(state3, Some(letTok.span), true)
+  let (firstBinding, state4) = parseBinding(state3, Some(letTok.span))
   let mut bindings = [firstBinding]
   let mut currentState = state4
   while (kindIs(currentToken(currentState).kind, Lexer.LitName("and"))) {
     let (andTok, state_temp) = expectKeyword("and", currentState)
-    let (binding, state_temp2) = parseBinding(state_temp, Some(andTok.span), true)
+    let (binding, state_temp2) = parseBinding(state_temp, Some(andTok.span))
     bindings = [binding, ...bindings]
     currentState = state_temp2
   }
@@ -1659,7 +1619,7 @@ and parseRecordDef = (state: ParseState) => {
   (topLevel, state11)
 }
 and parseBlockItems = (state: ParseState) => {
-  if (state.tolerant && isOpaqueLineStart(state)) {
+  if (isOpaqueLineStart(state)) {
     let (trivia, state1) = consumeOpaqueLine(state)
     let item = SurfaceAst.TriviaItem(trivia)
     let (restItems, state2) = parseBlockItems(state1)
@@ -1710,7 +1670,7 @@ and parseBlockItems = (state: ParseState) => {
     },
     Lexer.LitName("let") => {
       let (letTok, state_temp) = expectKeyword("let", state)
-      let (binding, state1) = parseBinding(state_temp, Some(letTok.span), false)
+      let (binding, state1) = parseBinding(state_temp, Some(letTok.span))
       if (kindIs(currentToken(state1).kind, Lexer.SemiColon)) {
         let state1b = dropToken(state1)
         let item = SurfaceAst.LetItem(binding)
@@ -1724,11 +1684,11 @@ and parseBlockItems = (state: ParseState) => {
       }
     },
     _ => {
-      let (expr, state1) = parseExprNoSeq(state)
+      let (expr, state1) = parseExpr(state)
       if (kindIs(currentToken(state1).kind, Lexer.Eq)) {
         let (_, stateAssign0) = expectSimple(Lexer.Eq, state1)
         let (assignValue, stateAssign1) = if (
-          stateAssign0.tolerant && isValueBoundary(currentToken(stateAssign0))
+          isValueBoundary(currentToken(stateAssign0))
         ) {
           makeInferredExprHole(
             stateAssign0,
@@ -1740,7 +1700,7 @@ and parseBlockItems = (state: ParseState) => {
             ],
           )
         } else {
-          parseExprNoSeq(stateAssign0)
+          parseExpr(stateAssign0)
         }
         let stateAssign2 = stateAssign1
         let (exprId, stateAssign3) = freshId(stateAssign2)
@@ -2348,7 +2308,6 @@ let parseWithRecovery = (source: String) => {
     tokens,
     nextId: 1,
     allTokens: tokens,
-    tolerant: true,
     missingSemicolons: [],
   }
   let (topLevels, _finalState) = parseTopLevels(initial)

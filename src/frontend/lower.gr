@@ -61,6 +61,11 @@ let makeUnitExpr = (node: SurfaceAst.Node) =>
 let makeTupleExpr = (node: SurfaceAst.Node, exprs: List<CoreAst.Expr>) =>
   makeExpr(node, CoreAst.Tuple(exprs))
 
+let makeWildcardPattern = (node: SurfaceAst.Node) => {
+  node: lowerNode(node),
+  kind: CoreAst.Wildcard,
+}: CoreAst.Pattern
+
 let rec lowerPattern = (pattern: SurfaceAst.Pattern) => {
   let kind: CoreAst.PatternKind = match (pattern.kind) {
     SurfaceAst.Hole(hole) => CoreAst.Hole(lowerHole(hole)),
@@ -323,6 +328,26 @@ and lowerAssignExpr = (exprNode: SurfaceAst.Node, asg: SurfaceAst.AssignExpr) =>
   makeExpr(exprNode, CoreAst.Apply(assignFn, arg))
 }
 
+and lowerSeqExpr = (exprNode: SurfaceAst.Node, items: List<SurfaceAst.Expr>) => {
+  let rec fold = (rest: List<SurfaceAst.Expr>) => {
+    match (rest) {
+      [] => makeUnitExpr(exprNode),
+      [only] => lowerExpr(only),
+      [head, ...tail] => {
+        let binding: CoreAst.LetBinding = {
+          node: lowerNode(head.node),
+          name: makeWildcardPattern(head.node),
+          annotation: None,
+          value: lowerExpr(head),
+        }
+        let body = fold(tail)
+        makeExpr(exprNode, CoreAst.Let(binding, body))
+      },
+    }
+  }
+  fold(items)
+}
+
 and lowerExpr = (expr: SurfaceAst.Expr) => {
   match (expr.kind: SurfaceAst.ExprKind) {
     SurfaceAst.Lit(lit) => makeExpr(expr.node, CoreAst.Lit(lowerAtomLiteral(lit))),
@@ -332,6 +357,7 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
     SurfaceAst.Tuple(exprs) => makeExpr(expr.node, CoreAst.Tuple(List.map(lowerExpr, exprs))),
     SurfaceAst.RecordLit(items) =>
       makeExpr(expr.node, CoreAst.RecordLit(List.map(lowerRecordItem, items))),
+    SurfaceAst.Seq(items) => lowerSeqExpr(expr.node, items),
     SurfaceAst.Apply(callee, arg) =>
       makeExpr(expr.node, CoreAst.Apply(lowerExpr(callee), lowerExpr(arg))),
     SurfaceAst.If(cond, thenExpr, elseOpt) => {

@@ -146,6 +146,7 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Paren(_) => "Paren",
       SurfaceAst.Tuple(_) => "Tuple",
       SurfaceAst.RecordLit(_) => "RecordLit",
+      SurfaceAst.Seq(_) => "Seq",
       SurfaceAst.Hole(_) => "Hole",
       SurfaceAst.If(_, _, _) => "If",
       SurfaceAst.Let(_, _) => "Let",
@@ -213,6 +214,10 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Tuple(exprs) => {
         let tupleExprs = List.map((e) => exprToJson(e, depth + 1), exprs)
         ",\"children\":[" ++ joinStrings(",", tupleExprs) ++ "]"
+      },
+      SurfaceAst.Seq(exprs) => {
+        let seqExprs = List.map((e) => exprToJson(e, depth + 1), exprs)
+        ",\"children\":[" ++ joinStrings(",", seqExprs) ++ "]"
       },
       SurfaceAst.InfixChain(chain) => {
         let firstJson = exprToJson(chain.first, depth + 1)

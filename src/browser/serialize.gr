@@ -88,6 +88,7 @@ let rec exprKindToString = (kind: SurfaceAst.ExprKind) => {
     SurfaceAst.Paren(_) => "Paren",
     SurfaceAst.Tuple(_) => "Tuple",
     SurfaceAst.RecordLit(_) => "RecordLit",
+    SurfaceAst.Seq(_) => "Seq",
     SurfaceAst.Hole(_) => "Hole",
     SurfaceAst.If(_, _, _) => "If",
     SurfaceAst.Let(_, _) => "Let",
@@ -160,6 +161,10 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       },
       SurfaceAst.Paren(inner) => ",\"children\":[" ++ exprToJson(inner, depth + 1) ++ "]",
       SurfaceAst.Tuple(exprs) => {
+        let items = List.map((e) => exprToJson(e, depth + 1), exprs)
+        ",\"children\":[" ++ String.join(",", items) ++ "]"
+      },
+      SurfaceAst.Seq(exprs) => {
         let items = List.map((e) => exprToJson(e, depth + 1), exprs)
         ",\"children\":[" ++ String.join(",", items) ++ "]"
       },

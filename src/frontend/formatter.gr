@@ -168,6 +168,7 @@ let renderWithSettings = (
         exprHasHole(block.body)
         || anyBlockItems(block.items),
       SurfaceAst.Paren(inner) => exprHasHole(inner),
+      SurfaceAst.Seq(items) => anyExprList(items),
       SurfaceAst.Tuple(items) => anyExprList(items),
       SurfaceAst.RecordLit(items) =>
         anyRecordItems(items),
@@ -305,6 +306,7 @@ let renderWithSettings = (
       SurfaceAst.Postfix(postfix) =>
         exprHasMissingRBrace(postfix.target) || anyPostfixMissingRBrace(postfix.segments),
       SurfaceAst.Paren(inner) => exprHasMissingRBrace(inner),
+      SurfaceAst.Seq(items) => anyExprMissingRBrace(items),
       SurfaceAst.Tuple(items) => anyExprMissingRBrace(items),
       SurfaceAst.RecordLit(items) => anyRecordItemsMissingRBrace(items),
       SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
@@ -741,6 +743,23 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
           SurfaceAst.Tuple(items) => {
             write("(")
             emitCommaSeparated(emitExpr, items)
+            write(")")
+          },
+          SurfaceAst.Seq(items) => {
+            write("(")
+            let rec emitSeq = (seqItems: List<SurfaceAst.Expr>) => {
+              match (seqItems) {
+                [] => void,
+                [single] => emitExpr(single),
+                [head, ...tail] => {
+                  emitExpr(head)
+                  write(";")
+                  space()
+                  emitSeq(tail)
+                },
+              }
+            }
+            emitSeq(items)
             write(")")
           },
           SurfaceAst.Hole(hole) => emitHole(hole),
