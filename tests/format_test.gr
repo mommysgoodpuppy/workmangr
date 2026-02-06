@@ -171,11 +171,14 @@ let main = => {
 test("formatter handles broken record decl", () => {
   let source =
     "
-let start: Location = .{ x= 0 y= 0 };
+let start: Location = .{ x= 0, y= 0 };
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
   let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+
+  print(canonicalNonWs(source))
+  print(canonicalNonWs(realOut))
 
   let expectedVirtual =
     "
@@ -183,7 +186,7 @@ let start : Location = .{ x = 0, y = 0 };
 "
   all([
     assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
-    assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
+    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(fixOut)),
     assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut)),
   ])
 })

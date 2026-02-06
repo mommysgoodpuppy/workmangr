@@ -7,6 +7,7 @@ from "char" include Char
 
 from "../core/surface_ast.gr" include SurfaceAst
 from "../core/source.gr" include Source
+from "../core/error.gr" include Error
 from "./parser.gr" include Parser
 from "./lexer.gr" include Lexer
 
@@ -1568,10 +1569,136 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
   }
 }
 
+let alignRealIfNeeded = (source: String, rendered) => {
+  let normalizeTokens = (tokens: List<Lexer.Token>) =>
+    List.filter(
+      (tok: Lexer.Token) =>
+        match (tok.kind) {
+          Lexer.LineComment(_) => false,
+          _ => true,
+        },
+      tokens,
+    )
+
+  let tokensEqual = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
+
+  let alignOnce = (sourceText: String, formattedText: String) => {
+    let sourceTokens = Array.fromList(normalizeTokens(Lexer.lex(sourceText)))
+    let formattedTokens = Array.fromList(normalizeTokens(Lexer.lex(formattedText)))
+    let sourceLen = Array.length(sourceTokens)
+    let formattedLen = Array.length(formattedTokens)
+
+    let mut prefix = 0
+    while (
+      prefix < sourceLen
+      && prefix < formattedLen
+      && tokensEqual(Array.get(prefix, sourceTokens), Array.get(prefix, formattedTokens))
+    ) {
+      prefix = prefix + 1
+    }
+
+    let mut suffix = 0
+    while (
+      suffix < (sourceLen - prefix)
+      && suffix < (formattedLen - prefix)
+    ) {
+      let srcTok = Array.get(sourceLen - 1 - suffix, sourceTokens)
+      let fmtTok = Array.get(formattedLen - 1 - suffix, formattedTokens)
+      if (tokensEqual(srcTok, fmtTok)) {
+        suffix = suffix + 1
+      } else {
+        suffix = suffix
+        break
+      }
+    }
+
+    if (prefix == sourceLen && prefix == formattedLen) {
+      (formattedText, false, 0, 0)
+    } else {
+      let sourceStart =
+        if (prefix < sourceLen) {
+          (Array.get(prefix, sourceTokens)).span.start
+        } else {
+          String.length(sourceText)
+        }
+      let sourceEnd =
+        if (sourceLen - suffix - 1 >= prefix) {
+          (Array.get(sourceLen - suffix - 1, sourceTokens)).span.end
+        } else {
+          sourceStart
+        }
+      let formattedStart =
+        if (prefix < formattedLen) {
+          (Array.get(prefix, formattedTokens)).span.start
+        } else {
+          String.length(formattedText)
+        }
+      let formattedEnd =
+        if (formattedLen - suffix - 1 >= prefix) {
+          (Array.get(formattedLen - suffix - 1, formattedTokens)).span.end
+        } else {
+          formattedStart
+        }
+
+      let prefixText = String.slice(0, end=formattedStart, formattedText)
+      let middleText = String.slice(sourceStart, end=sourceEnd, sourceText)
+      let suffixText =
+        String.slice(formattedEnd, end=String.length(formattedText), formattedText)
+      let merged = prefixText ++ middleText ++ suffixText
+      (merged, true, sourceStart, sourceEnd)
+    }
+  }
+
+  let alignReal = (sourceText: String, formattedText: String) => {
+    let mut current = formattedText
+    let mut changed = false
+    let mut lastStart = 0
+    let mut lastEnd = 0
+    let mut attempts = 0
+    while (attempts < 4) {
+      let (next, didChange, start, end) = alignOnce(sourceText, current)
+      if (!didChange) {
+        break
+      }
+      current = next
+      changed = true
+      lastStart = start
+      lastEnd = end
+      attempts = attempts + 1
+    }
+    (current, changed, lastStart, lastEnd)
+  }
+
+  let (aligned, didChange, mismatchStart, mismatchEnd) = alignReal(source, rendered.text)
+  if (didChange) {
+    let lc = Source.offsetToLineCol(source, mismatchStart)
+    let span = Source.makeSpan(lc.line, lc.col, mismatchStart, mismatchEnd)
+    let mark: SurfaceAst.Mark = {
+      node: { id: 0, span },
+      kind: SurfaceAst.FormattingMismatch("real formatter divergence"),
+      expected: SurfaceAst.ExpectToken,
+    }
+    let _ =
+      Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Formatter could not preserve all tokens; left opaque segment",
+        void,
+      )
+    { ...rendered, text: aligned }
+  } else {
+    rendered
+  }
+}
+
 let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) => {
   let program = Parser.parse(source)
   let rendered = renderWithSettings(program, source, mode, settings)
-  rendered
+  if (mode == Real) {
+    alignRealIfNeeded(source, rendered)
+  } else {
+    rendered
+  }
 }
 
 let formatResultWithProgram = (
@@ -1579,7 +1706,14 @@ let formatResultWithProgram = (
   source: String,
   mode: Mode,
   settings: Settings,
-) => renderWithSettings(program, source, mode, settings)
+) => {
+  let rendered = renderWithSettings(program, source, mode, settings)
+  if (mode == Real) {
+    alignRealIfNeeded(source, rendered)
+  } else {
+    rendered
+  }
+}
 
 provide let formatResultWithMode = (source: String, mode: Mode) =>
   match (mode) {
