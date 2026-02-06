@@ -247,14 +247,20 @@ let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) 
     text: ";",
     start: anchorSpan.end,
     end: anchorSpan.end,
-    line: atTok.span.line,
-    col: atTok.span.col,
+    line: anchorSpan.line,
+    col: anchorSpan.col,
     reason: "required statement terminator",
   }
   let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
+  let errSpan = Source.makeSpan(
+    anchorSpan.line,
+    anchorSpan.col,
+    anchorSpan.end,
+    anchorSpan.end,
+  )
   Error.createError(
     Error.Parsing,
-    atTok.span,
+    errSpan,
     "Expected ';' after statement",
     updated,
     clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
@@ -340,7 +346,12 @@ let makeInferredExprHole = (
 ) => {
   let tok = currentToken(state)
   let (id, state1) = freshId(state)
-  let span = Source.makeSpan(tok.span.line, tok.span.col, anchorSpan.end, anchorSpan.end)
+  let span = Source.makeSpan(
+    anchorSpan.line,
+    anchorSpan.col,
+    anchorSpan.end,
+    anchorSpan.end,
+  )
   let hole: SurfaceAst.Hole = {
     node: { id, span },
     kind: ExprHole,
@@ -349,7 +360,7 @@ let makeInferredExprHole = (
   let expr = makeExpr(id, span, Hole(hole))
   let recoveryExpr = Error.createError(
     Error.Parsing,
-    tok.span,
+    span,
     message,
     expr,
     clues=clues,
@@ -814,19 +825,38 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
   let (lbraceTok, state2) = expectSimple(Lexer.LBrace, state1)
   let (items, state3) = parseBlockItems(state2)
   let tokAfterItems = currentToken(state3)
+  let blockItemSpan = (item: SurfaceAst.BlockItem) =>
+    match (item) {
+      SurfaceAst.ExprItem(expr) => expr.node.span,
+      SurfaceAst.LetItem(binding) => binding.node.span,
+      SurfaceAst.MarkItem(mark) => mark.node.span,
+      SurfaceAst.TriviaItem(trivia) => trivia.node.span,
+      SurfaceAst.Directive(directive) => directive.name.node.span,
+      SurfaceAst.Semicolon => lbraceTok.span,
+    }
+  let anchorSpan = match (List.head(List.reverse(items))) {
+    Some(item) => blockItemSpan(item),
+    None => lbraceTok.span,
+  }
   let (items2, rbraceTok, state4) = if (kindIs(tokAfterItems.kind, Lexer.RBrace)) {
     let (rbraceTok, state4) = expectSimple(Lexer.RBrace, state3)
     (items, rbraceTok, state4)
   } else {
     let (markId, state4) = freshId(state3)
+    let markSpan = Source.makeSpan(
+      anchorSpan.line,
+      anchorSpan.col,
+      anchorSpan.end,
+      anchorSpan.end,
+    )
     let mark: SurfaceAst.Mark = {
-      node: { id: markId, span: tokAfterItems.span },
+      node: { id: markId, span: markSpan },
       kind: SurfaceAst.MissingRBrace,
       expected: SurfaceAst.ExpectToken,
     }
     let markItem: SurfaceAst.BlockItem = Error.createError(
       Error.Parsing,
-      tokAfterItems.span,
+      markSpan,
       "Expected '}' to close block",
       SurfaceAst.MarkItem(mark),
       clues=[Error.Expected("}"), Error.Received(Lexer.tokenKindToString(tokAfterItems.kind))],
@@ -1311,9 +1341,15 @@ and parseBinding = (
     let (_, nextState) = expectSimple(Lexer.Eq, state3)
     (nextState, true)
   } else if (isValueBoundary(currentToken(state3)) || isOpaqueLineStart(state3)) {
+    let errSpan = Source.makeSpan(
+      pattern.node.span.line,
+      pattern.node.span.col,
+      pattern.node.span.end,
+      pattern.node.span.end,
+    )
     let recoveryState = Error.createError(
       Error.Parsing,
-      currentToken(state3).span,
+      errSpan,
       "Expected '=' in let binding",
       state3,
       clues=[

@@ -1512,11 +1512,29 @@ let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) 
   rendered
 }
 
+let formatResultWithProgram = (
+  program: SurfaceAst.Program,
+  source: String,
+  mode: Mode,
+  settings: Settings,
+) => renderWithSettings(program, source, mode, settings)
+
 provide let formatResultWithMode = (source: String, mode: Mode) =>
   match (mode) {
     Real => formatResultWithSettings(source, mode, realSettings),
     Virtual => formatResultWithSettings(source, mode, virtualSettings),
     Fix => formatResultWithSettings(source, mode, fixSettings),
+  }
+
+provide let formatResultWithProgramMode = (
+  program: SurfaceAst.Program,
+  source: String,
+  mode: Mode,
+) =>
+  match (mode) {
+    Real => formatResultWithProgram(program, source, mode, realSettings),
+    Virtual => formatResultWithProgram(program, source, mode, virtualSettings),
+    Fix => formatResultWithProgram(program, source, mode, fixSettings),
   }
 
 provide let formatWithMode = (source: String, mode: Mode) => {

@@ -455,9 +455,19 @@ provide let compileToJson = (source: String) => {
   
   // Lower
   let lowered = Lower.lowerProgram(parsed)
-  let formattedResult = Formatter.formatResultWithMode(source, Formatter.Real)
-  let virtualResult = Formatter.formatResultWithMode(source, Formatter.Virtual)
-  let fixResult = Formatter.formatResultWithMode(source, Formatter.Fix)
+  let diagnostics = Error.getErrors()
+  Error.clearErrors()
+  let formattedResult = Formatter.formatResultWithProgramMode(
+    parsed,
+    source,
+    Formatter.Real,
+  )
+  let virtualResult = Formatter.formatResultWithProgramMode(
+    parsed,
+    source,
+    Formatter.Virtual,
+  )
+  let fixResult = Formatter.formatResultWithProgramMode(parsed, source, Formatter.Fix)
   let formattedTokens =
     "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(formattedResult.text))) ++ "]"
   let virtualTokens =
@@ -469,7 +479,7 @@ provide let compileToJson = (source: String) => {
   let loweredStore = CoreIndexer.indexProgram(lowered)
   lastStore = Some(loweredStore)
   let loweredStoreJson = NS.storeToJson(loweredStore)
-  let marksJson = markBundleToJson(parseResult, Error.getErrors())
+  let marksJson = markBundleToJson(parseResult, diagnostics)
   
   "{\"tokens\":" ++ tokensJson ++
   ",\"surfaceNodeStore\":" ++ surfaceStoreJson ++
