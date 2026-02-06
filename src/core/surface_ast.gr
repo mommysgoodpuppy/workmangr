@@ -146,6 +146,7 @@ and provide enum MarkKind {
   MissingTypeExpr(String),
   MissingBlock(String),
   FormattingMismatch(String),
+  UnexpectedToken(String),
 }
 and provide enum BlockItem {
   ExprItem(Expr),

@@ -399,6 +399,7 @@ let markToJson = (mark: SurfaceAst.Mark) => {
     SurfaceAst.MissingTypeExpr(raw) => ("MissingTypeExpr", raw),
     SurfaceAst.MissingBlock(raw) => ("MissingBlock", raw),
     SurfaceAst.FormattingMismatch(raw) => ("FormattingMismatch", raw),
+    SurfaceAst.UnexpectedToken(raw) => ("UnexpectedToken", raw),
   }
   "{\"kind\":\"" ++ kind ++ "\"," ++
   "\"text\":\"" ++ escapeJson(text) ++ "\"," ++

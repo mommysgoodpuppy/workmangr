@@ -909,27 +909,52 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
             let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
             currentState = state_temp
           } else {
-            let (fieldName, nameTok, state_temp) = expectName(currentState)
-            let (fieldExpr, state_temp3) = if (
-              kindIs(currentToken(state_temp).kind, Lexer.Eq)
-            ) {
-              let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
-              parseExpr(state_temp2)
-            } else {
-              (
-                makeExpr(
-                  id,
-                  nameTok.span,
-                  Ident({ node: { id, span: nameTok.span }, text: fieldName })
-                ),
-                state_temp,
-              )
+            let tokAt = currentToken(currentState)
+            let isName = match (tokAt.kind) {
+              Lexer.LitName(_) => true,
+              _ => false,
             }
-            fields = [(fieldName, nameTok, fieldExpr), ...fields]
-            currentState = state_temp3
-            if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
-              let (_, state_temp4) = expectSimple(Lexer.Comma, currentState)
-              currentState = state_temp4
+            if (!isName) {
+              let (markId, stateMark) = freshId(currentState)
+              let mark: SurfaceAst.Mark = {
+                node: { id: markId, span: tokAt.span },
+                kind: SurfaceAst.UnexpectedToken(Lexer.tokenKindToString(tokAt.kind)),
+                expected: SurfaceAst.ExpectToken,
+              }
+              let stateDropped = dropToken(stateMark)
+              currentState = Error.createMarkedError(
+                Error.Parsing,
+                mark,
+                "Unexpected token in record literal",
+                stateDropped,
+                clues=[
+                  Error.Expected("identifier"),
+                  Error.Received(Lexer.tokenKindToString(tokAt.kind)),
+                ],
+              )
+            } else {
+              let (fieldName, nameTok, state_temp) = expectName(currentState)
+              let (fieldExpr, state_temp3) = if (
+                kindIs(currentToken(state_temp).kind, Lexer.Eq)
+              ) {
+                let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
+                parseExpr(state_temp2)
+              } else {
+                (
+                  makeExpr(
+                    id,
+                    nameTok.span,
+                    Ident({ node: { id, span: nameTok.span }, text: fieldName })
+                  ),
+                  state_temp,
+                )
+              }
+              fields = [(fieldName, nameTok, fieldExpr), ...fields]
+              currentState = state_temp3
+              if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+                let (_, state_temp4) = expectSimple(Lexer.Comma, currentState)
+                currentState = state_temp4
+              }
             }
           }
         }
@@ -1069,27 +1094,52 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
           let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
           currentState = state_temp
         } else {
-          let (fieldName, nameTok, state_temp) = expectName(currentState)
-          let (fieldExpr, state_temp3) = if (
-            kindIs(currentToken(state_temp).kind, Lexer.Eq)
-          ) {
-            let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
-            parseExpr(state_temp2)
-          } else {
-            (
-              makeExpr(
-                id,
-                nameTok.span,
-                Ident({ node: { id, span: nameTok.span }, text: fieldName })
-              ),
-              state_temp,
-            )
+          let tokAt = currentToken(currentState)
+          let isName = match (tokAt.kind) {
+            Lexer.LitName(_) => true,
+            _ => false,
           }
-          fields = [(fieldName, nameTok, fieldExpr), ...fields]
-          currentState = state_temp3
-          if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
-            let (_, state_temp4) = expectSimple(Lexer.Comma, currentState)
-            currentState = state_temp4
+          if (!isName) {
+            let (markId, stateMark) = freshId(currentState)
+            let mark: SurfaceAst.Mark = {
+              node: { id: markId, span: tokAt.span },
+              kind: SurfaceAst.UnexpectedToken(Lexer.tokenKindToString(tokAt.kind)),
+              expected: SurfaceAst.ExpectToken,
+            }
+            let stateDropped = dropToken(stateMark)
+            currentState = Error.createMarkedError(
+              Error.Parsing,
+              mark,
+              "Unexpected token in record literal",
+              stateDropped,
+              clues=[
+                Error.Expected("identifier"),
+                Error.Received(Lexer.tokenKindToString(tokAt.kind)),
+              ],
+            )
+          } else {
+            let (fieldName, nameTok, state_temp) = expectName(currentState)
+            let (fieldExpr, state_temp3) = if (
+              kindIs(currentToken(state_temp).kind, Lexer.Eq)
+            ) {
+              let (_, state_temp2) = expectSimple(Lexer.Eq, state_temp)
+              parseExpr(state_temp2)
+            } else {
+              (
+                makeExpr(
+                  id,
+                  nameTok.span,
+                  Ident({ node: { id, span: nameTok.span }, text: fieldName })
+                ),
+                state_temp,
+              )
+            }
+            fields = [(fieldName, nameTok, fieldExpr), ...fields]
+            currentState = state_temp3
+            if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+              let (_, state_temp4) = expectSimple(Lexer.Comma, currentState)
+              currentState = state_temp4
+            }
           }
         }
       }
