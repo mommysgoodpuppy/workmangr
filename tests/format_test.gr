@@ -46,7 +46,73 @@ let main = => {
 
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
+
+  //step2
+  let source =
+    "
+let incompl
+"
+
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 })
+
+test("preserve trivia", () => {
+  let source =
+    "
+let main = => {
+  let x =
+
+// comment
+"
+
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
+
+
+  //step2
+  let source =
+    "
+let incompl
+
+// comment
+"
+
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
+})
+
+
+test("formatter real handles opaque trivia", () => {
+  let source =
+    "
+let main = => {
+  let x =
+
+just some random disruption
+
+}
+lorem
+//comment
+"
+
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
+
+  //step2
+  let source =
+    "
+let incompl
+
+just some random disruption
+} <- cuz why not Uppercase trivia
+"
+
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
+})
+
+
 
 test("formatter modes handle missing semicolon and brace", () => {
   let source =
@@ -129,7 +195,6 @@ let x = x;
 })
 
 
-
 test("fix mode inserts decidable semicolons", () => {
   let source =
     "
@@ -152,6 +217,27 @@ let main = => {
 "
   assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(fixOut))
 })
+
+test("formatter edge case", () => {
+  let source =
+    "
+let input = \"L1, R3, R1, L5, L2, L5\";
+
+export type GenericError =
+  | Error;
+
+// and a comment
+"
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
+
+  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
+  assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
+  assertEquals(canonicalNonWs(source), canonicalNonWs(virtualOut))
+})
+
+
 
 let results = runTests()
 printResultsAndExit(results)

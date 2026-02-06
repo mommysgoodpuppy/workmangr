@@ -237,6 +237,7 @@ and provide record LetBinding {
   node: Node,
   name: Pattern, // allow pattern binding (per manual)
   annotation: Option<TypeExpr>, // `: Type`
+  hasEq: Bool,
   value: Expr,
 }
 // export type rec infectious domain x =

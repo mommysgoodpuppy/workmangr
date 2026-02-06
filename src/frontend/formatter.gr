@@ -999,10 +999,12 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
         emitTypeExpr(ty)
       },
     }
-    space()
-    write("=")
-    space()
-    emitExpr(binding.value)
+    if (binding.hasEq || mode == Virtual) {
+      space()
+      write("=")
+      space()
+      emitExpr(binding.value)
+    }
   }
 
   and emitBinding = (binding: SurfaceAst.LetBinding) => {
@@ -1287,12 +1289,21 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
         }
         emitTopItem(item)
         let endSpan = topItemSpan(item)
-        if (hasTerminatorAfter(endSpan.end)) {
-          write(";")
-        } else if (mode == Virtual && settings.allowVirtualInsertions) {
-          write(";")
-        } else if (mode == Fix && settings.allowFixSemicolons) {
-          write(";")
+        let needsTerminator = match (item) {
+          SurfaceAst.DeclGroup(_)
+          | SurfaceAst.Import(_)
+          | SurfaceAst.Reexport(_)
+          | SurfaceAst.Directive(_) => true,
+          _ => false,
+        }
+        if (needsTerminator) {
+          if (hasTerminatorAfter(endSpan.end)) {
+            write(";")
+          } else if (mode == Virtual && settings.allowVirtualInsertions) {
+            write(";")
+          } else if (mode == Fix && settings.allowFixSemicolons) {
+            write(";")
+          }
         }
         emitProgramItems(tail)
       },

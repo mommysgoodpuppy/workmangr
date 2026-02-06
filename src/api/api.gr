@@ -449,6 +449,13 @@ provide let compileToJson = (source: String) => {
   let lowered = Lower.lowerProgram(parsed)
   let formattedResult = Formatter.formatResultWithMode(source, Formatter.Real)
   let virtualResult = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let fixResult = Formatter.formatResultWithMode(source, Formatter.Fix)
+  let formattedTokens =
+    "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(formattedResult.text))) ++ "]"
+  let virtualTokens =
+    "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(virtualResult.text))) ++ "]"
+  let fixTokens =
+    "[" ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(fixResult.text))) ++ "]"
   
   // Index the lowered AST into a NodeStore
   let loweredStore = CoreIndexer.indexProgram(lowered)
@@ -461,7 +468,11 @@ provide let compileToJson = (source: String) => {
   ",\"loweredNodeStore\":" ++ loweredStoreJson ++
   ",\"marks\":" ++ marksJson ++
   ",\"formatted\":\"" ++ escapeJson(formattedResult.text) ++ "\"" ++
+  ",\"formattedTokens\":" ++ formattedTokens ++
   ",\"formattedVirtual\":\"" ++ escapeJson(virtualResult.text) ++ "\"" ++
+  ",\"formattedVirtualTokens\":" ++ virtualTokens ++
+  ",\"formattedFix\":\"" ++ escapeJson(fixResult.text) ++ "\"" ++
+  ",\"formattedFixTokens\":" ++ fixTokens ++
   ",\"formattedVirtualArtifacts\":" ++ virtualArtifactsToJson(virtualResult.virtualArtifacts) ++ "}"
 }
 

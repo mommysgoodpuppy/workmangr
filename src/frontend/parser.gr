@@ -511,6 +511,7 @@ let blockItemsToBody = (
                 node: { id: bindingId, span: expr.node.span },
                 name: pat,
                 annotation: None,
+                hasEq: true,
                 value: expr,
               }
               let (letExpr, state5) = makeLetExpr(state4, binding, body)
@@ -525,6 +526,7 @@ let blockItemsToBody = (
                     node: { id: bindingId, span: expr.node.span },
                     name: pat,
                     annotation: None,
+                    hasEq: true,
                     value: expr,
                   }
                   let (letExpr, state4) = makeLetExpr(state3, binding, body)
@@ -619,6 +621,7 @@ and parseExprWithSeq = (state: ParseState, allowSeq: Bool) => {
         node: { id: bindingId, span: exprWithAttach.node.span },
         name: pat,
         annotation: None,
+        hasEq: true,
         value: exprWithAttach,
       }
       let (letExpr, state7) = makeLetExpr(state6, binding, rhs)
@@ -1254,13 +1257,14 @@ and parseBinding = (
 ) => {
   let (id, state1) = freshId(state)
   let (pattern, state2) = parsePattern(state1)
-  let rec skipLineComments = (stateX: ParseState) => {
+  let rec skipLineComments = (line: Number, stateX: ParseState) => {
     match (currentToken(stateX).kind) {
-      Lexer.LineComment(_) => skipLineComments(dropToken(stateX)),
+      Lexer.LineComment(_) when currentToken(stateX).span.line == line =>
+        skipLineComments(line, dropToken(stateX)),
       _ => stateX,
     }
   }
-  let state2b = skipLineComments(state2)
+  let state2b = skipLineComments(pattern.node.span.line, state2)
   //Optionally parse type annotation after ':'
   let (typeOpt, state3) = if (kindIs(currentToken(state2b).kind, Lexer.Colon)) {
     let (_, state_temp) = expectSimple(Lexer.Colon, state2b)
@@ -1326,6 +1330,7 @@ and parseBinding = (
     node: { id, span },
     name: pattern,
     annotation: typeOpt,
+    hasEq,
     value,
   }
   (binding, state5)
