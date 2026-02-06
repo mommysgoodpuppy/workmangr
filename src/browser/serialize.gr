@@ -207,6 +207,12 @@ let topItemToJson = (item: SurfaceAst.TopItem) => {
           "{\"type\":\"Mark\",\"kind\":\"InvalidTopLevel\",\"text\":\""
           ++ escapeJson(text) ++ "\",\"expected\":\""
           ++ expectedKindToString(Mark.expected) ++ "\"}",
+        SurfaceAst.MissingSemicolon =>
+          "{\"type\":\"Mark\",\"kind\":\"MissingSemicolon\",\"expected\":\""
+          ++ expectedKindToString(Mark.expected) ++ "\"}",
+        SurfaceAst.MissingRBrace =>
+          "{\"type\":\"Mark\",\"kind\":\"MissingRBrace\",\"expected\":\""
+          ++ expectedKindToString(Mark.expected) ++ "\"}",
       },
     SurfaceAst.Trivia(_) => "{\"type\":\"Trivia\"}"
   }

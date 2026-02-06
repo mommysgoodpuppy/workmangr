@@ -59,6 +59,7 @@ let tokenToJson = (tok: Lexer.Token) => {
     Lexer.Slash => "Slash",
     Lexer.DSlash => "DSlash",
     Lexer.LineComment(_) => "LineComment",
+    Lexer.Opaque(_) => "Opaque",
     Lexer.Arrow => "Arrow",
     Lexer.Period => "Period",
     Lexer.DotBrace => "DotBrace",
@@ -296,6 +297,8 @@ let topItemToJson = (item: SurfaceAst.TopItem) => {
       let (kindStr, text) = match (mark.kind) {
         SurfaceAst.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
         SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
+        SurfaceAst.MissingSemicolon => ("MissingSemicolon", ""),
+        SurfaceAst.MissingRBrace => ("MissingRBrace", ""),
       }
       "{\"type\":\"Mark\",\"kind\":\"" ++ kindStr ++ "\",\"text\":\""
       ++ escapeJson(text) ++ "\",\"expected\":\""

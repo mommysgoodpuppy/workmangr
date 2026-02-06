@@ -4,6 +4,7 @@ from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
 from "list" include List
 from "string" include String
+from "array" include Array
 
 from "../core/surface_ast.gr" include SurfaceAst
 use SurfaceAst.*
@@ -105,6 +106,13 @@ let rec takeLeadingGapTrivia = (state: ParseState, acc: List<SurfaceAst.Trivia>)
           let trivia = makeLineTrivia(id, tok.span, text)
           takeLeadingGapTrivia(state2, [trivia, ...acc])
         },
+        Lexer.Opaque(text) => {
+          let state1 = { ...state, tokens: tail }
+          let id = state1.nextId
+          let state2 = { ...state1, nextId: id + 1 }
+          let trivia = makeOpaqueTrivia(id, tok.span, text)
+          takeLeadingGapTrivia(state2, [trivia, ...acc])
+        },
         _ => (List.reverse(acc), state),
       },
     _ => (List.reverse(acc), state),
@@ -124,6 +132,13 @@ let rec takeTrailingGapTriviaOnLine = (
           let id = state1.nextId
           let state2 = { ...state1, nextId: id + 1 }
           let trivia = makeLineTrivia(id, tok.span, text)
+          takeTrailingGapTriviaOnLine(line, state2, [trivia, ...acc])
+        },
+        Lexer.Opaque(text) when tok.span.line == line => {
+          let state1 = { ...state, tokens: tail }
+          let id = state1.nextId
+          let state2 = { ...state1, nextId: id + 1 }
+          let trivia = makeOpaqueTrivia(id, tok.span, text)
           takeTrailingGapTriviaOnLine(line, state2, [trivia, ...acc])
         },
         _ => (List.reverse(acc), state),
@@ -176,6 +191,7 @@ let isTopLevelBoundary = (tok: Lexer.Token) =>
     Lexer.EOF => true,
     Lexer.SemiColon => true,
     Lexer.LineComment(_) => true,
+    Lexer.Opaque(_) => true,
     Lexer.LitName(name) when (
       name == "let" || name == "export" || name == "type" || name == "record"
     ) =>
@@ -280,6 +296,7 @@ let isValueBoundary = (tok: Lexer.Token) =>
     Lexer.RBrace => true,
     Lexer.EOF => true,
     Lexer.LineComment(_) => true,
+    Lexer.Opaque(_) => true,
     Lexer.Directive => true,
     Lexer.LitName(name) when (
       name == "let" || name == "and" || name == "type" || name == "record"
@@ -288,6 +305,45 @@ let isValueBoundary = (tok: Lexer.Token) =>
       true,
     _ => false,
   }
+
+let isKeywordName = (name: String) =>
+  name == "let" || name == "and" || name == "type" || name == "record"
+  || name == "export" || name == "import" || name == "reexport"
+
+let isOpaqueLineStart = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LitName(name) when !isKeywordName(name) => {
+      let nextTok = tokenAt(state.tokens, 1)
+      match (nextTok) {
+        Some(next) =>
+          next.span.line == tok.span.line
+          && match (next.kind) { Lexer.LitName(_) => true, _ => false },
+        None => false,
+      }
+    },
+    _ => false,
+  }
+}
+
+let consumeOpaqueLine = (state: ParseState) => {
+  let tok = currentToken(state)
+  let line = tok.span.line
+  let rec gather = (tokens: List<Lexer.Token>, acc: List<String>) => {
+    match (tokens) {
+      [t, ...rest] when t.span.line == line => {
+        let text = Lexer.tokenKindToString(t.kind)
+        gather(rest, [text, ...acc])
+      },
+      _ => (List.reverse(acc), tokens),
+    }
+  }
+  let (parts, remaining) = gather(state.tokens, [])
+  let text = Array.join(" ", Array.fromList(parts))
+  let (id, state1) = freshId({ ...state, tokens: remaining })
+  let trivia = makeOpaqueTrivia(id, tok.span, text)
+  (trivia, state1)
+}
 
 let makeInferredExprHole = (
   state: ParseState,
@@ -1148,6 +1204,12 @@ and parseIf = (state: ParseState) => {
 and parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
   //print(tok)
+  if (state.tolerant && isOpaqueLineStart(state)) {
+    let (trivia, state1) = consumeOpaqueLine(state)
+    let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
+    let (rest, state2) = parseTopLevels(state1)
+    ([topTrivia, ...rest], state2)
+  } else
   match (tok.kind) {
     Lexer.EOF => ([], state),
     Lexer.SemiColon => {
@@ -1159,6 +1221,14 @@ and parseTopLevels = (state: ParseState) => {
       let state1 = dropToken(state)
       let (id, state2) = freshId(state1)
       let trivia = makeLineTrivia(id, tok.span, text)
+      let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
+      let (rest, state3) = parseTopLevels(state2)
+      ([topTrivia, ...rest], state3)
+    },
+    Lexer.Opaque(text) => {
+      let state1 = dropToken(state)
+      let (id, state2) = freshId(state1)
+      let trivia = makeOpaqueTrivia(id, tok.span, text)
       let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
       let (rest, state3) = parseTopLevels(state2)
       ([topTrivia, ...rest], state3)
@@ -1276,7 +1346,10 @@ and parseBinding = (
   let (state4, hasEq) = if (kindIs(currentToken(state3).kind, Lexer.Eq)) {
     let (_, nextState) = expectSimple(Lexer.Eq, state3)
     (nextState, true)
-  } else if (state3.tolerant && isValueBoundary(currentToken(state3))) {
+  } else if (
+    state3.tolerant
+    && (isValueBoundary(currentToken(state3)) || isOpaqueLineStart(state3))
+  ) {
     let recoveryState = Error.createError(
       Error.Parsing,
       currentToken(state3).span,
@@ -1297,7 +1370,9 @@ and parseBinding = (
     )
   }
   let (value, state5): (SurfaceAst.Expr, ParseState) = if (
-    hasEq && state4.tolerant && isValueBoundary(currentToken(state4))
+    hasEq
+    && state4.tolerant
+    && (isValueBoundary(currentToken(state4)) || isOpaqueLineStart(state4))
   ) {
     makeInferredExprHole(
       state4,
@@ -1584,6 +1659,12 @@ and parseRecordDef = (state: ParseState) => {
   (topLevel, state11)
 }
 and parseBlockItems = (state: ParseState) => {
+  if (state.tolerant && isOpaqueLineStart(state)) {
+    let (trivia, state1) = consumeOpaqueLine(state)
+    let item = SurfaceAst.TriviaItem(trivia)
+    let (restItems, state2) = parseBlockItems(state1)
+    ([item, ...restItems], state2)
+  } else {
   let makeMissingSemicolonItem = (stateX: ParseState, anchorSpan: Source.Span) => {
     let atTok = currentToken(stateX)
     let (id, state1) = freshId(stateX)
@@ -1615,6 +1696,14 @@ and parseBlockItems = (state: ParseState) => {
       let state1 = dropToken(state)
       let (id, state2) = freshId(state1)
       let trivia = makeLineTrivia(id, tok.span, text)
+      let item = SurfaceAst.TriviaItem(trivia)
+      let (restItems, state3) = parseBlockItems(state2)
+      ([item, ...restItems], state3)
+    },
+    Lexer.Opaque(text) => {
+      let state1 = dropToken(state)
+      let (id, state2) = freshId(state1)
+      let trivia = makeOpaqueTrivia(id, tok.span, text)
       let item = SurfaceAst.TriviaItem(trivia)
       let (restItems, state3) = parseBlockItems(state2)
       ([item, ...restItems], state3)
@@ -1706,6 +1795,7 @@ and parseBlockItems = (state: ParseState) => {
         }
       }
     },
+  }
   }
 }
 

@@ -112,6 +112,38 @@ just some random disruption
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 })
 
+test("edge case with trivia", () => {
+  let source =
+    "
+let start: Location = .{ x= 0, y= 0 };
+
+random trivia
+let x =
+"
+
+  let expectedVirtual =
+    "
+let start: Location = .{ x= 0, y= 0 };
+
+random trivia
+let x = ?;
+"
+
+  let expectedFix =
+    "
+let start: Location = .{ x= 0, y= 0 };
+
+random trivia
+let x =
+"
+
+  let outVirtual = Formatter.formatWithMode(source, Formatter.Virtual)
+  let outFix = Formatter.formatWithMode(source, Formatter.Fix
+  )
+  assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(outVirtual))
+  assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(outFix))
+
+})
 
 
 test("formatter modes handle missing semicolon and brace", () => {

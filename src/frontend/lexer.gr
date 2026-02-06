@@ -41,6 +41,7 @@ provide enum TokenKind {
   Slash, // /
   DSlash, // //
   LineComment(String), // //...
+  Opaque(String), // unknown text
   Arrow, // >
   Period, // .
   DotBrace, // .{
@@ -93,6 +94,7 @@ provide let tokenKindToString = kind => match (kind) {
   Slash => "/",
   DSlash => "//",
   LineComment(text) => text,
+  Opaque(text) => text,
   Arrow => ">",
   Period => ".",
   DotBrace => ".{",
@@ -847,13 +849,32 @@ provide let lex = source => {
             }
           },
           _ => {
-            let span = Source.makeSpan(pos.line, pos.col, pos.index, pos.index + 1)
-            Error.createPanicError(
-              Error.Lexing,
-              span,
-              "Unknown token",
-              [Error.Received(Char.toString(ch)), Error.Hint("check for invalid characters or syntax errors")]
-            )
+            let startIndex = pos.index
+            let mut endPos = pos
+            while (true) {
+              let nextChar = peek(endPos.index)
+              match (nextChar) {
+                None => break,
+                Some('\n') => break,
+                _ => {
+                  let currentChar = String.charAt(endPos.index, source)
+                  endPos = advancePosition(endPos, currentChar)
+                },
+              }
+            }
+            let text = String.slice(startIndex, end=endPos.index, source)
+            tokens = [
+              makeToken(
+                Opaque(text),
+                pos.line,
+                pos.col,
+                startIndex,
+                endPos.index,
+                None
+              ),
+              ...tokens
+            ]
+            pos = endPos
           },
         }
       },

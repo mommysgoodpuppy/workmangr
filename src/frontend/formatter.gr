@@ -272,6 +272,105 @@ let renderWithSettings = (
         hasHole || anyEffectCases(xs)
       },
     }
+
+  let rec blockHasMissingRBrace = (items: List<SurfaceAst.BlockItem>) =>
+    match (items) {
+      [] => false,
+      [item, ...rest] =>
+        match (item) {
+          SurfaceAst.MarkItem(mark) =>
+            match (mark.kind) {
+              SurfaceAst.MissingRBrace => true,
+              _ => blockHasMissingRBrace(rest),
+            },
+          _ => blockHasMissingRBrace(rest),
+        },
+    }
+
+  let rec exprHasMissingRBrace = (expr: SurfaceAst.Expr) =>
+    match (expr.kind) {
+      SurfaceAst.Block(block) =>
+        blockHasMissingRBrace(block.items) || exprHasMissingRBrace(block.body),
+      SurfaceAst.Fn(fnExpr) => anyFnItemMissingRBrace(fnExpr.items),
+      SurfaceAst.Match(matchExpr) =>
+        match (matchExpr.scrutinee) {
+          Some(e) => exprHasMissingRBrace(e),
+          None => false,
+        }
+        || anyFnItemMissingRBrace(matchExpr.bundle.items),
+      SurfaceAst.Apply(callee, arg) =>
+        exprHasMissingRBrace(callee) || exprHasMissingRBrace(arg),
+      SurfaceAst.InfixChain(chain) =>
+        exprHasMissingRBrace(chain.first) || anyInfixMissingRBrace(chain.rest),
+      SurfaceAst.Postfix(postfix) =>
+        exprHasMissingRBrace(postfix.target) || anyPostfixMissingRBrace(postfix.segments),
+      SurfaceAst.Paren(inner) => exprHasMissingRBrace(inner),
+      SurfaceAst.Tuple(items) => anyExprMissingRBrace(items),
+      SurfaceAst.RecordLit(items) => anyRecordItemsMissingRBrace(items),
+      SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
+        exprHasMissingRBrace(cond)
+        || exprHasMissingRBrace(thenExpr)
+        || match (elseExprOpt) { Some(e) => exprHasMissingRBrace(e), None => false },
+      SurfaceAst.Let(binding, body) =>
+        exprHasMissingRBrace(binding.value) || exprHasMissingRBrace(body),
+      SurfaceAst.Assign(assignExpr) =>
+        exprHasMissingRBrace(assignExpr.target) || exprHasMissingRBrace(assignExpr.value),
+      _ => false,
+    }
+
+  and anyFnItemMissingRBrace = (items: List<SurfaceAst.FnItem>) =>
+    match (items) {
+      [] => false,
+      [item, ...rest] => {
+        let hasMissing = match (item.kind) {
+          SurfaceAst.Clause(clause) =>
+            match (clause.guard) {
+              Some(g) => exprHasMissingRBrace(g),
+              None => false,
+            }
+            || exprHasMissingRBrace(clause.body.body),
+          _ => false,
+        }
+        hasMissing || anyFnItemMissingRBrace(rest)
+      },
+    }
+
+  and anyInfixMissingRBrace = (items: List<(SurfaceAst.Name, SurfaceAst.Expr)>) =>
+    match (items) {
+      [] => false,
+      [(_op, rhs), ...xs] => exprHasMissingRBrace(rhs) || anyInfixMissingRBrace(xs),
+    }
+
+  and anyPostfixMissingRBrace = (items: List<SurfaceAst.PostfixSegment>) =>
+    match (items) {
+      [] => false,
+      [seg, ...xs] => {
+        let hasMissing = match (seg) {
+          SurfaceAst.Call(args) => anyExprMissingRBrace(args),
+          SurfaceAst.Project(_) => false,
+          SurfaceAst.Index(idx) => exprHasMissingRBrace(idx),
+        }
+        hasMissing || anyPostfixMissingRBrace(xs)
+      },
+    }
+
+  and anyExprMissingRBrace = (items: List<SurfaceAst.Expr>) =>
+    match (items) {
+      [] => false,
+      [x, ...xs] => exprHasMissingRBrace(x) || anyExprMissingRBrace(xs),
+    }
+
+  and anyRecordItemsMissingRBrace = (items: List<SurfaceAst.RecordItem>) =>
+    match (items) {
+      [] => false,
+      [item, ...xs] => {
+        let hasMissing = match (item) {
+          SurfaceAst.Field(_, value) => exprHasMissingRBrace(value),
+          SurfaceAst.Spread(value) => exprHasMissingRBrace(value),
+        }
+        hasMissing || anyRecordItemsMissingRBrace(xs)
+      },
+    }
   let mut chunks: List<String> = []
   let mut artifacts: List<VirtualArtifact> = []
   let mut indent = 0
@@ -1276,6 +1375,72 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
     }
   }
 
+  let bindingIsDecidable = (binding: SurfaceAst.LetBinding) =>
+    binding.hasEq
+    && !patternHasHole(binding.name)
+    && match (binding.annotation) { Some(t) => !typeHasHole(t), None => true }
+    && !exprHasHole(binding.value)
+    && !exprHasMissingRBrace(binding.value)
+
+  let typeDeclIsDecidable = (decl: SurfaceAst.TypeDecl) =>
+    match (decl.body) {
+      SurfaceAst.Alias(ty) => !typeHasHole(ty),
+      SurfaceAst.Variant(cases) => {
+        let rec anyCaseHole = (items: List<(SurfaceAst.Name, Option<SurfaceAst.TypeExpr>, Option<SurfaceAst.Annotation>)>) =>
+          match (items) {
+            [] => false,
+            [(_name, payloadOpt, _ann), ...rest] => {
+              let hasHole = match (payloadOpt) { Some(t) => typeHasHole(t), None => false }
+              hasHole || anyCaseHole(rest)
+            },
+          }
+        !anyCaseHole(cases)
+      },
+    }
+
+  let recordDeclIsDecidable = (decl: SurfaceAst.RecordDecl) => {
+    let rec anyFieldHole = (items: List<(SurfaceAst.Name, SurfaceAst.TypeExpr)>) =>
+      match (items) {
+        [] => false,
+        [(_name, ty), ...rest] => typeHasHole(ty) || anyFieldHole(rest),
+      }
+    !anyFieldHole(decl.fields)
+  }
+
+  let declIsDecidable = (decl: SurfaceAst.Decl) =>
+    match (decl) {
+      SurfaceAst.LetDecl(letDecl) => {
+        let rec anyBindingUndecidable = (items: List<SurfaceAst.LetBinding>) =>
+          match (items) {
+            [] => false,
+            [binding, ...rest] => (!bindingIsDecidable(binding)) || anyBindingUndecidable(rest),
+          }
+        !anyBindingUndecidable(letDecl.bindings)
+      },
+      SurfaceAst.TypeDecl(typeDecl) => typeDeclIsDecidable(typeDecl),
+      SurfaceAst.RecordDecl(recordDecl) => recordDeclIsDecidable(recordDecl),
+      SurfaceAst.InfixDecl(_) => true,
+      SurfaceAst.PrefixDecl(_) => true,
+    }
+
+  let declGroupIsDecidable = (group: SurfaceAst.DeclGroup) => {
+    let rec anyDeclUndecidable = (items: List<SurfaceAst.Decl>) =>
+      match (items) {
+        [] => false,
+        [decl, ...rest] => (!declIsDecidable(decl)) || anyDeclUndecidable(rest),
+      }
+    !anyDeclUndecidable(group.decls)
+  }
+
+  let topItemIsDecidable = (item: SurfaceAst.TopItem) =>
+    match (item) {
+      SurfaceAst.DeclGroup(group) => declGroupIsDecidable(group),
+      SurfaceAst.Import(_) => true,
+      SurfaceAst.Reexport(_) => true,
+      SurfaceAst.Directive(_) => true,
+      _ => false,
+    }
+
   let mut firstTop = true
   let rec emitProgramItems = (items: List<SurfaceAst.TopItem>) => {
     match (items) {
@@ -1301,7 +1466,11 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
             write(";")
           } else if (mode == Virtual && settings.allowVirtualInsertions) {
             write(";")
-          } else if (mode == Fix && settings.allowFixSemicolons) {
+          } else if (
+            mode == Fix
+            && settings.allowFixSemicolons
+            && topItemIsDecidable(item)
+          ) {
             write(";")
           }
         }
