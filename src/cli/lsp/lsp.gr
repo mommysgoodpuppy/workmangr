@@ -1,0 +1,1030 @@
+module LSP
+
+from "array" include Array
+from "bytes" include Bytes
+from "list" include List
+from "map" include Map
+from "number" include Number
+from "string" include String
+from "wasi/file" include File
+from "json" include Json
+
+from "../../core/source.gr" include Source
+from "../../core/error.gr" include Error
+from "../../core/surface_ast.gr" include SurfaceAst
+from "../../frontend/parser.gr" include Parser
+from "../../frontend/formatter.gr" include Formatter
+from "../../frontend/lexer.gr" include Lexer
+
+record Position {
+  line: Number,
+  character: Number,
+}
+
+record MatchPoint {
+  virtOffset: Number,
+  virtLine: Number,
+  virtCol: Number,
+  srcLine: Number,
+  srcCol: Number,
+}
+
+record InsertChunk {
+  anchorOffset: Number,
+  virtOffset: Number,
+  text: String,
+  trailing: Bool,
+}
+
+let escapeJson = (s: String) => {
+  let step1 = String.replaceAll("\\", "\\\\", s)
+  let step2 = String.replaceAll("\"", "\\\"", step1)
+  let step3 = String.replaceAll("\n", "\\n", step2)
+  let step4 = String.replaceAll("\r", "\\r", step3)
+  String.replaceAll("\t", "\\t", step4)
+}
+
+let logErr = (text: String) => {
+  let _ = File.fdWrite(File.stderr, Bytes.fromString(text ++ "\n"))
+  void
+}
+
+let mut debugEnabled = true
+
+let debug = (text: String) => {
+  if (debugEnabled) {
+    logErr(text)
+  } else {
+    void
+  }
+}
+
+let writeStdout = (text: String) => {
+  let _ = File.fdWrite(File.stdout, Bytes.fromString(text))
+  void
+}
+
+let sendResponse = (idText: String, resultJson: String) => {
+  let body = "{\"jsonrpc\":\"2.0\",\"id\":"
+    ++ idText
+    ++ ",\"result\":"
+    ++ resultJson
+    ++ "}"
+  let header = "Content-Length: " ++ toString(String.length(body)) ++ "\r\n\r\n"
+  writeStdout(header ++ body)
+}
+
+let jsonToIdText = (idJson: Json.Json) => match (idJson) {
+  Json.JsonNumber(n) => toString(n),
+  Json.JsonString(s) => "\"" ++ escapeJson(s) ++ "\"",
+  _ => "null",
+}
+
+let jsonGet = (key: String, json: Json.Json) => match (json) {
+  Json.JsonObject(entries) => {
+    let rec find = items => match (items) {
+      [] => None,
+      [(k, v), ...rest] => if (k == key) {
+        Some(v)
+      } else {
+        find(rest)
+      },
+    }
+    find(entries)
+  },
+  _ => None,
+}
+
+let jsonGetString = (key: String, json: Json.Json) =>
+  match (jsonGet(key, json)) {
+    Some(Json.JsonString(s)) => Some(s),
+    _ => None,
+  }
+
+let jsonGetNumber = (key: String, json: Json.Json) =>
+  match (jsonGet(key, json)) {
+    Some(Json.JsonNumber(n)) => Some(n),
+    _ => None,
+  }
+
+let jsonGetObject = (key: String, json: Json.Json) =>
+  match (jsonGet(key, json)) {
+    Some(Json.JsonObject(items)) => Some(Json.JsonObject(items)),
+    _ => None,
+  }
+
+let jsonGetArray = (key: String, json: Json.Json) =>
+  match (jsonGet(key, json)) {
+    Some(Json.JsonArray(arr)) => Some(arr),
+    _ => None,
+  }
+
+let positionToOffset = (source: String, line0: Number, col0: Number) => {
+  let targetLine = line0 + 1
+  let targetCol = col0
+  let len = String.length(source)
+  let rec loop = (idx: Number, line: Number, col: Number) => {
+    if (idx >= len) {
+      len
+    } else if (line == targetLine && col == targetCol) {
+      idx
+    } else {
+      let ch = String.charAt(idx, source)
+      if (ch == '\n') {
+        loop(idx + 1, line + 1, 0)
+      } else {
+        loop(idx + 1, line, col + 1)
+      }
+    }
+  }
+  loop(0, 1, 0)
+}
+
+let offsetToPosition = (source: String, offset: Number) => {
+  let lc = Source.offsetToLineCol(source, offset)
+  { line: lc.line - 1, character: lc.col }
+}
+
+let markInsertionText = (mark: SurfaceAst.Mark) => {
+  match (mark.kind) {
+    SurfaceAst.MissingExpr(_) => Some("?"),
+    SurfaceAst.MissingTypeExpr(_) => Some("?"),
+    SurfaceAst.MissingPattern(_) => Some("_"),
+    SurfaceAst.MissingSemicolon => Some(";"),
+    SurfaceAst.MissingRBrace => Some("}"),
+    SurfaceAst.MissingToken(text) => {
+      if (text == "identifier") {
+        Some("_")
+      } else if (text == "=" || text == ":" || text == "=>" || text == "}") {
+        Some(text)
+      } else {
+        None
+      }
+    },
+    _ => None,
+  }
+}
+
+let tokenIsIgnorable = (tok: Lexer.Token) => match (tok.kind) {
+  Lexer.LineComment(_) => true,
+  Lexer.Opaque(_) => true,
+  Lexer.EOF => true,
+  _ => false,
+}
+
+let tokensEqual = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
+
+let lastNonEmptyLineEndOffset = (source: String) => {
+  let len = String.length(source)
+  let mut idx = 0
+  let mut lineStart = 0
+  let mut hasContent = false
+  let mut lastEnd = 0
+  while (idx < len) {
+    let ch = String.charAt(idx, source)
+    if (ch == '\n') {
+      if (hasContent) {
+        lastEnd = idx
+      }
+      lineStart = idx + 1
+      hasContent = false
+    } else if (ch != ' ' && ch != '\t' && ch != '\r') {
+      hasContent = true
+    }
+    idx += 1
+  }
+  if (hasContent) {
+    len
+  } else if (lineStart > 0) {
+    lineStart - 1
+  } else {
+    0
+  }
+}
+
+let lastNewlineIndex = (text: String) => {
+  let len = String.length(text)
+  let mut i = 0
+  let mut last = -1
+  while (i < len) {
+    if (String.charAt(i, text) == '\n') {
+      last = i
+    }
+    i += 1
+  }
+  last
+}
+
+let virtualInsertionsFromDiff = (source: String, virtualText: String) => {
+  let srcTokens = List.filter(t => !tokenIsIgnorable(t), Lexer.lex(source))
+  let virtTokens = List.filter(
+    t => !tokenIsIgnorable(t),
+    Lexer.lex(virtualText)
+  )
+  let srcArr = Array.fromList(srcTokens)
+  let virtArr = Array.fromList(virtTokens)
+  let n = Array.length(srcArr)
+  let m = Array.length(virtArr)
+  let cols = m + 1
+  let dp = Array.make((n + 1) * (m + 1), 0)
+  let idx = (i: Number, j: Number) => i * cols + j
+  let mut i = n - 1
+  while (i >= 0) {
+    let mut j = m - 1
+    while (j >= 0) {
+      let a = Array.get(i, srcArr)
+      let b = Array.get(j, virtArr)
+      let value = if (tokensEqual(a, b)) {
+        1 + Array.get(idx(i + 1, j + 1), dp)
+      } else {
+        let down = Array.get(idx(i + 1, j), dp)
+        let right = Array.get(idx(i, j + 1), dp)
+        if (down >= right) {
+          down
+        } else {
+          right
+        }
+      }
+      Array.set(idx(i, j), value, dp)
+      j -= 1
+    }
+    i -= 1
+  }
+
+  let mut inserts: List<InsertChunk> = []
+  let mut matches: List<MatchPoint> = []
+  let mut si = 0
+  let mut vi = 0
+  let mut prevMatchEnd = 0
+  let mut currentAnchor: Option<Number> = None
+  let mut currentStart = 0
+  let mut currentEnd = 0
+  let mut currentTrailing = false
+  let mut currentVirtOffset = 0
+
+  let flush = () => {
+    match (currentAnchor) {
+      None => void,
+      Some(anchor) => {
+        if (currentEnd > currentStart) {
+          let text = String.slice(currentStart, end=currentEnd, virtualText)
+          inserts = [
+            {
+              anchorOffset: anchor,
+              virtOffset: currentVirtOffset,
+              text,
+              trailing: currentTrailing,
+            },
+            ...inserts
+          ]
+        }
+        currentAnchor = None
+        currentStart = 0
+        currentEnd = 0
+        currentTrailing = false
+        currentVirtOffset = 0
+      },
+    }
+  }
+
+  while (si < n || vi < m) {
+    if (si < n && vi < m) {
+      let a = Array.get(si, srcArr)
+      let b = Array.get(vi, virtArr)
+      if (tokensEqual(a, b)) {
+        flush()
+        prevMatchEnd = b.span.end
+        let virtLC = Source.offsetToLineCol(virtualText, b.span.start)
+        let srcLC = Source.offsetToLineCol(source, a.span.start)
+        matches = [
+          {
+            virtOffset: b.span.start,
+            virtLine: virtLC.line,
+            virtCol: virtLC.col,
+            srcLine: srcLC.line,
+            srcCol: srcLC.col,
+          },
+          ...matches
+        ]
+        si += 1
+        vi += 1
+      } else {
+        let nextRight = Array.get(idx(si, vi + 1), dp)
+        let nextDown = Array.get(idx(si + 1, vi), dp)
+        if (vi < m && (si == n || nextRight >= nextDown)) {
+          let anchor = if (si < n) {
+            Array.get(si, srcArr).span.start
+          } else {
+            String.length(source)
+          }
+          let trailingFlag = si >= n
+          match (currentAnchor) {
+            Some(a) => if (a == anchor) {
+              currentEnd = b.span.end
+              currentTrailing = currentTrailing || trailingFlag
+            } else {
+              flush()
+              currentAnchor = Some(anchor)
+              currentStart = prevMatchEnd
+              currentEnd = b.span.end
+              currentTrailing = trailingFlag
+              currentVirtOffset = prevMatchEnd
+            },
+            None => {
+              currentAnchor = Some(anchor)
+              currentStart = prevMatchEnd
+              currentEnd = b.span.end
+              currentTrailing = trailingFlag
+              currentVirtOffset = prevMatchEnd
+            },
+          }
+          vi += 1
+        } else {
+          si += 1
+        }
+      }
+    } else if (vi < m) {
+      let b = Array.get(vi, virtArr)
+      let anchor = if (n > 0) {
+        Array.get(n - 1, srcArr).span.end
+      } else {
+        lastNonEmptyLineEndOffset(source)
+      }
+      let trailingFlag = true
+      match (currentAnchor) {
+        Some(a) => if (a == anchor) {
+          currentEnd = b.span.end
+          currentTrailing = currentTrailing || trailingFlag
+        } else {
+          flush()
+          currentAnchor = Some(anchor)
+          currentStart = prevMatchEnd
+          currentEnd = b.span.end
+          currentTrailing = trailingFlag
+          currentVirtOffset = prevMatchEnd
+        },
+        None => {
+          currentAnchor = Some(anchor)
+          currentStart = prevMatchEnd
+          currentEnd = b.span.end
+          currentTrailing = trailingFlag
+          currentVirtOffset = prevMatchEnd
+        },
+      }
+      vi += 1
+    } else {
+      break
+    }
+  }
+  flush()
+  (List.reverse(inserts), List.reverse(matches))
+}
+
+let inlayHintsForSource = (source: String, rangeStart: Number, rangeEnd: Number) => {
+  debug("[LSP] inlayHintsForSource")
+  debug("[LSP] source len=" ++ toString(String.length(source)))
+  Error.clearErrors()
+  Error.setPanicMode(false)
+  let _ = Parser.parseResult(source)
+  let virtualResult = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let virtText = virtualResult.text
+  debug("[LSP] virtual text:")
+  debug(virtText)
+  let (diffInserts, matchPoints) = virtualInsertionsFromDiff(source, virtText)
+  debug("[LSP] diff inserts:")
+  let rec dumpInserts = (items: List<InsertChunk>) => match (items) {
+    [] => void,
+    [chunk, ...rest] => {
+      debug(
+        "  offset="
+          ++ toString(chunk.anchorOffset)
+          ++ " trailing="
+          ++ (if (chunk.trailing) {
+            "true"
+          } else {
+            "false"
+          })
+          ++ " text=\""
+          ++ chunk.text
+          ++ "\""
+      )
+      dumpInserts(rest)
+    },
+  }
+  dumpInserts(diffInserts)
+
+  let grouped = Map.make()
+  let groupedTrailing = Map.make()
+  let trailingAnchor = lastNonEmptyLineEndOffset(source)
+  debug("[LSP] trailingAnchor=" ++ toString(trailingAnchor))
+  let mut debugInlays: List<(Number, Number, String)> = []
+  let applyInlaysPreview = (
+    source: String,
+    inlays: List<(Number, Number, String)>,
+  ) => {
+    let previewSource = String.replaceAll("\r", "", source)
+    let linesList = String.split("\n", previewSource)
+    let maxLineFromInlays = List.reduce((acc, item) => {
+      let (line, _col, _text) = item
+      if (line > acc) {
+        line
+      } else {
+        acc
+      }
+    }, 0, inlays)
+    let rec pad = (items, target, acc) => {
+      match (items) {
+        [] => {
+          let mut remaining = target - List.length(acc) + 1
+          let mut result = acc
+          while (remaining > 0) {
+            result = ["", ...result]
+            remaining -= 1
+          }
+          List.reverse(result)
+        },
+        [h, ...t] => pad(t, target, [h, ...acc]),
+      }
+    }
+    let padded = pad(Array.toList(linesList), maxLineFromInlays, [])
+    let lines = Array.fromList(padded)
+    let lineMap = Map.make()
+    let rec add = items => match (items) {
+      [] => void,
+      [(line, col, text), ...rest] => {
+        let existing = match (Map.get(line, lineMap)) {
+          Some(list) => list,
+          None => [],
+        }
+        Map.set(line, [(col, text), ...existing], lineMap)
+        add(rest)
+      },
+    }
+    add(inlays)
+    let sortColsDesc = (items: List<(Number, String)>) => {
+      let rec insert = (item, sorted) => match (sorted) {
+        [] => [item],
+        [head, ...tail] => {
+          let (c1, _t1) = item
+          let (c2, _t2) = head
+          if (c1 < c2) {
+            [head, ...insert(item, tail)]
+          } else {
+            [item, head, ...tail]
+          }
+        },
+      }
+      let rec loop = (xs, acc) => match (xs) {
+        [] => acc,
+        [x, ...rest] => loop(rest, insert(x, acc)),
+      }
+      loop(items, [])
+    }
+    let mut i = 0
+    let total = Array.length(lines)
+    while (i < total) {
+      let lineText = Array.get(i, lines)
+      let items = match (Map.get(i, lineMap)) {
+        Some(list) => sortColsDesc(list),
+        None => [],
+      }
+      let rec applyLine = (text: String, xs) => match (xs) {
+        [] => text,
+        [(col, insertText), ...rest] => {
+          let maxCol = String.length(text)
+          let safeCol = if (col < 0) {
+            0
+          } else if (col > maxCol) {
+            maxCol
+          } else {
+            col
+          }
+          let left = if (safeCol > 0) {
+            String.slice(0, end=safeCol, text)
+          } else {
+            ""
+          }
+          let right = if (safeCol < maxCol) {
+            String.slice(safeCol, end=maxCol, text)
+          } else {
+            ""
+          }
+          applyLine(left ++ insertText ++ right, rest)
+        },
+      }
+      let updated = applyLine(lineText, items)
+      if (debugEnabled && List.length(items) > 0) {
+        debug(
+          "[LSP] preview line "
+            ++ toString(i)
+            ++ " len="
+            ++ toString(String.length(lineText))
+            ++ " inserts="
+            ++ toString(items)
+        )
+      }
+      Array.set(i, updated, lines)
+      i += 1
+    }
+    Array.join("\n", lines)
+  }
+  let rec group = (items: List<InsertChunk>) => match (items) {
+    [] => void,
+    [chunk, ...rest] => {
+      let offset = chunk.anchorOffset
+      if (chunk.trailing) {
+        let existing = match (Map.get(offset, groupedTrailing)) {
+          Some(list) => list,
+          None => [],
+        }
+        Map.set(offset, [chunk, ...existing], groupedTrailing)
+      } else {
+        let existing = match (Map.get(offset, grouped)) {
+          Some(list) => list,
+          None => [],
+        }
+        Map.set(offset, [chunk, ...existing], grouped)
+      }
+      group(rest)
+    },
+  }
+  group(diffInserts)
+
+  let seen = Map.make()
+  let rec render = (items: List<InsertChunk>, acc: List<String>) =>
+    match (items) {
+      [] => List.reverse(acc),
+      [chunk, ...rest] => {
+        let offset = chunk.anchorOffset
+        let already = match (Map.get(offset, seen)) {
+          Some(_) => true,
+          None => false,
+        }
+        if (already) {
+          render(rest, acc)
+        } else {
+          Map.set(offset, true, seen)
+          let inlineChunks = match (Map.get(offset, grouped)) {
+            Some(list) => List.reverse(list),
+            None => [],
+          }
+          let trailingChunks = match (Map.get(offset, groupedTrailing)) {
+            Some(list) => List.reverse(list),
+            None => [],
+          }
+          debug("[LSP] anchor=" ++ toString(offset))
+          debug("  inlineChunks=" ++ toString(inlineChunks))
+          debug("  trailingChunks=" ++ toString(trailingChunks))
+          let rec normalizeText = (text: String) => {
+            match (String.indexOf("\n", text)) {
+              None => (text, ""),
+              Some(idx) => {
+                let inlinePart = String.slice(0, end=idx, text)
+                let rest = String.slice(idx + 1, end=String.length(text), text)
+                let restParts = String.split("\n", rest)
+                let trailingPart = if (Array.length(restParts) == 0) {
+                  ""
+                } else {
+                  Array.get(Array.length(restParts) - 1, restParts)
+                }
+                (inlinePart, trailingPart)
+              },
+            }
+          }
+
+          let hasSub = (sub: String, text: String) =>
+            match (String.indexOf(sub, text)) {
+              Some(_) => true,
+              None => false,
+            }
+
+          let leadingWhitespaceCount = (text: String) => {
+            let len = String.length(text)
+            let rec loop = (i: Number) => {
+              if (i >= len) {
+                i
+              } else {
+                let ch = String.charAt(i, text)
+                if (ch == ' ' || ch == '\t') {
+                  loop(i + 1)
+                } else {
+                  i
+                }
+              }
+            }
+            loop(0)
+          }
+
+          let rec splitTrailing = (items, inl, trail) => match (items) {
+            [] => (List.reverse(inl), List.reverse(trail)),
+            [t, ...rest] => {
+              let (inlinePart, trailingPart) = normalizeText(t)
+              let nextInl = if (String.length(inlinePart) > 0) {
+                [inlinePart, ...inl]
+              } else {
+                inl
+              }
+              let nextTrail = if (
+                String.length(trailingPart) > 0
+                && (hasSub("}", trailingPart) || hasSub(";", trailingPart))
+              ) {
+                [trailingPart, ...trail]
+              } else {
+                trail
+              }
+              splitTrailing(rest, nextInl, nextTrail)
+            },
+          }
+          let inlineTexts = List.map((c: InsertChunk) => c.text, inlineChunks)
+          let trailingTexts = List.map(
+            (c: InsertChunk) => c.text,
+            trailingChunks
+          )
+          let (inlineCore, trailingCore) = splitTrailing(inlineTexts, [], [])
+          let (inlineFromTrailing, trailingFromTrailing) = splitTrailing(
+            trailingTexts,
+            [],
+            []
+          )
+          let inlineTextRaw = Array.join(
+            "",
+            Array.fromList(
+              List.filter(
+                s => String.length(s) > 0,
+                List.append(inlineCore, inlineFromTrailing)
+              )
+            )
+          )
+          let inlineLead = leadingWhitespaceCount(inlineTextRaw)
+          let inlineText = if (inlineLead > 0) {
+            String.slice(
+              inlineLead,
+              end=String.length(inlineTextRaw),
+              inlineTextRaw
+            )
+          } else {
+            inlineTextRaw
+          }
+          let trailingText = Array.join(
+            "",
+            Array.fromList(
+              List.filter(
+                s => String.length(s) > 0,
+                List.append(trailingCore, trailingFromTrailing)
+              )
+            )
+          )
+          debug("  inlineText=\"" ++ inlineText ++ "\"")
+          debug("  trailingText=\"" ++ trailingText ++ "\"")
+          let mapVirtOffsetToSourcePos = (virtOffset: Number) => {
+            let rec find = (items: List<MatchPoint>) => match (items) {
+              [] => None,
+              [m, ...rest] => if (m.virtOffset <= virtOffset) {
+                Some(m)
+              } else {
+                find(rest)
+              },
+            }
+            match (find(matchPoints)) {
+              None => offsetToPosition(source, offset),
+              Some(m) => {
+                let virtLC = Source.offsetToLineCol(virtText, virtOffset)
+                let lineDelta = virtLC.line - m.virtLine
+                let colDelta = if (lineDelta == 0) {
+                  virtLC.col - m.virtCol
+                } else {
+                  virtLC.col
+                }
+                {
+                  line: m.srcLine - 1 + lineDelta,
+                  character: if (lineDelta == 0) {
+                    m.srcCol + colDelta
+                  } else {
+                    colDelta
+                  },
+                }
+              },
+            }
+          }
+
+          let basePos = mapVirtOffsetToSourcePos(chunk.virtOffset + inlineLead)
+          let acc1 = if (
+            offset >= rangeStart
+            && offset <= rangeEnd
+            && String.length(inlineText) > 0
+          ) {
+            let inlinePos = basePos
+            debug(
+              "[LSP] inline inlay at line "
+                ++ toString(inlinePos.line)
+                ++ " char "
+                ++ toString(inlinePos.character)
+                ++ " text=\""
+                ++ inlineText
+                ++ "\""
+            )
+            debugInlays = [
+              (inlinePos.line, inlinePos.character, inlineText),
+              ...debugInlays
+            ]
+            let hint = "{\"position\":{\"line\":"
+              ++ toString(inlinePos.line)
+              ++ ",\"character\":"
+              ++ toString(inlinePos.character)
+              ++ "},\"label\":\""
+              ++ escapeJson(inlineText)
+              ++ "\",\"kind\":1"
+              ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
+            [hint, ...acc]
+          } else {
+            acc
+          }
+          let acc2 = if (String.length(trailingText) > 0) {
+            let lastNl = lastNewlineIndex(chunk.text)
+            let trailingVirtOffset = if (lastNl >= 0) {
+              chunk.virtOffset + lastNl + 1
+            } else {
+              chunk.virtOffset
+            }
+            let pos = mapVirtOffsetToSourcePos(trailingVirtOffset)
+            debug(
+              "[LSP] trailing inlay at line "
+                ++ toString(pos.line)
+                ++ " char "
+                ++ toString(pos.character)
+                ++ " text=\""
+                ++ trailingText
+                ++ "\""
+            )
+            debugInlays = [
+              (pos.line, pos.character, trailingText),
+              ...debugInlays
+            ]
+            let hint = "{\"position\":{\"line\":"
+              ++ toString(pos.line)
+              ++ ",\"character\":"
+              ++ toString(pos.character)
+              ++ "},\"label\":\""
+              ++ escapeJson(trailingText)
+              ++ "\",\"kind\":1"
+              ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
+            [hint, ...acc1]
+          } else {
+            acc1
+          }
+          render(rest, acc2)
+        }
+      },
+    }
+
+  let hints = render(diffInserts, [])
+  if (debugEnabled) {
+    let preview = applyInlaysPreview(source, debugInlays)
+    debug("[LSP] preview:")
+    debug(preview)
+  }
+  "[" ++ Array.join(",", Array.fromList(hints)) ++ "]"
+}
+
+let handleInitialize = (idText: String) => {
+  let result = "{"
+    ++ "\"capabilities\":{"
+    ++ "\"textDocumentSync\":{\"openClose\":true,\"change\":1},"
+    ++ "\"inlayHintProvider\":true"
+    ++ "},"
+    ++ "\"serverInfo\":{\"name\":\"workman-lsp\",\"version\":\"0.0.1\"}"
+    ++ "}"
+  sendResponse(idText, result)
+}
+
+let handleInlayHint = (
+  idText: String,
+  params: Json.Json,
+  docs: Map.Map<String, String>,
+) => {
+  let uriOpt = match (jsonGetObject("textDocument", params)) {
+    Some(obj) => jsonGetString("uri", obj),
+    None => None,
+  }
+  match (uriOpt) {
+    None => sendResponse(idText, "[]"),
+    Some(uri) => {
+      match (Map.get(uri, docs)) {
+        None => sendResponse(idText, "[]"),
+        Some(source) => {
+          let rangeOpt = jsonGetObject("range", params)
+          let rangeStart = match (rangeOpt) {
+            Some(rangeObj) => {
+              let startObj = jsonGetObject("start", rangeObj)
+              match (startObj) {
+                Some(s) => {
+                  let line = match (jsonGetNumber("line", s)) {
+                    Some(n) => n,
+                    None => 0,
+                  }
+                  let ch = match (jsonGetNumber("character", s)) {
+                    Some(n) => n,
+                    None => 0,
+                  }
+                  positionToOffset(source, line, ch)
+                },
+                None => 0,
+              }
+            },
+            None => 0,
+          }
+          let rangeEnd = match (rangeOpt) {
+            Some(rangeObj) => {
+              let endObj = jsonGetObject("end", rangeObj)
+              match (endObj) {
+                Some(e) => {
+                  let line = match (jsonGetNumber("line", e)) {
+                    Some(n) => n,
+                    None => 0,
+                  }
+                  let ch = match (jsonGetNumber("character", e)) {
+                    Some(n) => n,
+                    None => 0,
+                  }
+                  positionToOffset(source, line, ch)
+                },
+                None => String.length(source),
+              }
+            },
+            None => String.length(source),
+          }
+          let hintsJson = inlayHintsForSource(source, rangeStart, rangeEnd)
+          sendResponse(idText, hintsJson)
+        },
+      }
+    },
+  }
+}
+
+let handleMessage = (msgJson: Json.Json, docs: Map.Map<String, String>) => {
+  let idOpt = jsonGet("id", msgJson)
+  let methodOpt = jsonGetString("method", msgJson)
+  match (methodOpt) {
+    None => void,
+    Some(method) => {
+      if (method == "initialize") {
+        match (idOpt) {
+          Some(idJson) => handleInitialize(jsonToIdText(idJson)),
+          None => void,
+        }
+      } else if (method == "textDocument/didOpen") {
+        match (jsonGetObject("params", msgJson)) {
+          Some(params) => {
+            match (jsonGetObject("textDocument", params)) {
+              Some(doc) => {
+                match (jsonGetString("uri", doc)) {
+                  Some(uri) => match (jsonGetString("text", doc)) {
+                    Some(text) => {
+                      Map.set(uri, text, docs)
+                      void
+                    },
+                    None => void,
+                  },
+                  None => void,
+                }
+              },
+              None => void,
+            }
+          },
+          None => void,
+        }
+      } else if (method == "textDocument/didChange") {
+        match (jsonGetObject("params", msgJson)) {
+          Some(params) => {
+            let uriOpt = match (jsonGetObject("textDocument", params)) {
+              Some(doc) => jsonGetString("uri", doc),
+              None => None,
+            }
+            let changesOpt = jsonGetArray("contentChanges", params)
+            match (uriOpt) {
+              Some(uri) => match (changesOpt) {
+                Some(changes) => {
+                  match (changes) {
+                    [Json.JsonObject(first), ..._] => {
+                      match (jsonGetString("text", Json.JsonObject(first))) {
+                        Some(text) => Map.set(uri, text, docs),
+                        None => void,
+                      }
+                    },
+                    _ => void,
+                  }
+                },
+                None => void,
+              },
+              None => void,
+            }
+          },
+          None => void,
+        }
+      } else if (method == "textDocument/inlayHint") {
+        match (idOpt) {
+          Some(idJson) => match (jsonGetObject("params", msgJson)) {
+            Some(params) => handleInlayHint(jsonToIdText(idJson), params, docs),
+            None => void,
+          },
+          None => void,
+        }
+      } else if (method == "shutdown") {
+        match (idOpt) {
+          Some(idJson) => sendResponse(jsonToIdText(idJson), "null"),
+          None => void,
+        }
+      } else if (method == "exit") {
+        void
+      } else {
+        void
+      }
+    },
+  }
+}
+
+let parseContentLength = (header: String) => {
+  let lines = String.split("\r\n", header)
+  let rec find = (idx: Number) => {
+    if (idx >= Array.length(lines)) {
+      None
+    } else {
+      let line = Array.get(idx, lines)
+      if (String.startsWith("Content-Length:", line)) {
+        let raw = String.slice(String.length("Content-Length:"), line)
+        match (Number.parseInt(String.trim(raw), radix=10)) {
+          Ok(n) => Some(n),
+          Err(_) => None,
+        }
+      } else {
+        find(idx + 1)
+      }
+    }
+  }
+  find(0)
+}
+
+let tryExtractMessage = (buffer: String) => {
+  match (String.indexOf("\r\n\r\n", buffer)) {
+    None => (None, buffer),
+    Some(headerEnd) => {
+      let header = String.slice(0, end=headerEnd, buffer)
+      let bodyStart = headerEnd + 4
+      match (parseContentLength(header)) {
+        None => (None, buffer),
+        Some(len) => {
+          let totalNeeded = bodyStart + len
+          if (String.length(buffer) < totalNeeded) {
+            (None, buffer)
+          } else {
+            let body = String.slice(bodyStart, end=totalNeeded, buffer)
+            let rest = String.slice(
+              totalNeeded,
+              end=String.length(buffer),
+              buffer
+            )
+            (Some(body), rest)
+          }
+        },
+      }
+    },
+  }
+}
+
+let readChunk = () => {
+  match (File.fdRead(File.stdin, 4096)) {
+    Ok((bytes, count)) => if (count <= 0) {
+      None
+    } else {
+      let slice = Bytes.slice(0, count, bytes)
+      Some(Bytes.toString(slice))
+    },
+    Err(_) => None,
+  }
+}
+
+let rec loop = (buffer: String, docs: Map.Map<String, String>) => {
+  let (msgOpt, rest) = tryExtractMessage(buffer)
+  match (msgOpt) {
+    Some(msgText) => {
+      match (Json.parse(msgText)) {
+        Ok(msgJson) => handleMessage(msgJson, docs),
+        Err(err) => logErr("Failed to parse JSON: " ++ toString(err)),
+      }
+      loop(rest, docs)
+    },
+    None => {
+      match (readChunk()) {
+        None => void,
+        Some(chunk) => loop(buffer ++ chunk, docs),
+      }
+    },
+  }
+}
+
+let main = () => {
+  let docs = Map.make()
+  loop("", docs)
+}
+
+main()
