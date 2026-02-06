@@ -80,6 +80,23 @@ let renderWithSettings = (
       },
     tokens,
   )
+  let hasConcreteTokenEndingAt = (endIndex: Number) => {
+    let rec find = (tokens: List<Lexer.Token>) => {
+      match (tokens) {
+        [] => false,
+        [tok, ...tail] =>
+          if (tok.span.end == endIndex) {
+            match (tok.kind) {
+              Lexer.EOF => false,
+              _ => true,
+            }
+          } else {
+            find(tail)
+          },
+      }
+    }
+    find(tokens)
+  }
   let hasTerminatorAfter = (endIndex: Number) => {
     let rec find = (tokens: List<Lexer.Token>) => {
       match (tokens) {
@@ -984,6 +1001,12 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
           && !exprHasHole(binding.value),
         _ => false,
       }
+    let prevStmtIsConcrete = (prevOpt: Option<SurfaceAst.BlockItem>) =>
+      match (prevOpt) {
+        Some(SurfaceAst.ExprItem(expr)) => hasConcreteTokenEndingAt(expr.node.span.end),
+        Some(SurfaceAst.LetItem(binding)) => hasConcreteTokenEndingAt(binding.node.span.end),
+        _ => false,
+      }
     if (hasBody) {
       newline()
       indent = indent + 2
@@ -1041,7 +1064,11 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
                         write(";")
                       }
                     } else if (mode == Fix && settings.allowFixSemicolons) {
-                      if (canFixSemicolonAfter(prevStmt) && hasNextConcrete(tail)) {
+                      if (
+                        canFixSemicolonAfter(prevStmt)
+                        && hasNextConcrete(tail)
+                        && prevStmtIsConcrete(prevStmt)
+                      ) {
                         write(";")
                       }
                     }
@@ -1401,6 +1428,9 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
     && !exprHasHole(binding.value)
     && !exprHasMissingRBrace(binding.value)
 
+  let bindingHasMissingRBrace = (binding: SurfaceAst.LetBinding) =>
+    exprHasMissingRBrace(binding.value)
+
   let typeDeclIsDecidable = (decl: SurfaceAst.TypeDecl) =>
     match (decl.body) {
       SurfaceAst.Alias(ty) => !typeHasHole(ty),
@@ -1442,6 +1472,20 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
       SurfaceAst.PrefixDecl(_) => true,
     }
 
+  let declHasMissingRBrace = (decl: SurfaceAst.Decl) =>
+    match (decl) {
+      SurfaceAst.LetDecl(letDecl) => {
+        let rec anyBindingMissing = (items: List<SurfaceAst.LetBinding>) =>
+          match (items) {
+            [] => false,
+            [binding, ...rest] =>
+              bindingHasMissingRBrace(binding) || anyBindingMissing(rest),
+          }
+        anyBindingMissing(letDecl.bindings)
+      },
+      _ => false,
+    }
+
   let declGroupIsDecidable = (group: SurfaceAst.DeclGroup) => {
     let rec anyDeclUndecidable = (items: List<SurfaceAst.Decl>) =>
       match (items) {
@@ -1451,12 +1495,27 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
     !anyDeclUndecidable(group.decls)
   }
 
+  let declGroupHasMissingRBrace = (group: SurfaceAst.DeclGroup) => {
+    let rec anyDeclMissing = (items: List<SurfaceAst.Decl>) =>
+      match (items) {
+        [] => false,
+        [decl, ...rest] => declHasMissingRBrace(decl) || anyDeclMissing(rest),
+      }
+    anyDeclMissing(group.decls)
+  }
+
   let topItemIsDecidable = (item: SurfaceAst.TopItem) =>
     match (item) {
       SurfaceAst.DeclGroup(group) => declGroupIsDecidable(group),
       SurfaceAst.Import(_) => true,
       SurfaceAst.Reexport(_) => true,
       SurfaceAst.Directive(_) => true,
+      _ => false,
+    }
+
+  let topItemHasMissingRBrace = (item: SurfaceAst.TopItem) =>
+    match (item) {
+      SurfaceAst.DeclGroup(group) => declGroupHasMissingRBrace(group),
       _ => false,
     }
 
@@ -1473,6 +1532,7 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
         }
         emitTopItem(item)
         let endSpan = topItemSpan(item)
+        let missingRBrace = topItemHasMissingRBrace(item)
         let needsTerminator = match (item) {
           SurfaceAst.DeclGroup(_)
           | SurfaceAst.Import(_)
@@ -1481,7 +1541,7 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
           _ => false,
         }
         if (needsTerminator) {
-          if (hasTerminatorAfter(endSpan.end)) {
+          if (hasTerminatorAfter(endSpan.end) && !missingRBrace) {
             write(";")
           } else if (mode == Virtual && settings.allowVirtualInsertions) {
             write(";")
@@ -1489,6 +1549,8 @@ let rec emitPattern = (pattern: SurfaceAst.Pattern) => {
             mode == Fix
             && settings.allowFixSemicolons
             && topItemIsDecidable(item)
+            && !missingRBrace
+            && hasConcreteTokenEndingAt(endSpan.end)
           ) {
             write(";")
           }

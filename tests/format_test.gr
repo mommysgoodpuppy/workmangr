@@ -168,6 +168,26 @@ let main = => {
   assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
 })
 
+test("formatter handles broken record decl", () => {
+  let source =
+    "
+let start: Location = .{ x= 0 y= 0 };
+"
+  let realOut = Formatter.formatWithMode(source, Formatter.Real)
+  let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
+  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+
+  let expectedVirtual =
+    "
+let start : Location = .{ x = 0, y = 0 };
+"
+  all([
+    assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
+    assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
+    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut)),
+  ])
+})
+
 test("formatter modes handle missing semicolon and brace", () => {
   let source =
     "
@@ -177,15 +197,16 @@ let main = => {
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
   let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
 
-  assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
-  assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
-
   let expectedVirtual =
     "
 let main = => {
 };
-"
-  assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
+" 
+  all([
+    assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
+    assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
+    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
+  ])
 })
 
 test("formatter modes mode handles incomplete top level statement", () => {

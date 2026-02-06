@@ -15,25 +15,14 @@ from "../core/error.gr" include Error
 from "../util.gr" include Util
 use Util.{ testStr }
 
-provide record MissingSemicolonRecovery {
-  text: String,
-  start: Number,
-  end: Number,
-  line: Number,
-  col: Number,
-  reason: String,
-}
-
 provide record ParseResult {
   program: SurfaceAst.Program,
-  missingSemicolons: List<MissingSemicolonRecovery>,
 }
 
 record ParseState {
   tokens: List<Lexer.Token>,
   nextId: Number, // token id
   allTokens: List<Lexer.Token>,
-  missingSemicolons: List<MissingSemicolonRecovery>,
 }
 
 type Parser<a> = ParseState => (a, ParseState)
@@ -203,20 +192,17 @@ let recoverMissingTopLevelSemicolon = (
   anchorSpan: Source.Span,
 ) => {
   let atTok = currentToken(state)
-  let recovery: MissingSemicolonRecovery = {
-    text: ";",
-    start: anchorSpan.end,
-    end: anchorSpan.end,
-    line: atTok.span.line,
-    col: atTok.span.col,
-    reason: "required top-level terminator",
-  }
-  let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
+  let errSpan = Source.makeSpan(
+    anchorSpan.line,
+    anchorSpan.col,
+    anchorSpan.end,
+    anchorSpan.end,
+  )
   Error.createError(
     Error.Parsing,
-    atTok.span,
+    errSpan,
     "Expected ';' after top-level declaration",
-    updated,
+    state,
     clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
   )
 }
@@ -243,15 +229,6 @@ let topItemSpan = (item: SurfaceAst.TopItem) =>
 
 let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) => {
   let atTok = currentToken(state)
-  let recovery: MissingSemicolonRecovery = {
-    text: ";",
-    start: anchorSpan.end,
-    end: anchorSpan.end,
-    line: anchorSpan.line,
-    col: anchorSpan.col,
-    reason: "required statement terminator",
-  }
-  let updated = { ...state, missingSemicolons: [recovery, ...state.missingSemicolons] }
   let errSpan = Source.makeSpan(
     anchorSpan.line,
     anchorSpan.col,
@@ -262,7 +239,7 @@ let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) 
     Error.Parsing,
     errSpan,
     "Expected ';' after statement",
-    updated,
+    state,
     clues=[Error.Expected(";"), Error.Received(Lexer.tokenKindToString(atTok.kind))],
   )
 }
@@ -854,9 +831,9 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
       kind: SurfaceAst.MissingRBrace,
       expected: SurfaceAst.ExpectToken,
     }
-    let markItem: SurfaceAst.BlockItem = Error.createError(
+    let markItem: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
-      markSpan,
+      mark,
       "Expected '}' to close block",
       SurfaceAst.MarkItem(mark),
       clues=[Error.Expected("}"), Error.Received(Lexer.tokenKindToString(tokAfterItems.kind))],
@@ -1271,9 +1248,9 @@ and parseTopLevels = (state: ParseState) => {
             kind: SurfaceAst.InvalidTopLevel("export"),
             expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
           }
-          let recoveryItem: SurfaceAst.TopItem = Error.createError(
+          let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
             Error.Parsing,
-            tok.span,
+            exportRecovery,
             "Expected declaration after export",
             SurfaceAst.Mark(exportRecovery),
             clues=[Error.Note("export must be followed by a declaration")],
@@ -1286,9 +1263,9 @@ and parseTopLevels = (state: ParseState) => {
             kind: SurfaceAst.InvalidTopLevel("export"),
             expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
           }
-          let recoveryItem: SurfaceAst.TopItem = Error.createError(
+          let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
             Error.Parsing,
-            tok.span,
+            exportRecovery,
             "Invalid export",
             SurfaceAst.Mark(exportRecovery),
             clues=[Error.Note("export can only be applied to declarations")],
@@ -1669,9 +1646,9 @@ and parseBlockItems = (state: ParseState) => {
       kind: SurfaceAst.MissingSemicolon,
       expected: SurfaceAst.ExpectToken,
     }
-    let item: SurfaceAst.BlockItem = Error.createError(
+    let item: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
-      atTok.span,
+      mark,
       "Expected ';' after statement",
       SurfaceAst.MarkItem(mark),
       clues=[
@@ -2344,13 +2321,11 @@ let parseWithRecovery = (source: String) => {
     tokens,
     nextId: 1,
     allTokens: tokens,
-    missingSemicolons: [],
   }
   let (topLevels, _finalState) = parseTopLevels(initial)
   let program: SurfaceAst.Program = { items: topLevels, core: false }
   {
     program,
-    missingSemicolons: List.reverse(_finalState.missingSemicolons),
   }
 }
 

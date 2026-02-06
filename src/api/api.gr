@@ -354,16 +354,6 @@ let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
 let virtualArtifactsToJson = (artifacts: List<Formatter.VirtualArtifact>) =>
   "[" ++ joinStrings(",", List.map(virtualArtifactToJson, artifacts)) ++ "]"
 
-let parserMarkToJson = (recovery: Parser.MissingSemicolonRecovery) => {
-  "{\"kind\":\"missingSemicolon\"," ++
-  "\"text\":\"" ++ escapeJson(recovery.text) ++ "\"," ++
-  "\"start\":" ++ toString(recovery.start) ++ "," ++
-  "\"end\":" ++ toString(recovery.end) ++ "," ++
-  "\"line\":" ++ toString(recovery.line) ++ "," ++
-  "\"col\":" ++ toString(recovery.col) ++ "," ++
-  "\"reason\":\"" ++ escapeJson(recovery.reason) ++ "\"}"
-}
-
 let errorClueToJson = (clue: Error.ErrorClue) =>
   match (clue) {
     Error.Expected(text) =>
@@ -397,6 +387,32 @@ let compilerErrorToJson = (err: Error.CompilerError) => {
   "\"clues\":" ++ clues ++ "}"
 }
 
+let markToJson = (mark: SurfaceAst.Mark) => {
+  let (kind, text) = match (mark.kind) {
+    SurfaceAst.UnknownTopLevel(raw) => ("UnknownTopLevel", raw),
+    SurfaceAst.InvalidTopLevel(raw) => ("InvalidTopLevel", raw),
+    SurfaceAst.MissingSemicolon => ("MissingSemicolon", ""),
+    SurfaceAst.MissingRBrace => ("MissingRBrace", ""),
+    SurfaceAst.MissingToken(raw) => ("MissingToken", raw),
+    SurfaceAst.MissingExpr(raw) => ("MissingExpr", raw),
+    SurfaceAst.MissingPattern(raw) => ("MissingPattern", raw),
+    SurfaceAst.MissingTypeExpr(raw) => ("MissingTypeExpr", raw),
+    SurfaceAst.MissingBlock(raw) => ("MissingBlock", raw),
+  }
+  "{\"kind\":\"" ++ kind ++ "\"," ++
+  "\"text\":\"" ++ escapeJson(text) ++ "\"," ++
+  "\"expected\":\"" ++ expectedKindToString(mark.expected) ++ "\"," ++
+  "\"span\":{\"line\":" ++ toString(mark.node.span.line) ++
+  ",\"col\":" ++ toString(mark.node.span.col) ++
+  ",\"start\":" ++ toString(mark.node.span.start) ++
+  ",\"end\":" ++ toString(mark.node.span.end) ++ "}}"
+}
+
+let markedErrorToJson = (entry: Error.MarkedError) => {
+  "{\"mark\":" ++ markToJson(entry.mark) ++
+  ",\"diagnostic\":" ++ compilerErrorToJson(entry.error) ++ "}"
+}
+
 let topLevelMarkToJson = (item: SurfaceAst.TopItem) =>
   match (item) {
     SurfaceAst.Mark(mark) => {
@@ -420,18 +436,18 @@ let topLevelMarkToJson = (item: SurfaceAst.TopItem) =>
 let markBundleToJson = (
   parseResult: Parser.ParseResult,
   diagnostics: List<Error.CompilerError>,
+  marked: List<Error.MarkedError>,
 ) => {
-  let semis = "[" ++
-    joinStrings(",", List.map(parserMarkToJson, parseResult.missingSemicolons)) ++ "]"
   let topLevel = "[" ++
     joinStrings(
       ",",
       List.filterMap(topLevelMarkToJson, parseResult.program.items),
     ) ++ "]"
   let diag = "[" ++ joinStrings(",", List.map(compilerErrorToJson, diagnostics)) ++ "]"
-  "{\"missingSemicolons\":" ++ semis ++
-  ",\"topLevel\":" ++ topLevel ++
-  ",\"diagnostics\":" ++ diag ++ "}"
+  let markedJson = "[" ++ joinStrings(",", List.map(markedErrorToJson, marked)) ++ "]"
+  "{\"topLevel\":" ++ topLevel ++
+  ",\"diagnostics\":" ++ diag ++
+  ",\"entries\":" ++ markedJson ++ "}"
 }
 
 // Global store for the last compilation (for querying nodes by ID)
@@ -456,6 +472,7 @@ provide let compileToJson = (source: String) => {
   // Lower
   let lowered = Lower.lowerProgram(parsed)
   let diagnostics = Error.getErrors()
+  let markedDiagnostics = Error.getMarkedErrors()
   Error.clearErrors()
   let formattedResult = Formatter.formatResultWithProgramMode(
     parsed,
@@ -479,7 +496,7 @@ provide let compileToJson = (source: String) => {
   let loweredStore = CoreIndexer.indexProgram(lowered)
   lastStore = Some(loweredStore)
   let loweredStoreJson = NS.storeToJson(loweredStore)
-  let marksJson = markBundleToJson(parseResult, diagnostics)
+  let marksJson = markBundleToJson(parseResult, diagnostics, markedDiagnostics)
   
   "{\"tokens\":" ++ tokensJson ++
   ",\"surfaceNodeStore\":" ++ surfaceStoreJson ++

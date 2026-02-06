@@ -140,6 +140,11 @@ and provide enum MarkKind {
   InvalidTopLevel(String),
   MissingSemicolon,
   MissingRBrace,
+  MissingToken(String),
+  MissingExpr(String),
+  MissingPattern(String),
+  MissingTypeExpr(String),
+  MissingBlock(String),
 }
 and provide enum BlockItem {
   ExprItem(Expr),

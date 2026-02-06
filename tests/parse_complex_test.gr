@@ -30,7 +30,6 @@ test("parse and lower util.testStr", () => {
   let surfaceProgram: SurfaceAst.Program = parsed.program
 
   all([
-    assertEquals(0, List.length(parsed.missingSemicolons)),
     assertThat(List.length(surfaceProgram.items) > 10, "expected many top-level items"),
   ])
 

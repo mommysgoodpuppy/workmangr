@@ -4,6 +4,7 @@ from "list" include List
 from "string" include String
 from "runtime/unsafe/panic" include Panic
 from "../core/source.gr" include Source
+from "../core/surface_ast.gr" include SurfaceAst
 
 use Panic.{ panic }
 
@@ -32,7 +33,13 @@ provide record CompilerError {
   clues: List<ErrorClue>,
 }
 
+provide record MarkedError {
+  mark: SurfaceAst.Mark,
+  error: CompilerError,
+}
+
 let mut diagnostics: List<CompilerError> = []
+let mut markedDiagnostics: List<MarkedError> = []
 let mut panicMode: Bool = false
 
 let clueToString = (clue: ErrorClue) => {
@@ -86,9 +93,11 @@ provide let errorToString = (error: CompilerError) => {
 
 provide let clearErrors = () => {
   diagnostics = []
+  markedDiagnostics = []
 }
 
 provide let getErrors = () => List.reverse(diagnostics)
+provide let getMarkedErrors = () => List.reverse(markedDiagnostics)
 
 provide let setPanicMode = (enabled: Bool) => {
   panicMode = enabled
@@ -104,6 +113,25 @@ provide let createError = (
 ) => {
   let error: CompilerError = { stage, message, span, clues }
   diagnostics = [error, ...diagnostics]
+  if (shouldPanic || panicMode) {
+    panic(errorToString(error))
+  } else {
+    recovery
+  }
+}
+
+provide let createMarkedError = (
+  stage: Stage,
+  mark: SurfaceAst.Mark,
+  message: String,
+  recovery,
+  clues: List<ErrorClue> = [],
+  shouldPanic: Bool = false,
+) => {
+  let error: CompilerError = { stage, message, span: mark.node.span, clues }
+  let marked: MarkedError = { mark, error }
+  diagnostics = [error, ...diagnostics]
+  markedDiagnostics = [marked, ...markedDiagnostics]
   if (shouldPanic || panicMode) {
     panic(errorToString(error))
   } else {
