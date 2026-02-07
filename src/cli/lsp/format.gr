@@ -52,8 +52,7 @@ provide let formattingEditsForSource = (
   debug: (String) => Void,
   escapeJson: (String) => String,
 ) => {
-  let withSemicolons = Formatter.formatWithMode(source, Formatter.RealFix)
-  let target = Formatter.formatWithMode(withSemicolons, Formatter.Real)
+  let target = Formatter.formatWithMode(source, Formatter.RealFix)
   debug("[LSP] format target:")
   debug(target)
   if (target == source) {

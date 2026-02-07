@@ -2060,11 +2060,18 @@ let normalizeRealFixIfNeeded = (source: String, rendered: FormatResult) => {
   { ...rendered, text: applySemicolonAdditions(source, additions) }
 }
 
+let renderRealAligned = (source: String) => {
+  let program = Parser.parse(source)
+  let rendered = renderWithSettings(program, source, Real, realSettings)
+  alignRealIfNeeded(source, rendered)
+}
+
 let finalizeRendered = (source: String, mode: Mode, rendered: FormatResult) => {
   if (mode == Real) {
     alignRealIfNeeded(source, rendered)
   } else if (mode == RealFix) {
-    normalizeRealFixIfNeeded(source, rendered)
+    let semisApplied = normalizeRealFixIfNeeded(source, rendered)
+    renderRealAligned(semisApplied.text)
   } else {
     rendered
   }
