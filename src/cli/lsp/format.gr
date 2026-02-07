@@ -1,1 +1,64 @@
 module Format
+
+from "string" include String
+from "../../frontend/formatter.gr" include Formatter
+
+record Position {
+  line: Number,
+  character: Number,
+}
+
+let offsetToPosition = (source: String, offset: Number) => {
+  let len = String.length(source)
+  let safe = if (offset < 0) {
+    0
+  } else if (offset > len) {
+    len
+  } else {
+    offset
+  }
+  let rec loop = (idx: Number, line: Number, col: Number) => {
+    if (idx >= safe) {
+      { line, character: col }
+    } else {
+      let ch = String.charAt(idx, source)
+      if (ch == '\n') {
+        loop(idx + 1, line + 1, 0)
+      } else {
+        loop(idx + 1, line, col + 1)
+      }
+    }
+  }
+  loop(0, 0, 0)
+}
+
+let fullDocumentEditJson = (
+  source: String,
+  newText: String,
+  escapeJson: (String) => String,
+) => {
+  let endPos = offsetToPosition(source, String.length(source))
+  "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":"
+    ++ toString(endPos.line)
+    ++ ",\"character\":"
+    ++ toString(endPos.character)
+    ++ "}},\"newText\":\""
+    ++ escapeJson(newText)
+    ++ "\"}"
+}
+
+provide let formattingEditsForSource = (
+  source: String,
+  debug: (String) => Void,
+  escapeJson: (String) => String,
+) => {
+  let target = Formatter.formatWithMode(source, Formatter.RealFix)
+  debug("[LSP] format target:")
+  debug(target)
+  if (target == source) {
+    "[]"
+  } else {
+    let edit = fullDocumentEditJson(source, target, escapeJson)
+    "[" ++ edit ++ "]"
+  }
+}

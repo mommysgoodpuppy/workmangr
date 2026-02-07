@@ -50,16 +50,43 @@ let= {
 
   let fixExpected =
     "
-let_= 25
-and_= 
+let= 25
+and= 
 
-let_= {
-  let_= 25
-  and_= 6
+let= {
+  let= 25
+  and= 6
 "
   
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
   assertEquals(canonicalNonWs(fixExpected), canonicalNonWs(fixOut))
+})
+
+test("fix mode does not spray semicolons in broken record line", () => {
+  let source =
+    "
+type Orientation = N | E | S | W;
+let start: Location = { x= 0, y= 0 }; //have a bug on purpose, missing .{
+
+let main = => {
+print(process(input));
+}
+
+let x = 1
+"
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
+  let expected =
+    "
+type Orientation = N | E | S | W;
+let start: Location = { x= 0, y= 0 }; //have a bug on purpose, missing .{
+
+let main = => {
+print(process(input));
+};
+
+let x = 1;
+"
+  assertEquals(canonicalNonWs(expected), canonicalNonWs(fixOut))
 })
 
 test("formatter real handles incomplete example", () => {
@@ -163,7 +190,7 @@ let x =
 "
 
   let outVirtual = Formatter.formatWithMode(source, Formatter.Virtual)
-  let outFix = Formatter.formatWithMode(source, Formatter.Fix
+  let outFix = Formatter.formatWithMode(source, Formatter.RealFix
   )
   assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(outVirtual))
   assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(outFix))
@@ -179,7 +206,7 @@ let main = => {
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
   assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
@@ -200,7 +227,7 @@ let start: Location = .{ x= 0, y= 0 };
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
   let expectedVirtual =
     "
@@ -220,7 +247,7 @@ let main = => {
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
   let expectedVirtual =
     "
@@ -255,16 +282,26 @@ and
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
 
   let expectedFix =
     "
-let _ = 25
-and _ = 67;
-let _ = {
-  let _ = 25
-  and _ = 67
+let
+=
+25
+and
+=
+67;
+let
+=
+{
+let
+=
+25
+and
+=
+67
 " 
 
   let expectedVirtual =
@@ -291,7 +328,7 @@ let x =
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
   assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
@@ -310,7 +347,7 @@ let x = x
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 
@@ -332,7 +369,7 @@ let main = => {
 }
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 
@@ -357,7 +394,7 @@ export type GenericError =
 // and a comment
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
-  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))

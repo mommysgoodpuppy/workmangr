@@ -61,8 +61,8 @@ let sliceWithContext = (
 
 provide enum Mode {
   Real,
+  RealFix,
   Virtual,
-  Fix,
 }
 
 provide record VirtualArtifact {
@@ -80,15 +80,15 @@ provide record FormatResult {
 
 record Settings {
   allowVirtualInsertions: Bool,
-  allowFixSemicolons: Bool,
+  insertSemis: Bool,
 }
 
-let realSettings = { allowVirtualInsertions: false, allowFixSemicolons: false }
+let realSettings = { allowVirtualInsertions: false, insertSemis: false }
+let realFixSettings = { allowVirtualInsertions: false, insertSemis: true }
 let virtualSettings = {
   allowVirtualInsertions: true,
-  allowFixSemicolons: false,
+  insertSemis: false,
 }
-let fixSettings = { allowVirtualInsertions: false, allowFixSemicolons: true }
 
 let rec spaces = (n: Number) => {
   if (n <= 0) {
@@ -1101,6 +1101,13 @@ let renderWithSettings = (
           hasConcreteTokenEndingAt(group.node.span.end),
         _ => false,
       }
+    let prevStmtEnd = (prevOpt: Option<SurfaceAst.BlockItem>) =>
+      match (prevOpt) {
+        Some(SurfaceAst.ExprItem(expr)) => Some(expr.node.span.end),
+        Some(SurfaceAst.LetItem(binding)) => Some(binding.node.span.end),
+        Some(SurfaceAst.DeclGroup(group)) => Some(group.node.span.end),
+        _ => None,
+      }
     if (hasBody) {
       newline()
       indent += 2
@@ -1127,7 +1134,6 @@ let renderWithSettings = (
             SurfaceAst.MarkItem(_) => hasNextConcrete(rest),
           },
         }
-
       let rec emitItems = (
         items: List<SurfaceAst.BlockItem>,
         prevStmt: Option<SurfaceAst.BlockItem>,
@@ -1205,7 +1211,7 @@ let renderWithSettings = (
                       if (hasNextConcrete(tail)) {
                         write(";")
                       }
-                    } else if (mode == Fix && settings.allowFixSemicolons) {
+                    } else if (settings.insertSemis) {
                       if (
                         canFixSemicolonAfter(prevStmt)
                         && hasNextConcrete(tail)
@@ -1237,11 +1243,11 @@ let renderWithSettings = (
       emitItems(block.items, None)
 
       indent -= 2
-      if (!(missingRBrace && (mode == Real || mode == Fix))) {
+      if (!(missingRBrace && mode != Virtual)) {
         newline()
       }
     }
-    if (!(missingRBrace && (mode == Real || mode == Fix))) {
+    if (!(missingRBrace && mode != Virtual)) {
       write("}")
     }
   }
@@ -1690,8 +1696,7 @@ let renderWithSettings = (
           } else if (mode == Virtual && settings.allowVirtualInsertions) {
             write(";")
           } else if (
-            mode == Fix
-            && settings.allowFixSemicolons
+            settings.insertSemis
             && topItemIsDecidable(item)
             && !missingRBrace
             && hasConcreteTokenEndingAt(endSpan.end)
@@ -1712,109 +1717,147 @@ let renderWithSettings = (
   }
 }
 
-let alignRealIfNeeded = (source: String, rendered: FormatResult) => {
-  let normalizeTokens = (tokens: List<Lexer.Token>) =>
-    List.filter((tok: Lexer.Token) => match (tok.kind) {
-      Lexer.LineComment(_) => false,
-      _ => true,
-    }, tokens)
+let normalizeTokensForAlignment = (tokens: List<Lexer.Token>) =>
+  List.filter((tok: Lexer.Token) => match (tok.kind) {
+    Lexer.LineComment(_) => false,
+    _ => true,
+  }, tokens)
 
-  let tokensEqual = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
+let tokensEqualForAlignment = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
 
-  let alignOnce = (sourceText: String, formattedText: String) => {
-    let sourceTokens = Array.fromList(normalizeTokens(Lexer.lex(sourceText)))
-    let formattedTokens = Array.fromList(
-      normalizeTokens(Lexer.lex(formattedText))
+let alignOnce = (sourceText: String, formattedText: String) => {
+  let sourceTokens = Array.fromList(normalizeTokensForAlignment(Lexer.lex(sourceText)))
+  let formattedTokens = Array.fromList(
+    normalizeTokensForAlignment(Lexer.lex(formattedText))
+  )
+  let sourceLen = Array.length(sourceTokens)
+  let formattedLen = Array.length(formattedTokens)
+
+  let mut prefix = 0
+  while (
+    prefix < sourceLen
+    && prefix < formattedLen
+    && tokensEqualForAlignment(
+      Array.get(prefix, sourceTokens),
+      Array.get(prefix, formattedTokens)
     )
-    let sourceLen = Array.length(sourceTokens)
-    let formattedLen = Array.length(formattedTokens)
+  ) {
+    prefix += 1
+  }
 
-    let mut prefix = 0
-    while (
-      prefix < sourceLen
-      && prefix < formattedLen
-      && tokensEqual(
-        Array.get(prefix, sourceTokens),
-        Array.get(prefix, formattedTokens)
-      )
-    ) {
-      prefix += 1
-    }
-
-    let mut suffix = 0
-    while (suffix < sourceLen - prefix && suffix < formattedLen - prefix) {
-      let srcTok = Array.get(sourceLen - 1 - suffix, sourceTokens)
-      let fmtTok = Array.get(formattedLen - 1 - suffix, formattedTokens)
-      if (tokensEqual(srcTok, fmtTok)) {
-        suffix += 1
-      } else {
-        suffix = suffix
-        break
-      }
-    }
-
-    if (prefix == sourceLen && prefix == formattedLen) {
-      (formattedText, false, 0, 0, 0, 0)
+  let mut suffix = 0
+  while (suffix < sourceLen - prefix && suffix < formattedLen - prefix) {
+    let srcTok = Array.get(sourceLen - 1 - suffix, sourceTokens)
+    let fmtTok = Array.get(formattedLen - 1 - suffix, formattedTokens)
+    if (tokensEqualForAlignment(srcTok, fmtTok)) {
+      suffix += 1
     } else {
-      let sourceStart = if (prefix < sourceLen) {
-        Array.get(prefix, sourceTokens).span.start
-      } else {
-        String.length(sourceText)
-      }
-      let sourceEnd = if (sourceLen - suffix - 1 >= prefix) {
-        Array.get(sourceLen - suffix - 1, sourceTokens).span.end
-      } else {
-        sourceStart
-      }
-      let formattedStart = if (prefix < formattedLen) {
-        Array.get(prefix, formattedTokens).span.start
-      } else {
-        String.length(formattedText)
-      }
-      let formattedEnd = if (formattedLen - suffix - 1 >= prefix) {
-        Array.get(formattedLen - suffix - 1, formattedTokens).span.end
-      } else {
-        formattedStart
-      }
-
-      let prefixText = String.slice(0, end=formattedStart, formattedText)
-      let middleText = String.slice(sourceStart, end=sourceEnd, sourceText)
-      let suffixText = String.slice(
-        formattedEnd,
-        end=String.length(formattedText),
-        formattedText
-      )
-      let merged = prefixText ++ middleText ++ suffixText
-      (merged, true, sourceStart, sourceEnd, formattedStart, formattedEnd)
+      suffix = suffix
+      break
     }
   }
 
-  let alignReal = (sourceText: String, formattedText: String) => {
-    let mut current = formattedText
-    let mut changed = false
-    let mut lastStart = 0
-    let mut lastEnd = 0
-    let mut lastFormattedStart = 0
-    let mut lastFormattedEnd = 0
-    let mut attempts = 0
-    while (attempts < 4) {
-      let (next, didChange, start, end, fmtStart, fmtEnd) = alignOnce(
-        sourceText,
-        current
-      )
-      if (!didChange) {
-        break
-      }
-      current = next
-      changed = true
-      lastStart = start
-      lastEnd = end
-      lastFormattedStart = fmtStart
-      lastFormattedEnd = fmtEnd
-      attempts += 1
+  if (prefix == sourceLen && prefix == formattedLen) {
+    (formattedText, false, 0, 0, 0, 0)
+  } else {
+    let sourceStart = if (prefix < sourceLen) {
+      Array.get(prefix, sourceTokens).span.start
+    } else {
+      String.length(sourceText)
     }
-    (current, changed, lastStart, lastEnd, lastFormattedStart, lastFormattedEnd)
+    let sourceEnd = if (sourceLen - suffix - 1 >= prefix) {
+      Array.get(sourceLen - suffix - 1, sourceTokens).span.end
+    } else {
+      sourceStart
+    }
+    let formattedStart = if (prefix < formattedLen) {
+      Array.get(prefix, formattedTokens).span.start
+    } else {
+      String.length(formattedText)
+    }
+    let formattedEnd = if (formattedLen - suffix - 1 >= prefix) {
+      Array.get(formattedLen - suffix - 1, formattedTokens).span.end
+    } else {
+      formattedStart
+    }
+
+    let prefixText = String.slice(0, end=formattedStart, formattedText)
+    let middleText = String.slice(sourceStart, end=sourceEnd, sourceText)
+    let suffixText = String.slice(
+      formattedEnd,
+      end=String.length(formattedText),
+      formattedText
+    )
+    let merged = prefixText ++ middleText ++ suffixText
+    (merged, true, sourceStart, sourceEnd, formattedStart, formattedEnd)
   }
+}
+
+let alignWithOpaqueFallback = (
+  sourceText: String,
+  formattedText: String,
+) => {
+  let mut current = formattedText
+  let mut changed = false
+  let mut lastStart = 0
+  let mut lastEnd = 0
+  let mut lastFormattedStart = 0
+  let mut lastFormattedEnd = 0
+  let mut spans: List<(Number, Number, Number, Number)> = []
+  let mut attempts = 0
+  while (attempts < 32) {
+    let (next, didChange, start, end, fmtStart, fmtEnd) = alignOnce(sourceText, current)
+    if (!didChange) {
+      break
+    }
+    current = next
+    changed = true
+    lastStart = start
+    lastEnd = end
+    lastFormattedStart = fmtStart
+    lastFormattedEnd = fmtEnd
+    spans = [(start, end, fmtStart, fmtEnd), ...spans]
+    attempts += 1
+  }
+  (
+    current,
+    changed,
+    lastStart,
+    lastEnd,
+    lastFormattedStart,
+    lastFormattedEnd,
+    List.reverse(spans),
+  )
+}
+
+provide record OpaqueSpan {
+  sourceStart: Number,
+  sourceEnd: Number,
+  formattedStart: Number,
+  formattedEnd: Number,
+}
+
+provide let opaqueSpansFor = (source: String, formattedText: String) => {
+  let (_aligned, _changed, _s1, _s2, _f1, _f2, spans) = alignWithOpaqueFallback(
+    source,
+    formattedText
+  )
+  List.map(((a, b, c, d)) => {
+    { sourceStart: a, sourceEnd: b, formattedStart: c, formattedEnd: d }
+  }, spans)
+}
+
+provide let opaqueSpansForModeRaw = (source: String, mode: Mode) => {
+  let settings = match (mode) {
+    Real => realSettings,
+    RealFix => realFixSettings,
+    Virtual => virtualSettings,
+  }
+  let raw = renderWithSettings(Parser.parse(source), source, mode, settings)
+  opaqueSpansFor(source, raw.text)
+}
+
+let alignRealIfNeeded = (source: String, rendered: FormatResult) => {
 
   let (
     aligned,
@@ -1823,7 +1866,8 @@ let alignRealIfNeeded = (source: String, rendered: FormatResult) => {
     mismatchEnd,
     mismatchFmtStart,
     mismatchFmtEnd,
-  ) = alignReal(source, rendered.text)
+    _mismatchSpans,
+  ) = alignWithOpaqueFallback(source, rendered.text)
   if (didChange) {
     let lc = Source.offsetToLineCol(source, mismatchStart)
     let span = Source.makeSpan(lc.line, lc.col, mismatchStart, mismatchEnd)
@@ -1864,14 +1908,150 @@ let alignRealIfNeeded = (source: String, rendered: FormatResult) => {
   }
 }
 
-let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) => {
-  let program = Parser.parse(source)
-  let rendered = renderWithSettings(program, source, mode, settings)
+record SemicolonAddition {
+  anchorOffset: Number,
+  text: String,
+}
+
+let tokenIsIgnoredForSemis = (tok: Lexer.Token) => match (tok.kind) {
+  Lexer.LineComment(_) => true,
+  Lexer.Opaque(_) => true,
+  Lexer.EOF => true,
+  _ => false,
+}
+
+let semicolonAdditionsFromRendered = (source: String, renderedText: String) => {
+  let sourceTokens = Array.fromList(
+    List.filter(tok => !tokenIsIgnoredForSemis(tok), Lexer.lex(source))
+  )
+  let renderedTokens = Array.fromList(
+    List.filter(tok => !tokenIsIgnoredForSemis(tok), Lexer.lex(renderedText))
+  )
+  let sourceLen = Array.length(sourceTokens)
+  let renderedLen = Array.length(renderedTokens)
+  let mut si = 0
+  let mut ri = 0
+  let mut prevSourceEnd = 0
+  let mut out: List<SemicolonAddition> = []
+  while (si < sourceLen && ri < renderedLen) {
+    let src = Array.get(si, sourceTokens)
+    let rnd = Array.get(ri, renderedTokens)
+    if (src.kind == rnd.kind) {
+      prevSourceEnd = src.span.end
+      si += 1
+      ri += 1
+    } else if (rnd.kind == Lexer.SemiColon) {
+      let runStart = ri
+      while (ri < renderedLen) {
+        let tok = Array.get(ri, renderedTokens)
+        if (tok.kind == Lexer.SemiColon) {
+          ri += 1
+        } else {
+          break
+        }
+      }
+      let safeToKeep = if (ri >= renderedLen) {
+        true
+      } else {
+        let afterRun = Array.get(ri, renderedTokens)
+        afterRun.kind == src.kind
+      }
+      if (safeToKeep) {
+        let count = ri - runStart
+        let mut n = 0
+        while (n < count) {
+          out = [{ anchorOffset: prevSourceEnd, text: ";" }, ...out]
+          n += 1
+        }
+      }
+    } else {
+      let canDropRendered = if (ri + 1 < renderedLen) {
+        let nextRendered = Array.get(ri + 1, renderedTokens)
+        nextRendered.kind == src.kind
+      } else {
+        false
+      }
+      let canAdvanceSource = if (si + 1 < sourceLen) {
+        let nextSource = Array.get(si + 1, sourceTokens)
+        rnd.kind == nextSource.kind
+      } else {
+        false
+      }
+      if (canDropRendered) {
+        ri += 1
+      } else if (canAdvanceSource) {
+        prevSourceEnd = src.span.end
+        si += 1
+      } else {
+        ri += 1
+      }
+    }
+  }
+  if (si >= sourceLen) {
+    while (ri < renderedLen) {
+      let tok = Array.get(ri, renderedTokens)
+      if (tok.kind == Lexer.SemiColon) {
+        out = [{ anchorOffset: prevSourceEnd, text: ";" }, ...out]
+      }
+      ri += 1
+    }
+  }
+  List.reverse(out)
+}
+
+let applySemicolonAdditions = (
+  source: String,
+  additions: List<SemicolonAddition>,
+) => {
+  let rec takeAtOffset = (
+    offset: Number,
+    items: List<SemicolonAddition>,
+    acc: List<String>,
+  ) => match (items) {
+    [] => (List.reverse(acc), []),
+    [item, ...rest] => if (item.anchorOffset == offset) {
+      takeAtOffset(offset, rest, [item.text, ...acc])
+    } else {
+      (List.reverse(acc), items)
+    },
+  }
+  let len = String.length(source)
+  let mut i = 0
+  let mut remaining = additions
+  let mut out: List<String> = []
+  while (i <= len) {
+    let (ins, rest) = takeAtOffset(i, remaining, [])
+    remaining = rest
+    if (ins != []) {
+      out = [Array.join("", Array.fromList(ins)), ...out]
+    }
+    if (i < len) {
+      out = [toString(String.charAt(i, source)), ...out]
+    }
+    i += 1
+  }
+  Array.join("", Array.fromList(List.reverse(out)))
+}
+
+let normalizeRealFixIfNeeded = (source: String, rendered: FormatResult) => {
+  let additions = semicolonAdditionsFromRendered(source, rendered.text)
+  { ...rendered, text: applySemicolonAdditions(source, additions) }
+}
+
+let finalizeRendered = (source: String, mode: Mode, rendered: FormatResult) => {
   if (mode == Real) {
     alignRealIfNeeded(source, rendered)
+  } else if (mode == RealFix) {
+    normalizeRealFixIfNeeded(source, rendered)
   } else {
     rendered
   }
+}
+
+let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) => {
+  let program = Parser.parse(source)
+  let rendered = renderWithSettings(program, source, mode, settings)
+  finalizeRendered(source, mode, rendered)
 }
 
 let formatResultWithProgram = (
@@ -1881,18 +2061,14 @@ let formatResultWithProgram = (
   settings: Settings,
 ) => {
   let rendered = renderWithSettings(program, source, mode, settings)
-  if (mode == Real) {
-    alignRealIfNeeded(source, rendered)
-  } else {
-    rendered
-  }
+  finalizeRendered(source, mode, rendered)
 }
 
 provide let formatResultWithMode = (source: String, mode: Mode) =>
   match (mode) {
     Real => formatResultWithSettings(source, mode, realSettings),
+    RealFix => formatResultWithSettings(source, mode, realFixSettings),
     Virtual => formatResultWithSettings(source, mode, virtualSettings),
-    Fix => formatResultWithSettings(source, mode, fixSettings),
   }
 
 provide let formatResultWithProgramMode = (
@@ -1901,8 +2077,8 @@ provide let formatResultWithProgramMode = (
   mode: Mode,
 ) => match (mode) {
   Real => formatResultWithProgram(program, source, mode, realSettings),
+  RealFix => formatResultWithProgram(program, source, mode, realFixSettings),
   Virtual => formatResultWithProgram(program, source, mode, virtualSettings),
-  Fix => formatResultWithProgram(program, source, mode, fixSettings),
 }
 
 provide let formatWithMode = (source: String, mode: Mode) => {

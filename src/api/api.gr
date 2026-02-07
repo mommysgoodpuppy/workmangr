@@ -440,6 +440,21 @@ let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
 let virtualArtifactsToJson = (artifacts: List<Formatter.VirtualArtifact>) =>
   "[" ++ joinStrings(",", List.map(virtualArtifactToJson, artifacts)) ++ "]"
 
+let opaqueSpanToJson = (span: Formatter.OpaqueSpan) => {
+  "{\"sourceStart\":"
+    ++ toString(span.sourceStart)
+    ++ ",\"sourceEnd\":"
+    ++ toString(span.sourceEnd)
+    ++ ",\"formattedStart\":"
+    ++ toString(span.formattedStart)
+    ++ ",\"formattedEnd\":"
+    ++ toString(span.formattedEnd)
+    ++ "}"
+}
+
+let opaqueSpansToJson = (spans: List<Formatter.OpaqueSpan>) =>
+  "[" ++ joinStrings(",", List.map(opaqueSpanToJson, spans)) ++ "]"
+
 let errorClueToJson = (clue: Error.ErrorClue) => match (clue) {
   Error.Expected(text) =>
     "{\"kind\":\"Expected\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
@@ -634,7 +649,7 @@ provide let compileToJson = (source: String) => {
   let fixResult = Formatter.formatResultWithProgramMode(
     parsed,
     source,
-    Formatter.Fix
+    Formatter.RealFix
   )
   let fixDiagnostics = Error.getErrors()
   let fixMarkedDiagnostics = Error.getMarkedErrors()
@@ -648,6 +663,14 @@ provide let compileToJson = (source: String) => {
   let fixTokens = "["
     ++ joinStrings(",", List.map(tokenToJson, Lexer.lex(fixResult.text)))
     ++ "]"
+  let formattedOpaqueSpans = Formatter.opaqueSpansForModeRaw(
+    source,
+    Formatter.Real
+  )
+  let realFixOpaqueSpans = Formatter.opaqueSpansForModeRaw(
+    source,
+    Formatter.RealFix
+  )
 
   // Index the lowered AST into a NodeStore
   let loweredStore = CoreIndexer.indexProgram(lowered)
@@ -682,6 +705,8 @@ provide let compileToJson = (source: String) => {
     ++ "\""
     ++ ",\"formattedTokens\":"
     ++ formattedTokens
+    ++ ",\"formattedOpaqueSpans\":"
+    ++ opaqueSpansToJson(formattedOpaqueSpans)
     ++ ",\"formattedVirtual\":\""
     ++ escapeJson(virtualResult.text)
     ++ "\""
@@ -692,6 +717,8 @@ provide let compileToJson = (source: String) => {
     ++ "\""
     ++ ",\"formattedFixTokens\":"
     ++ fixTokens
+    ++ ",\"formattedFixOpaqueSpans\":"
+    ++ opaqueSpansToJson(realFixOpaqueSpans)
     ++ ",\"formattedVirtualArtifacts\":"
     ++ virtualArtifactsToJson(virtualResult.virtualArtifacts)
     ++ "}"
