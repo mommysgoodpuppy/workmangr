@@ -96,9 +96,15 @@ provide record VirtualArtifact {
   reason: String,
 }
 
+provide record SemicolonAddition {
+  anchorOffset: Number,
+  text: String,
+}
+
 provide record FormatResult {
   text: String,
   virtualArtifacts: List<VirtualArtifact>,
+  semicolonAdditions: List<SemicolonAddition>,
 }
 
 record Settings {
@@ -455,6 +461,7 @@ let renderWithSettings = (
     }
   let mut chunks: List<String> = []
   let mut artifacts: List<VirtualArtifact> = []
+  let mut semicolonAdditions: List<SemicolonAddition> = []
   let mut indent = 0
   let mut atLineStart = true
 
@@ -481,6 +488,12 @@ let renderWithSettings = (
     if (mode == Virtual && settings.allowVirtualInsertions) {
       write(text)
       artifacts = [artifactFromVirtual(text, anchor, reason), ...artifacts]
+    }
+  }
+
+  let noteSemicolonAddition = (anchorOffset: Number) => {
+    if (mode == RealFix && settings.insertSemis) {
+      semicolonAdditions = [{ anchorOffset, text: ";" }, ...semicolonAdditions]
     }
   }
 
@@ -1247,6 +1260,10 @@ let renderWithSettings = (
                         && prevStmtIsConcrete(prevStmt)
                       ) {
                         write(";")
+                        match (prevStmtEnd(prevStmt)) {
+                          Some(anchor) => noteSemicolonAddition(anchor),
+                          None => void,
+                        }
                       }
                     }
                   },
@@ -1731,6 +1748,7 @@ let renderWithSettings = (
             && hasConcreteTokenEndingAt(endSpan.end)
           ) {
             write(";")
+            noteSemicolonAddition(endSpan.end)
           }
         }
         emitProgramItems(tail)
@@ -1743,6 +1761,7 @@ let renderWithSettings = (
   {
     text: join("", List.reverse(chunks)),
     virtualArtifacts: List.reverse(artifacts),
+    semicolonAdditions: List.reverse(semicolonAdditions),
   }
 }
 
@@ -2063,11 +2082,6 @@ let alignRealIfNeeded = (source: String, rendered: FormatResult) => {
   aligned
 }
 
-record SemicolonAddition {
-  anchorOffset: Number,
-  text: String,
-}
-
 let maybeLogTiming = (
   prefixOpt: Option<String>,
   label: String,
@@ -2078,6 +2092,33 @@ let maybeLogTiming = (
     Some(prefix) => logTiming(prefix ++ "/" ++ label, startNs, endNs),
     None => void,
   }
+
+let filterSemicolonAdditionsByBrokenSpans = (
+  additions: List<SemicolonAddition>,
+  brokenSpans: List<OpaqueSpan>,
+) => {
+  let anchorBlocked = (offset: Number) => {
+    let rec loop = (items: List<OpaqueSpan>) => match (items) {
+      [] => false,
+      [span, ...rest] => if (offset >= span.sourceStart && offset <= span.sourceEnd) {
+        true
+      } else {
+        loop(rest)
+      },
+    }
+    loop(brokenSpans)
+  }
+  let rec go = (items: List<SemicolonAddition>, out: List<SemicolonAddition>) =>
+    match (items) {
+      [] => List.reverse(out),
+      [item, ...rest] => if (anchorBlocked(item.anchorOffset)) {
+        go(rest, out)
+      } else {
+        go(rest, [item, ...out])
+      },
+  }
+  go(additions, [])
+}
 
 let semicolonAdditionsFromRenderedWithBrokenSpans = (
   source: String,
@@ -2397,20 +2438,15 @@ let realFixFromProgram = (program: SurfaceAst.Program, source: String) => {
   )
   let sourceTokensForAlign = Array.fromList(normalizeTokensForAlignment(sourceLexed))
   let renderedFix = renderWithSettings(program, source, RealFix, realFixSettings)
-  let renderedFixTokensForSemis = Array.fromList(
-    List.filter(tok => !tokenIsIgnoredForSemis(tok), Lexer.lex(renderedFix.text))
-  )
   let renderedReal = renderWithSettings(program, source, Real, realSettings)
   let brokenSpans = opaqueSpansForWithSourceTokens(
     source,
     sourceTokensForAlign,
     renderedReal.text
   )
-  let additions = semicolonAdditionsFromTokensWithBrokenSpans(
-    sourceTokensForSemis,
-    renderedFixTokensForSemis,
-    brokenSpans,
-    None
+  let additions = filterSemicolonAdditionsByBrokenSpans(
+    renderedFix.semicolonAdditions,
+    brokenSpans
   )
   let (alignedReal, alignedRealTokensForSemis) = alignRealIfNeededWithSourceTokens(
     source,
@@ -2513,12 +2549,6 @@ provide let profileRealFix = (source: String) => {
   let renderedFix = renderWithSettings(program, source, RealFix, realFixSettings)
   let renderFixEnd = nowNs()
   logTiming("realfix/render", renderFixStart, renderFixEnd)
-  let renderedFixLexStart = nowNs()
-  let renderedFixTokensForSemis = Array.fromList(
-    List.filter(tok => !tokenIsIgnoredForSemis(tok), Lexer.lex(renderedFix.text))
-  )
-  let renderedFixLexEnd = nowNs()
-  logTiming("realfix/semis/rendered_lex", renderedFixLexStart, renderedFixLexEnd)
 
   let renderedRealForSpans = renderWithSettings(program, source, Real, realSettings)
   let spansStart = nowNs()
@@ -2531,11 +2561,9 @@ provide let profileRealFix = (source: String) => {
   logTiming("realfix/broken_spans", spansStart, spansEnd)
 
   let semisStart = nowNs()
-  let additions = semicolonAdditionsFromTokensWithBrokenSpans(
-    sourceTokensForSemis,
-    renderedFixTokensForSemis,
-    brokenSpans,
-    Some("realfix/semis")
+  let additions = filterSemicolonAdditionsByBrokenSpans(
+    renderedFix.semicolonAdditions,
+    brokenSpans
   )
   let semisEnd = nowNs()
   logTiming("realfix/semis_apply", semisStart, semisEnd)
