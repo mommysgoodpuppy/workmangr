@@ -498,6 +498,68 @@ let lexInternal = (source, profiling: Bool) => {
               ),
             ]
           )
+        } else if (ch == '\\') {
+          let afterSlash = advancePosition(startPosition, '\\')
+          match (peek(afterSlash.index)) {
+            Some(escapedSourceChar) => {
+              let decodedChar = if (escapedSourceChar == 'n') {
+                '\n'
+              } else if (escapedSourceChar == 't') {
+                '\t'
+              } else if (escapedSourceChar == 'r') {
+                '\r'
+              } else if (escapedSourceChar == '\\') {
+                '\\'
+              } else if (escapedSourceChar == '\'') {
+                '\''
+              } else if (escapedSourceChar == '0') {
+                Char.fromCode(0)
+              } else {
+                escapedSourceChar
+              }
+              let afterEscaped = advancePosition(afterSlash, escapedSourceChar)
+              match (peek(afterEscaped.index)) {
+                Some('\'') => {
+                  {
+                    value: CharVal(decodedChar),
+                    position: advancePosition(afterEscaped, '\''),
+                  }
+                },
+                _ => {
+                  let span = Source.makeSpan(
+                    startPosition.line,
+                    startPosition.col,
+                    startPosition.index,
+                    afterEscaped.index
+                  )
+                  let mark = createDummyMark(span)
+                  Error.createMarkedError(
+                    Error.Lexing,
+                    mark,
+                    "Unclosed character literal",
+                    { value: CharVal(' '), position: afterEscaped },
+                    clues=[Error.Expected("closing single quote")]
+                  )
+                },
+              }
+            },
+            None => {
+              let span = Source.makeSpan(
+                startPosition.line,
+                startPosition.col,
+                startPosition.index,
+                startPosition.index + 1
+              )
+              let mark = createDummyMark(span)
+              Error.createMarkedError(
+                Error.Lexing,
+                mark,
+                "Unclosed character literal",
+                { value: CharVal(' '), position: afterSlash },
+                clues=[Error.Expected("escaped character and closing quote")]
+              )
+            },
+          }
         } else {
           let char = ch
           let afterChar = advancePosition(startPosition, ch)

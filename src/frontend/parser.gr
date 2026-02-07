@@ -1267,10 +1267,7 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
         let (_, state2) = expectSimple(Lexer.LBrace, state1)
         let mut fields = []
         let mut currentState = state2
-        while (
-          !kindIs(currentToken(currentState).kind, Lexer.RBrace)
-            && !kindIs(currentToken(currentState).kind, Lexer.EOF)
-        ) {
+        while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
           let before = currentState
           if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
             let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
@@ -1484,10 +1481,7 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
       let (_, state2) = expectSimple(Lexer.DotBrace, state1)
       let mut fields = []
       let mut currentState = state2
-      while (
-        !kindIs(currentToken(currentState).kind, Lexer.RBrace)
-          && !kindIs(currentToken(currentState).kind, Lexer.EOF)
-      ) {
+      while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
         let before = currentState
         if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
           // Skip leading/trailing commas
@@ -2726,9 +2720,7 @@ and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
       }
     },
     _ => {
-      // Consume one token on recovery to avoid stalling on malformed patterns.
-      let state0 = dropToken(state)
-      let (id, state1) = freshId(state0)
+      let (id, state1) = freshId(state)
       let span = tok.span
       let pat: SurfaceAst.Pattern = {
         node: { id, span },
