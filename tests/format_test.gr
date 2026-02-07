@@ -37,6 +37,31 @@ test("real formatter preserves non-whitespace tokens on util.testStr", () => {
   assertEquals(canonicalNonWs(Util.testStr), canonicalNonWs(formatted))
 })
 
+test("fix mode doesnt insert semicolon in broken case", () => {
+    let source =
+    "
+let= 25
+and= 
+
+let= {
+  let= 25
+  and= 6
+"
+
+  let fixExpected =
+    "
+let_= 25
+and_= 
+
+let_= {
+  let_= 25
+  and_= 6
+"
+  
+  let fixOut = Formatter.formatWithMode(source, Formatter.Fix)
+  assertEquals(canonicalNonWs(fixExpected), canonicalNonWs(fixOut))
+})
+
 test("formatter real handles incomplete example", () => {
   let source =
     "
