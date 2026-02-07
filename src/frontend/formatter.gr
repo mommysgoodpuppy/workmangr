@@ -110,13 +110,28 @@ provide record FormatResult {
 record Settings {
   allowVirtualInsertions: Bool,
   insertSemis: Bool,
+  emitText: Bool,
 }
 
-let realSettings = { allowVirtualInsertions: false, insertSemis: false }
-let realFixSettings = { allowVirtualInsertions: false, insertSemis: true }
+let realSettings = {
+  allowVirtualInsertions: false,
+  insertSemis: false,
+  emitText: true,
+}
+let realFixSettings = {
+  allowVirtualInsertions: false,
+  insertSemis: true,
+  emitText: true,
+}
+let realFixSemisOnlySettings = {
+  allowVirtualInsertions: false,
+  insertSemis: true,
+  emitText: false,
+}
 let virtualSettings = {
   allowVirtualInsertions: true,
   insertSemis: false,
+  emitText: true,
 }
 
 let rec spaces = (n: Number) => {
@@ -131,13 +146,14 @@ let artifactFromVirtual = (text: String, anchor: Number, reason: String) => {
   { kind: "ghostToken", text, start: anchor, end: anchor, reason }
 }
 
-let renderWithSettings = (
+let renderWithSettingsWithTokens = (
   program: SurfaceAst.Program,
   source: String,
+  sourceTokens: List<Lexer.Token>,
   mode: Mode,
   settings: Settings,
 ) => {
-  let tokens: List<Lexer.Token> = Lexer.lex(source)
+  let tokens: List<Lexer.Token> = sourceTokens
   let tokensNoComments: List<Lexer.Token> = {
     let arr = Array.fromList(tokens)
     let len = Array.length(arr)
@@ -474,21 +490,27 @@ let renderWithSettings = (
   let mut atLineStart = true
 
   let write = (text: String) => {
-    if (atLineStart) {
-      chunks = [spaces(indent), ...chunks]
-      atLineStart = false
+    if (settings.emitText) {
+      if (atLineStart) {
+        chunks = [spaces(indent), ...chunks]
+        atLineStart = false
+      }
+      chunks = [text, ...chunks]
     }
-    chunks = [text, ...chunks]
   }
 
   let newline = () => {
-    chunks = ["\n", ...chunks]
-    atLineStart = true
+    if (settings.emitText) {
+      chunks = ["\n", ...chunks]
+      atLineStart = true
+    }
   }
 
   let space = () => {
-    if (!atLineStart) {
-      chunks = [" ", ...chunks]
+    if (settings.emitText) {
+      if (!atLineStart) {
+        chunks = [" ", ...chunks]
+      }
     }
   }
 
@@ -1773,6 +1795,14 @@ let renderWithSettings = (
   }
 }
 
+let renderWithSettings = (
+  program: SurfaceAst.Program,
+  source: String,
+  mode: Mode,
+  settings: Settings,
+) =>
+  renderWithSettingsWithTokens(program, source, Lexer.lex(source), mode, settings)
+
 let tokenIsIgnoredForSemis = (tok: Lexer.Token) => match (tok.kind) {
   Lexer.LineComment(_) => true,
   Lexer.Opaque(_) => true,
@@ -2025,7 +2055,14 @@ provide let opaqueSpansForModeRaw = (source: String, mode: Mode) => {
     RealFix => realFixSettings,
     Virtual => virtualSettings,
   }
-  let raw = renderWithSettings(Parser.parse(source), source, mode, settings)
+  let parsed = Parser.parseResult(source)
+  let raw = renderWithSettingsWithTokens(
+    parsed.program,
+    source,
+    parsed.tokens,
+    mode,
+    settings
+  )
   opaqueSpansFor(source, raw.text)
 }
 
@@ -2552,8 +2589,20 @@ let realFixFromProgram = (
     sourceLexed,
     tokenIsIgnoredForAlignment
   )
-  let renderedFix = renderWithSettings(program, source, RealFix, realFixSettings)
-  let renderedReal = renderWithSettings(program, source, Real, realSettings)
+  let renderedFix = renderWithSettingsWithTokens(
+    program,
+    source,
+    sourceLexed,
+    RealFix,
+    realFixSemisOnlySettings
+  )
+  let renderedReal = renderWithSettingsWithTokens(
+    program,
+    source,
+    sourceLexed,
+    Real,
+    realSettings
+  )
   let (alignedReal, brokenSpans, alignedRealTokensForSemis) =
     alignRealAndBrokenSpansWithSourceTokens(
       source,
@@ -2597,7 +2646,13 @@ let formatResultWithSettings = (source: String, mode: Mode, settings: Settings) 
   if (mode == RealFix) {
     realFixFromProgram(program, source, parsed.tokens)
   } else {
-    let rendered = renderWithSettings(program, source, mode, settings)
+    let rendered = renderWithSettingsWithTokens(
+      program,
+      source,
+      parsed.tokens,
+      mode,
+      settings
+    )
     finalizeRendered(source, mode, rendered)
   }
 }
@@ -2663,12 +2718,24 @@ provide let profileRealFix = (source: String) => {
   logTiming("realfix/source_lex", sourceLexStart, sourceLexEnd)
 
   let renderFixStart = nowNs()
-  let renderedFix = renderWithSettings(program, source, RealFix, realFixSettings)
+  let renderedFix = renderWithSettingsWithTokens(
+    program,
+    source,
+    sourceLexed,
+    RealFix,
+    realFixSemisOnlySettings
+  )
   let renderFixEnd = nowNs()
-  logTiming("realfix/render", renderFixStart, renderFixEnd)
+  logTiming("realfix/render_semis_only", renderFixStart, renderFixEnd)
 
   let renderRealStart = nowNs()
-  let renderedRealForSpans = renderWithSettings(program, source, Real, realSettings)
+  let renderedRealForSpans = renderWithSettingsWithTokens(
+    program,
+    source,
+    sourceLexed,
+    Real,
+    realSettings
+  )
   let renderRealEnd = nowNs()
   logTiming("realfix/render_real", renderRealStart, renderRealEnd)
   let alignAndSpansStart = nowNs()
