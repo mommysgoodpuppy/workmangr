@@ -97,5 +97,61 @@ test("parser treats top-level semicolon as sequencing in let RHS", () => {
   assertTrue(seqOk)
 })
 
+test("parser supports generic record declarations and type arguments", () => {
+  clearErrors()
+  let source =
+    "record Helper<T> = { trues: List<T>, falses: List<T> };"
+  let parsed = Parser.parse(source)
+
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.RecordDecl(recordDecl)] => {
+        let hasOneTypeParam = List.length(recordDecl.typeParams) == 1
+        let fieldTypesLookGeneric = List.reduce(
+          (acc: Bool, entry: (SurfaceAst.Name, SurfaceAst.TypeExpr)) =>
+            acc
+              && match (entry) {
+                (_, ty) => match (ty.kind) {
+                  SurfaceAst.Ref(_, [arg]) => match (arg.kind) {
+                    SurfaceAst.Ref(_, []) => true,
+                    _ => false,
+                  },
+                  _ => false,
+                },
+              },
+          true,
+          recordDecl.fields,
+        )
+        hasOneTypeParam && fieldTypesLookGeneric
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
+test("parser supports if condition with equality comparison", () => {
+  clearErrors()
+  let source = "let f = (count) => { if (count == 3) { count } else { 0 } };"
+  let _ = Parser.parseResult(source)
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  assertFalse(hasErrors)
+})
+
+test("parser supports multiline functional call arguments with multiplication", () => {
+  clearErrors()
+  let source =
+    "let x = makeStep(\n"
+      ++ "  leftStep.value * rightStep.value,\n"
+      ++ "  expectCharAt(chars, rightStep.next, charCloseParen, ExpectedCloseParen)\n"
+      ++ ");"
+  let _ = Parser.parseResult(source)
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  assertFalse(hasErrors)
+})
+
 let results = runTests()
 printResultsAndExit(results)

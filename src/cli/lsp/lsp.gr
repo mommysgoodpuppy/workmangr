@@ -6,6 +6,7 @@ from "list" include List
 from "map" include Map
 from "number" include Number
 from "string" include String
+from "uint8" include Uint8
 from "wasi/file" include File
 from "json" include Json
 
@@ -33,6 +34,9 @@ let mut workspaceRootPath: Option<String> = None
 let v0StdRoot = "c:/GIT/workman/std"
 let mut inlayDebugEnabled = false
 let mut formatDebugEnabled = false
+let mut shouldExit = false
+let inlayMaxSourceChars = 120000
+let formatMaxSourceChars = 200000
 
 let debug = (text: String) => {
   if (debugEnabled) {
@@ -69,7 +73,8 @@ let sendResponse = (idText: String, resultJson: String) => {
     ++ ",\"result\":"
     ++ resultJson
     ++ "}"
-  let header = "Content-Length: " ++ toString(String.length(body)) ++ "\r\n\r\n"
+  let bodyBytes = Bytes.fromString(body)
+  let header = "Content-Length: " ++ toString(Bytes.length(bodyBytes)) ++ "\r\n\r\n"
   writeStdout(header ++ body)
 }
 
@@ -79,7 +84,8 @@ let sendNotification = (method: String, paramsJson: String) => {
     ++ "\",\"params\":"
     ++ paramsJson
     ++ "}"
-  let header = "Content-Length: " ++ toString(String.length(body)) ++ "\r\n\r\n"
+  let bodyBytes = Bytes.fromString(body)
+  let header = "Content-Length: " ++ toString(Bytes.length(bodyBytes)) ++ "\r\n\r\n"
   writeStdout(header ++ body)
 }
 
@@ -299,6 +305,7 @@ let publishGraphDiagnostics = (
   docs: Map.Map<String, String>,
   publishedUris: Map.Map<String, Bool>,
 ) => {
+  debug("[LSP diag] begin publishGraphDiagnostics")
   let absEntryPath = uriToPath(entryUri)
   let rootDir = match (workspaceRootPath) {
     Some(root) => root,
@@ -320,15 +327,18 @@ let publishGraphDiagnostics = (
   let uriLookup = pathUriLookup(docs)
   debug("[LSP diag] overrideCount=" ++ toString(List.length(Map.toList(overrides))))
   debug("[LSP diag] stdRoot=" ++ v0StdRoot)
+  debug("[LSP diag] starting ModuleSystem.buildGraph")
   let graph = ModuleSystem.buildGraph(
     entryPath,
     options={
-      ...ModuleSystem.defaultOptions(),
       rootDir,
       stdRoots: [v0StdRoot],
       sourceOverrides: overrides,
+      debugLog: Some(debug),
+      skipStdParsing: true,
     }
   )
+  debug("[LSP diag] finished ModuleSystem.buildGraph")
   debug("[LSP diag] topo=" ++ Array.join(" -> ", Array.fromList(graph.topo)))
   let nextPublished = Map.make()
   List.forEach(((modulePath, diagnostics)) => {
@@ -361,12 +371,14 @@ let publishGraphDiagnostics = (
 
   List.forEach(((uri, _)) => {
     if (Map.get(uri, nextPublished) == None) {
+      debug("[LSP diag] clearing stale diagnostics uri=" ++ uri)
       publishDiagnostics(uri, [])
     } else {
       void
     }
   }, Map.toList(publishedUris))
 
+  debug("[LSP diag] end publishGraphDiagnostics")
   nextPublished
 }
 
@@ -387,16 +399,44 @@ let handleInlayHint = (
   params: Json.Json,
   docs: Map.Map<String, String>,
 ) => {
+  debug("[LSP inlay] request received")
   let uriOpt = match (jsonGetObject("textDocument", params)) {
     Some(obj) => jsonGetString("uri", obj),
     None => None,
   }
   match (uriOpt) {
-    None => sendResponse(idText, "[]"),
+    None => {
+      debug("[LSP inlay] missing URI, returning empty")
+      sendResponse(idText, "[]")
+      debug("[LSP inlay] done status=missing_uri")
+    },
     Some(uri) => {
+      debug("[LSP inlay] start uri=" ++ uri)
       match (Map.get(uri, docs)) {
-        None => sendResponse(idText, "[]"),
+        None => {
+          debug("[LSP inlay] document not open, returning empty uri=" ++ uri)
+          sendResponse(idText, "[]")
+          debug("[LSP inlay] done uri=" ++ uri ++ " status=document_not_open")
+        },
         Some(source) => {
+          let sourceLen = String.length(source)
+          if (sourceLen > inlayMaxSourceChars) {
+            debug(
+              "[LSP inlay] skipped uri="
+                ++ uri
+                ++ " reason=source_too_large chars="
+                ++ toString(sourceLen)
+                ++ " limit="
+                ++ toString(inlayMaxSourceChars)
+            )
+            sendResponse(idText, "[]")
+            debug(
+              "[LSP inlay] done uri="
+                ++ uri
+                ++ " status=skipped_source_too_large chars="
+                ++ toString(sourceLen)
+            )
+          } else {
           let rangeOpt = jsonGetObject("range", params)
           let rangeStart = match (rangeOpt) {
             Some(rangeObj) => {
@@ -438,6 +478,7 @@ let handleInlayHint = (
             },
             None => String.length(source),
           }
+          debug("[LSP inlay] building hints uri=" ++ uri)
           let hintsJson = Inlay.inlayHintsForSource(
             source,
             rangeStart,
@@ -446,7 +487,15 @@ let handleInlayHint = (
             escapeJson,
             inlayDebugEnabled
           )
+          debug("[LSP inlay] sending response uri=" ++ uri)
           sendResponse(idText, hintsJson)
+          debug(
+            "[LSP inlay] done uri="
+              ++ uri
+              ++ " status=ok hint_json_chars="
+              ++ toString(String.length(hintsJson))
+          )
+          }
         },
       }
     },
@@ -458,22 +507,59 @@ let handleFormatting = (
   params: Json.Json,
   docs: Map.Map<String, String>,
 ) => {
+  debug("[LSP format] request received")
   let uriOpt = match (jsonGetObject("textDocument", params)) {
     Some(obj) => jsonGetString("uri", obj),
     None => None,
   }
   match (uriOpt) {
-    None => sendResponse(idText, "[]"),
+    None => {
+      debug("[LSP format] missing URI, returning empty")
+      sendResponse(idText, "[]")
+      debug("[LSP format] done status=missing_uri")
+    },
     Some(uri) => {
+      debug("[LSP format] start uri=" ++ uri)
       match (Map.get(uri, docs)) {
-        None => sendResponse(idText, "[]"),
+        None => {
+          debug("[LSP format] document not open, returning empty uri=" ++ uri)
+          sendResponse(idText, "[]")
+          debug("[LSP format] done uri=" ++ uri ++ " status=document_not_open")
+        },
         Some(source) => {
+          let sourceLen = String.length(source)
+          if (sourceLen > formatMaxSourceChars) {
+            debug(
+              "[LSP format] skipped uri="
+                ++ uri
+                ++ " reason=source_too_large chars="
+                ++ toString(sourceLen)
+                ++ " limit="
+                ++ toString(formatMaxSourceChars)
+            )
+            sendResponse(idText, "[]")
+            debug(
+              "[LSP format] done uri="
+                ++ uri
+                ++ " status=skipped_source_too_large chars="
+                ++ toString(sourceLen)
+            )
+          } else {
+          debug("[LSP format] building edits uri=" ++ uri)
           let editsJson = Format.formattingEditsForSource(
             source,
             debugFormat,
             escapeJson
           )
+          debug("[LSP format] sending response uri=" ++ uri)
           sendResponse(idText, editsJson)
+          debug(
+            "[LSP format] done uri="
+              ++ uri
+              ++ " status=ok edits_json_chars="
+              ++ toString(String.length(editsJson))
+          )
+          }
         },
       }
     },
@@ -490,6 +576,7 @@ let handleMessage = (
   match (methodOpt) {
     None => publishedUris,
     Some(method) => {
+      debug("[LSP msg] method=" ++ method)
       if (method == "initialize") {
         match (jsonGetObject("params", msgJson)) {
           Some(params) => {
@@ -513,6 +600,7 @@ let handleMessage = (
         }
         publishedUris
       } else if (method == "textDocument/didOpen") {
+        debug("[LSP msg] handling didOpen")
         match (jsonGetObject("params", msgJson)) {
           Some(params) => {
             match (jsonGetObject("textDocument", params)) {
@@ -546,6 +634,7 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/didChange") {
+        debug("[LSP msg] handling didChange")
         match (jsonGetObject("params", msgJson)) {
           Some(params) => {
             let uriOpt = match (jsonGetObject("textDocument", params)) {
@@ -589,6 +678,7 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/didClose") {
+        debug("[LSP msg] handling didClose")
         match (jsonGetObject("params", msgJson)) {
           Some(params) => {
             match (jsonGetObject("textDocument", params)) {
@@ -616,6 +706,7 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/inlayHint") {
+        debug("[LSP msg] handling inlayHint")
         match (idOpt) {
           Some(idJson) => match (jsonGetObject("params", msgJson)) {
             Some(params) => handleInlayHint(jsonToIdText(idJson), params, docs),
@@ -625,6 +716,7 @@ let handleMessage = (
         }
         publishedUris
       } else if (method == "textDocument/formatting") {
+        debug("[LSP msg] handling formatting")
         match (idOpt) {
           Some(idJson) => match (jsonGetObject("params", msgJson)) {
             Some(params) => handleFormatting(jsonToIdText(idJson), params, docs),
@@ -634,12 +726,15 @@ let handleMessage = (
         }
         publishedUris
       } else if (method == "shutdown") {
+        debug("[LSP msg] handling shutdown")
         match (idOpt) {
           Some(idJson) => sendResponse(jsonToIdText(idJson), "null"),
           None => void,
         }
         publishedUris
       } else if (method == "exit") {
+        debug("[LSP msg] handling exit")
+        shouldExit = true
         publishedUris
       } else {
         publishedUris
@@ -669,26 +764,42 @@ let parseContentLength = (header: String) => {
   find(0)
 }
 
-let tryExtractMessage = (buffer: String) => {
-  match (String.indexOf("\r\n\r\n", buffer)) {
+let findHeaderEnd = (buffer: Bytes) => {
+  let len = Bytes.length(buffer)
+  let mut i = 0
+  let mut found: Option<Number> = None
+  while (i + 3 < len && found == None) {
+    let b0 = Uint8.toNumber(Bytes.getUint8(i, buffer))
+    let b1 = Uint8.toNumber(Bytes.getUint8(i + 1, buffer))
+    let b2 = Uint8.toNumber(Bytes.getUint8(i + 2, buffer))
+    let b3 = Uint8.toNumber(Bytes.getUint8(i + 3, buffer))
+    if (b0 == 13 && b1 == 10 && b2 == 13 && b3 == 10) {
+      found = Some(i)
+    }
+    i += 1
+  }
+  found
+}
+
+let tryExtractMessage = (buffer: Bytes) => {
+  match (findHeaderEnd(buffer)) {
     None => (None, buffer),
     Some(headerEnd) => {
-      let header = String.slice(0, end=headerEnd, buffer)
+      let headerBytes = Bytes.slice(0, headerEnd, buffer)
+      let header = Bytes.toString(headerBytes)
       let bodyStart = headerEnd + 4
       match (parseContentLength(header)) {
         None => (None, buffer),
         Some(len) => {
+          let bufLen = Bytes.length(buffer)
           let totalNeeded = bodyStart + len
-          if (String.length(buffer) < totalNeeded) {
+          if (bufLen < totalNeeded) {
             (None, buffer)
           } else {
-            let body = String.slice(bodyStart, end=totalNeeded, buffer)
-            let rest = String.slice(
-              totalNeeded,
-              end=String.length(buffer),
-              buffer
-            )
-            (Some(body), rest)
+            let bodyBytes = Bytes.slice(bodyStart, len, buffer)
+            let restLen = bufLen - totalNeeded
+            let rest = Bytes.slice(totalNeeded, restLen, buffer)
+            (Some(Bytes.toString(bodyBytes)), rest)
           }
         },
       }
@@ -702,17 +813,20 @@ let readChunk = () => {
       None
     } else {
       let slice = Bytes.slice(0, count, bytes)
-      Some(Bytes.toString(slice))
+      Some(slice)
     },
     Err(_) => None,
   }
 }
 
 let rec loop = (
-  buffer: String,
+  buffer: Bytes,
   docs: Map.Map<String, String>,
   publishedUris: Map.Map<String, Bool>,
 ) => {
+  if (shouldExit) {
+    void
+  } else {
   let (msgOpt, rest) = tryExtractMessage(buffer)
   match (msgOpt) {
     Some(msgText) => {
@@ -730,16 +844,17 @@ let rec loop = (
     None => {
       match (readChunk()) {
         None => void,
-        Some(chunk) => loop(buffer ++ chunk, docs, publishedUris),
+        Some(chunk) => loop(Bytes.concat(buffer, chunk), docs, publishedUris),
       }
     },
+  }
   }
 }
 
 let main = () => {
   let docs = Map.make()
   let publishedUris = Map.make()
-  loop("", docs, publishedUris)
+  loop(Bytes.empty, docs, publishedUris)
 }
 
 main()

@@ -39,6 +39,8 @@ provide record BuildOptions {
   rootDir: String,
   stdRoots: List<String>,
   sourceOverrides: Map.Map<String, String>,
+  debugLog: Option<(String) => Void>,
+  skipStdParsing: Bool,
 }
 
 record BuildContext {
@@ -52,7 +54,20 @@ record BuildContext {
 
 provide let defaultOptions = () => {
   let overrides = Map.make()
-  { rootDir: ".", stdRoots: [], sourceOverrides: overrides }: BuildOptions
+  {
+    rootDir: ".",
+    stdRoots: [],
+    sourceOverrides: overrides,
+    debugLog: None,
+    skipStdParsing: false,
+  }: BuildOptions
+}
+
+let log = (options: BuildOptions, message: String) => {
+  match (options.debugLog) {
+    Some(debugLog) => debugLog("[MS graph] " ++ message),
+    None => void,
+  }
 }
 
 let hasSuffix = (value: String, suffix: String) => {
@@ -180,6 +195,19 @@ let addDiagnostic = (
   diagnosticsById
 }
 
+let isStdModuleId = (moduleId: String, options: BuildOptions) => {
+  let moduleNorm = normalizePath(moduleId)
+  List.some(root => {
+    let rootNorm = normalizePath(String.replaceAll("\\", "/", root))
+    let rootWithSlash = if (hasSuffix(rootNorm, "/")) {
+      rootNorm
+    } else {
+      rootNorm ++ "/"
+    }
+    moduleNorm == rootNorm || String.startsWith(rootWithSlash, moduleNorm)
+  }, options.stdRoots)
+}
+
 let resolveSpecifier = (
   importerPath: String,
   specifier: String,
@@ -210,6 +238,7 @@ let resolveSpecifier = (
 }
 
 let readSource = (moduleId: String, options: BuildOptions) => {
+  log(options, "readSource start module=" ++ moduleId)
   let tryRead = (candidates: List<String>) => {
     let rec loop = (remaining: List<String>) => {
       match (remaining) {
@@ -226,15 +255,29 @@ let readSource = (moduleId: String, options: BuildOptions) => {
     loop(candidates)
   }
   match (Map.get(moduleId, options.sourceOverrides)) {
-    Some(text) => Ok(text),
+    Some(text) => {
+      log(options, "readSource end module=" ++ moduleId ++ " source=override")
+      Ok(text)
+    },
     None => {
       let absPath = absolutePathFor(moduleId, options.rootDir)
       let relPath = relativeToRoot(absPath, options.rootDir)
-      if (isAbsolutePath(moduleId)) {
+      let result = if (isAbsolutePath(moduleId)) {
         tryRead([relPath, absPath, moduleId])
       } else {
         tryRead([moduleId, relPath, absPath])
       }
+      match (result) {
+        Ok(_) =>
+          log(options, "readSource end module=" ++ moduleId ++ " source=file"),
+        Err(err) =>
+          log(
+            options,
+            "readSource end module=" ++ moduleId ++ " source=missing err="
+              ++ toString(err)
+          ),
+      }
+      result
     },
   }
 }
@@ -273,10 +316,20 @@ let extractReexportPaths = (program: SurfaceAst.Program) => {
 
 let resolveEdges = (
   moduleId: String,
+  edgeKind: String,
   rawSpecifiers: List<String>,
   options: BuildOptions,
   diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
 ) => {
+  log(
+    options,
+    "resolveEdges start module="
+      ++ moduleId
+      ++ " kind="
+      ++ edgeKind
+      ++ " count="
+      ++ toString(List.length(rawSpecifiers))
+  )
   let rec loop = (
     remaining: List<String>,
     resolved: List<String>,
@@ -296,16 +349,42 @@ let resolveEdges = (
       },
     }
   }
-  loop(rawSpecifiers, [], diagnosticsById)
+  let result = loop(rawSpecifiers, [], diagnosticsById)
+  let (resolved, _diags) = result
+  log(
+    options,
+    "resolveEdges end module="
+      ++ moduleId
+      ++ " kind="
+      ++ edgeKind
+      ++ " resolved="
+      ++ toString(List.length(resolved))
+  )
+  result
 }
 
 let rec visit = (moduleId: String, ctx: BuildContext) => {
   let visitStatus = Map.get(moduleId, ctx.visitState)
+  log(
+    ctx.options,
+    "visit start module="
+      ++ moduleId
+      ++ " state="
+      ++ match (visitStatus) {
+        Some(2) => "visited",
+        Some(1) => "visiting",
+        _ => "new",
+      }
+  )
   match (visitStatus) {
-    Some(2) => ctx,
+    Some(2) => {
+      log(ctx.options, "visit end module=" ++ moduleId ++ " status=already_visited")
+      ctx
+    },
     Some(1) => {
       let cycle = List.reverse([moduleId, ...ctx.stack])
       let cycleText = Array.join(" -> ", Array.fromList(cycle))
+      log(ctx.options, "visit cycle module=" ++ moduleId ++ " path=" ++ cycleText)
       let diag = mkError("Circular module dependency: " ++ cycleText)
       let rec addForCycle = (
         nodes: List<String>,
@@ -318,20 +397,65 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
         }
       }
       let diagnosticsById = addForCycle(cycle, ctx.diagnosticsById)
+      log(ctx.options, "visit end module=" ++ moduleId ++ " status=cycle")
       { ...ctx, diagnosticsById }
     },
     _ => {
       Map.set(moduleId, 1, ctx.visitState)
       let ctx1 = { ...ctx, stack: [moduleId, ...ctx.stack] }
+      let hasOverride = match (Map.get(moduleId, ctx1.options.sourceOverrides)) {
+        Some(_) => true,
+        None => false,
+      }
+      if (
+        ctx1.options.skipStdParsing
+        && isStdModuleId(moduleId, ctx1.options)
+        && !hasOverride
+      ) {
+        log(ctx1.options, "parse skipped module=" ++ moduleId ++ " reason=std_module")
+        Map.set(moduleId, 2, ctx1.visitState)
+        let fallbackProgram: SurfaceAst.Program = { items: [], core: false }
+        let node: ModuleNode = {
+          id: moduleId,
+          sourcePath: moduleId,
+          imports: [],
+          reexports: [],
+          program: fallbackProgram,
+          diagnostics: getModuleDiagnostics(moduleId, ctx1.diagnosticsById),
+          status: StatusOk,
+        }
+        Map.set(moduleId, node, ctx1.nodes)
+        let stackTail = match (ctx1.stack) {
+          [_head, ...tail] => tail,
+          [] => [],
+        }
+        log(ctx1.options, "visit end module=" ++ moduleId ++ " status=skipped_std")
+        { ...ctx1, stack: stackTail, topoRev: [moduleId, ...ctx1.topoRev] }
+      } else {
+      log(ctx.options, "parse start module=" ++ moduleId)
       let parseResult = match (readSource(moduleId, ctx1.options)) {
         Ok(source) => {
           Error.clearErrors()
           let parsed = Parser.parseResult(source)
           let parseDiags = Error.getErrors()
           Error.clearErrors()
+          log(
+            ctx1.options,
+            "parse end module="
+              ++ moduleId
+              ++ " diagnostics="
+              ++ toString(List.length(parseDiags))
+          )
           Ok((parsed.program, parseDiags))
         },
         Err(fsErr) => {
+          log(
+            ctx1.options,
+            "parse end module="
+              ++ moduleId
+              ++ " diagnostics=1 read_error="
+              ++ toString(fsErr)
+          )
           let diag = mkError(
             "Failed to read module '" ++ moduleId ++ "': " ++ toString(fsErr)
           )
@@ -373,12 +497,14 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
           let reexportSpecs = extractReexportPaths(program)
           let (imports, diagnosticsById2) = resolveEdges(
             moduleId,
+            "imports",
             importSpecs,
             ctx1.options,
             diagnosticsById
           )
           let (reexports, diagnosticsById3) = resolveEdges(
             moduleId,
+            "reexports",
             reexportSpecs,
             ctx1.options,
             diagnosticsById2
@@ -386,6 +512,7 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
           let mut ctx2 = { ...ctx1, diagnosticsById: diagnosticsById3 }
           let deps = List.append(imports, reexports)
           List.forEach(dep => {
+            log(ctx2.options, "visit recurse from=" ++ moduleId ++ " to=" ++ dep)
             ctx2 = visit(dep, ctx2)
           }, deps)
           Map.set(moduleId, 2, ctx2.visitState)
@@ -408,8 +535,16 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
             [_head, ...tail] => tail,
             [] => [],
           }
+          log(
+            ctx2.options,
+            "visit end module="
+              ++ moduleId
+              ++ " status="
+              ++ if (List.length(finalDiags) == 0) { "ok" } else { "partial" }
+          )
           { ...ctx2, stack: stackTail, topoRev: [moduleId, ...ctx2.topoRev] }
         },
+      }
       }
     },
   }
@@ -417,6 +552,7 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
 
 provide let buildGraph = (entryPath: String, options: BuildOptions = defaultOptions()) => {
   let entry = normalizePath(ensureWmExtension(entryPath))
+  log(options, "buildGraph start entry=" ++ entry)
   let ctx0: BuildContext = {
     options,
     nodes: Map.make(),
@@ -426,10 +562,20 @@ provide let buildGraph = (entryPath: String, options: BuildOptions = defaultOpti
     topoRev: [],
   }
   let ctx = visit(entry, ctx0)
-  {
+  let graph = {
     entry,
     nodes: ctx.nodes,
     topo: List.reverse(ctx.topoRev),
     diagnosticsById: ctx.diagnosticsById,
   }: ModuleGraph
+  log(
+    options,
+    "buildGraph end entry="
+      ++ entry
+      ++ " topoCount="
+      ++ toString(List.length(graph.topo))
+      ++ " nodeCount="
+      ++ toString(List.length(Map.toList(graph.nodes)))
+  )
+  graph
 }

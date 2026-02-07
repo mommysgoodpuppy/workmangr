@@ -48,6 +48,7 @@ provide enum TokenKind {
   DSlash, // //
   LineComment(String), // //...
   Opaque(String), // unknown text
+  LAngle, // <
   Arrow, // >
   Period, // .
   DotBrace, // .{
@@ -102,6 +103,7 @@ provide let tokenKindToString = kind => match (kind) {
   DSlash => "//",
   LineComment(text) => text,
   Opaque(text) => text,
+  LAngle => "<",
   Arrow => ">",
   Period => ".",
   DotBrace => ".{",
@@ -188,24 +190,56 @@ let lexInternal = (source, profiling: Bool) => {
   let lenght = sourceByteLen
 
   let mut bi = 0
-  let mut hasNonAscii = false
+  let mut firstNonAsciiIndex = -1
+  let mut firstNonAsciiByte = 0
   while (bi < sourceByteLen) {
-    if (Uint8.toNumber(Bytes.getUint8(bi, sourceBytes)) > 127) {
-      hasNonAscii = true
+    let b = Uint8.toNumber(Bytes.getUint8(bi, sourceBytes))
+    if (b > 127) {
+      firstNonAsciiIndex = bi
+      firstNonAsciiByte = b
       bi = sourceByteLen
     } else {
       bi += 1
     }
   }
-  if (hasNonAscii) {
-    let mark = createDummyMark(Source.makeSpan(1, 1, 0, lenght))
+  if (firstNonAsciiIndex >= 0) {
+    let mut line = 1
+    let mut col = 1
+    let mut i = 0
+    while (i < firstNonAsciiIndex) {
+      let b = Uint8.toNumber(Bytes.getUint8(i, sourceBytes))
+      if (b == 10) {
+        line += 1
+        col = 1
+      } else {
+        col += 1
+      }
+      i += 1
+    }
+    let span = Source.makeSpan(
+      line,
+      col,
+      firstNonAsciiIndex,
+      firstNonAsciiIndex + 1
+    )
+    let mark = createDummyMark(span)
     ignore(
       Error.createMarkedError(
         Error.Lexing,
         mark,
-        "Lexer currently supports ASCII source only",
+        "Lexer currently supports ASCII source only"
+          ++ " (line "
+          ++ toString(line)
+          ++ ", col "
+          ++ toString(col)
+          ++ ", byte offset "
+          ++ toString(firstNonAsciiIndex)
+          ++ ")",
         [],
-        shouldPanic=true
+        clues=[
+          Error.Note("first non-ASCII byte value: " ++ toString(firstNonAsciiByte)),
+          Error.Hint("replace non-ASCII characters in source for now"),
+        ]
       )
     )
   }
@@ -358,38 +392,41 @@ let lexInternal = (source, profiling: Bool) => {
             idx
           )
           let mark = createDummyMark(span)
+          let partial = Array.join("", Array.fromList(List.reverse(chunks)))
+          outPos = { index: idx, line, col }
+          done = true
           ignore(
             Error.createMarkedError(
               Error.Lexing,
               mark,
               "Unclosed escape sequence in string",
-              { value: StringVal(""), position: startPosition },
+              { value: StringVal(partial), position: outPos },
               clues=[
                 Error.Note(
                   "check for matching quotes and valid escape sequences",
                 ),
-              ],
-              shouldPanic=true
+              ]
             )
           )
-        }
-        let nextB = Uint8.toNumber(Bytes.getUint8(idx + 1, sourceBytes))
-        let escaped = if (nextB == 34) {
-          "\""
-        } else if (nextB == 92) {
-          "\\"
-        } else if (nextB == 110) {
-          "\n"
-        } else if (nextB == 116) {
-          "\t"
-        } else if (nextB == 114) {
-          "\r"
         } else {
-          asciiSlice(idx + 1, idx + 2) // treat as literal
+          let nextB = Uint8.toNumber(Bytes.getUint8(idx + 1, sourceBytes))
+          let escaped = if (nextB == 34) {
+            "\""
+          } else if (nextB == 92) {
+            "\\"
+          } else if (nextB == 110) {
+            "\n"
+          } else if (nextB == 116) {
+            "\t"
+          } else if (nextB == 114) {
+            "\r"
+          } else {
+            asciiSlice(idx + 1, idx + 2) // treat as literal
+          }
+          chunks = [escaped, ...chunks]
+          idx += 2
+          col += 2
         }
-        chunks = [escaped, ...chunks]
-        idx += 2
-        col += 2
       } else {
         let segmentStart = idx
         let mut segLine = line
@@ -431,8 +468,7 @@ let lexInternal = (source, profiling: Bool) => {
         mark,
         "Unclosed string literal",
         { value: StringVal(""), position: startPosition },
-        clues=[Error.Expected("closing quote")],
-        shouldPanic=true
+        clues=[Error.Expected("closing quote")]
       )
     }
   }
@@ -442,6 +478,7 @@ let lexInternal = (source, profiling: Bool) => {
     match (peek(startPosition.index)) {
       Some(ch) => {
         if (ch == '\'') {
+          let afterQuote = advancePosition(startPosition, '\'')
           let span = Source.makeSpan(
             startPosition.line,
             startPosition.col,
@@ -453,13 +490,13 @@ let lexInternal = (source, profiling: Bool) => {
             Error.Lexing,
             mark,
             "Empty character literal",
-            { value: CharVal(' '), position: startPosition },
+            // Advance past the second quote to avoid re-lexing the same token forever.
+            { value: CharVal(' '), position: afterQuote },
             clues=[
               Error.Note(
                 "character literals must contain exactly one character",
               ),
-            ],
-            shouldPanic=true
+            ]
           )
         } else {
           let char = ch
@@ -483,9 +520,8 @@ let lexInternal = (source, profiling: Bool) => {
                 Error.Lexing,
                 mark,
                 "Unclosed character literal",
-                { value: CharVal(' '), position: startPosition },
-                clues=[Error.Expected("closing single quote")],
-                shouldPanic=true
+                { value: CharVal(' '), position: afterChar },
+                clues=[Error.Expected("closing single quote")]
               )
             },
           }
@@ -504,8 +540,7 @@ let lexInternal = (source, profiling: Bool) => {
           mark,
           "Unclosed character literal",
           { value: CharVal(' '), position: startPosition },
-          clues=[Error.Expected("character and closing quote")],
-          shouldPanic=true
+          clues=[Error.Expected("character and closing quote")]
         )
       },
     }
@@ -706,8 +741,7 @@ let lexInternal = (source, profiling: Bool) => {
                 Error.Note(
                   "internal error: expected string value from string reader",
                 ),
-              ],
-              shouldPanic=true
+              ]
             )
           },
         }
@@ -755,8 +789,7 @@ let lexInternal = (source, profiling: Bool) => {
                 Error.Note(
                   "internal error: expected character value from char reader",
                 ),
-              ],
-              shouldPanic=true
+              ]
             )
           },
         }
@@ -935,6 +968,20 @@ let lexInternal = (source, profiling: Bool) => {
             ]
             pos = advancePosition(pos, ch)
           },
+          '<' => {
+            tokens = [
+              makeToken(
+                LAngle,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
           '>' => {
             tokens = [
               makeToken(
@@ -985,18 +1032,40 @@ let lexInternal = (source, profiling: Bool) => {
           '-' => {
             match (peek(pos.index + 1)) {
               Some('-') => {
+                let commentStart = if (profiling) {
+                  nowNs()
+                } else {
+                  0L
+                }
+                let afterDashes = advancePosition(advancePosition(pos, ch), '-')
+                let mut endPos = afterDashes
+                while (endPos.index < lenght) {
+                  let c = Char.fromCode(
+                    Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes))
+                  )
+                  if (c == '\n') {
+                    break
+                  }
+                  endPos = advancePosition(endPos, c)
+                }
+                let commentText = asciiSlice(pos.index, endPos.index)
                 tokens = [
                   makeToken(
-                    DDash,
+                    LineComment(commentText),
                     pos.line,
                     pos.col,
                     pos.index,
-                    pos.index + 2,
+                    endPos.index,
                     None
                   ),
                   ...tokens
                 ]
-                pos = advancePosition(advancePosition(pos, ch), '-')
+                pos = endPos
+                if (profiling) {
+                  let commentEnd = nowNs()
+                  tCommentNs += nsDelta(commentStart, commentEnd)
+                  cComment += 1
+                }
               },
               _ => {
                 tokens = [
