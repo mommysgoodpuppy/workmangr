@@ -75,6 +75,17 @@ let stageToString = (stage: Stage) => {
   }
 }
 
+provide let stageName = (stage: Stage) => stageToString(stage)
+
+provide let compilerErrorFromMark = (
+  stage: Stage,
+  mark: SurfaceAst.Mark,
+  message: String,
+  clues: List<ErrorClue> = [],
+) => {
+  { stage, message, span: mark.node.span, clues }: CompilerError
+}
+
 provide let errorToString = (error: CompilerError) => {
   let cluesStr = match (error.clues) {
     [] => "",
@@ -128,7 +139,7 @@ provide let createMarkedError = (
   clues: List<ErrorClue> = [],
   shouldPanic: Bool = false,
 ) => {
-  let error: CompilerError = { stage, message, span: mark.node.span, clues }
+  let error = compilerErrorFromMark(stage, mark, message, clues=clues)
   let marked: MarkedError = { mark, error }
   diagnostics = [error, ...diagnostics]
   markedDiagnostics = [marked, ...markedDiagnostics]

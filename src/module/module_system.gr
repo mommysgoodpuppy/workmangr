@@ -1,0 +1,435 @@
+module ModuleSystem
+
+from "array" include Array
+from "fs" include Fs
+from "list" include List
+from "map" include Map
+from "path" include Path
+from "string" include String
+
+from "../core/error.gr" include Error
+from "../core/source.gr" include Source
+from "../core/surface_ast.gr" include SurfaceAst
+from "../frontend/parser.gr" include Parser
+
+provide enum ModuleStatus {
+  StatusOk,
+  StatusPartial,
+  StatusFailed,
+}
+
+provide record ModuleNode {
+  id: String,
+  sourcePath: String,
+  imports: List<String>,
+  reexports: List<String>,
+  program: SurfaceAst.Program,
+  diagnostics: List<Error.CompilerError>,
+  status: ModuleStatus,
+}
+
+provide record ModuleGraph {
+  entry: String,
+  nodes: Map.Map<String, ModuleNode>,
+  topo: List<String>,
+  diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+}
+
+provide record BuildOptions {
+  rootDir: String,
+  stdRoots: List<String>,
+  sourceOverrides: Map.Map<String, String>,
+}
+
+record BuildContext {
+  options: BuildOptions,
+  nodes: Map.Map<String, ModuleNode>,
+  diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+  visitState: Map.Map<String, Number>, // 1=visiting, 2=visited
+  stack: List<String>,
+  topoRev: List<String>,
+}
+
+provide let defaultOptions = () => {
+  let overrides = Map.make()
+  { rootDir: ".", stdRoots: [], sourceOverrides: overrides }: BuildOptions
+}
+
+let hasSuffix = (value: String, suffix: String) => {
+  let valueLen = String.length(value)
+  let suffixLen = String.length(suffix)
+  if (suffixLen > valueLen) {
+    false
+  } else {
+    String.slice(valueLen - suffixLen, value) == suffix
+  }
+}
+
+let ensureWmExtension = (path: String) =>
+  if (hasSuffix(path, ".wm")) {
+    path
+  } else {
+    path ++ ".wm"
+  }
+
+let dirname = (path: String) => {
+  let normalized = String.replaceAll("\\", "/", path)
+  let mut i = String.length(normalized) - 1
+  let mut cut = -1
+  while (i >= 0 && cut < 0) {
+    if (String.charAt(i, normalized) == '/') {
+      cut = i
+    }
+    i -= 1
+  }
+  if (cut < 0) {
+    "."
+  } else if (cut == 0) {
+    "/"
+  } else {
+    String.slice(0, end=cut, normalized)
+  }
+}
+
+let joinSegments = (segments: List<String>) =>
+  Array.join("/", Array.fromList(segments))
+
+let normalizePath = (rawPath: String) => {
+  let normalized = String.replaceAll("\\", "/", rawPath)
+  let parts = String.split("/", normalized)
+  let folded = Array.reduce((acc: List<String>, part: String) => {
+    if (part == "" || part == ".") {
+      acc
+    } else if (part == "..") {
+      match (acc) {
+        [] => [],
+        [_last, ...restRev] => List.reverse(restRev),
+      }
+    } else {
+      List.append(acc, [part])
+    }
+  }, [], parts)
+  joinSegments(folded)
+}
+
+let isAbsolutePath = (path: String) => {
+  String.startsWith("/", path)
+    || (String.length(path) > 1 && String.charAt(1, path) == ':')
+}
+
+let absolutePathFor = (path: String, rootDir: String) =>
+  if (isAbsolutePath(path)) {
+    path
+  } else {
+    normalizePath(rootDir ++ "/" ++ path)
+  }
+
+let relativeToRoot = (absPath: String, rootDir: String) => {
+  let absNorm = normalizePath(absPath)
+  let rootNorm = normalizePath(rootDir)
+  let rootSlash = if (hasSuffix(rootNorm, "/")) { rootNorm } else { rootNorm ++ "/" }
+  if (String.startsWith(rootSlash, absNorm)) {
+    String.slice(String.length(rootSlash), absNorm)
+  } else if (absNorm == rootNorm) {
+    "."
+  } else {
+    absNorm
+  }
+}
+
+let mkError = (message: String) => {
+  let span = Source.makeSpan(1, 1, 0, 0)
+  let mark: SurfaceAst.Mark = {
+    node: { id: 0, span },
+    kind: SurfaceAst.InvalidTopLevel("module"),
+    expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemAny),
+  }
+  Error.compilerErrorFromMark(
+    Error.Parsing,
+    mark,
+    message,
+    clues=[]
+  )
+}
+
+let getModuleDiagnostics = (
+  moduleId: String,
+  diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+) =>
+  match (Map.get(moduleId, diagnosticsById)) {
+    Some(diags) => diags,
+    None => [],
+  }
+
+let setModuleDiagnostics = (
+  moduleId: String,
+  diagnostics: List<Error.CompilerError>,
+  diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+) => {
+  Map.set(moduleId, diagnostics, diagnosticsById)
+  diagnosticsById
+}
+
+let addDiagnostic = (
+  moduleId: String,
+  diag: Error.CompilerError,
+  diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+) => {
+  let existing = getModuleDiagnostics(moduleId, diagnosticsById)
+  Map.set(moduleId, [diag, ...existing], diagnosticsById)
+  diagnosticsById
+}
+
+let resolveSpecifier = (
+  importerPath: String,
+  specifier: String,
+  options: BuildOptions,
+) => {
+  if (String.startsWith("./", specifier) || String.startsWith("../", specifier)) {
+    let base = dirname(importerPath)
+    Some(normalizePath(ensureWmExtension(base ++ "/" ++ specifier)))
+  } else if (isAbsolutePath(specifier)) {
+    Some(normalizePath(ensureWmExtension(specifier)))
+  } else if (String.startsWith("std/", specifier)) {
+    match (options.stdRoots) {
+      [] => None,
+      [root, ..._] =>
+        Some(
+          normalizePath(
+            ensureWmExtension(
+              String.replaceAll("\\", "/", root)
+                ++ "/"
+                ++ String.slice(String.length("std/"), specifier)
+            )
+          )
+        ),
+    }
+  } else {
+    None
+  }
+}
+
+let readSource = (moduleId: String, options: BuildOptions) => {
+  let tryRead = (candidates: List<String>) => {
+    let rec loop = (remaining: List<String>) => {
+      match (remaining) {
+        [] =>
+          Fs.Utf8.readFile(Path.fromString("__workman_missing_module__.wm")),
+        [candidate] => Fs.Utf8.readFile(Path.fromString(candidate)),
+        [candidate, ...rest] =>
+          match (Fs.Utf8.readFile(Path.fromString(candidate))) {
+            Ok(source) => Ok(source),
+            Err(_) => loop(rest),
+          },
+      }
+    }
+    loop(candidates)
+  }
+  match (Map.get(moduleId, options.sourceOverrides)) {
+    Some(text) => Ok(text),
+    None => {
+      let absPath = absolutePathFor(moduleId, options.rootDir)
+      let relPath = relativeToRoot(absPath, options.rootDir)
+      if (isAbsolutePath(moduleId)) {
+        tryRead([relPath, absPath, moduleId])
+      } else {
+        tryRead([moduleId, relPath, absPath])
+      }
+    },
+  }
+}
+
+let extractImportPaths = (program: SurfaceAst.Program) => {
+  let rec loop = (items: List<SurfaceAst.TopItem>, imports: List<String>) => {
+    match (items) {
+      [] => List.reverse(imports),
+      [item, ...rest] => {
+        let nextImports = match (item) {
+          SurfaceAst.Import(importDecl) => [importDecl.modulePath, ...imports],
+          _ => imports,
+        }
+        loop(rest, nextImports)
+      },
+    }
+  }
+  loop(program.items, [])
+}
+
+let extractReexportPaths = (program: SurfaceAst.Program) => {
+  let rec loop = (items: List<SurfaceAst.TopItem>, reexports: List<String>) => {
+    match (items) {
+      [] => List.reverse(reexports),
+      [item, ...rest] => {
+        let next = match (item) {
+          SurfaceAst.Reexport(reexportDecl) => [reexportDecl.modulePath, ...reexports],
+          _ => reexports,
+        }
+        loop(rest, next)
+      },
+    }
+  }
+  loop(program.items, [])
+}
+
+let resolveEdges = (
+  moduleId: String,
+  rawSpecifiers: List<String>,
+  options: BuildOptions,
+  diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+) => {
+  let rec loop = (
+    remaining: List<String>,
+    resolved: List<String>,
+    diags: Map.Map<String, List<Error.CompilerError>>,
+  ) => {
+    match (remaining) {
+      [] => (List.reverse(resolved), diags),
+      [spec, ...rest] => match (resolveSpecifier(moduleId, spec, options)) {
+        Some(path) => loop(rest, [path, ...resolved], diags),
+        None => {
+          let diag = mkError(
+            "Unsupported module specifier '" ++ spec ++ "' in '" ++ moduleId ++ "'"
+          )
+          let diags2 = addDiagnostic(moduleId, diag, diags)
+          loop(rest, resolved, diags2)
+        },
+      },
+    }
+  }
+  loop(rawSpecifiers, [], diagnosticsById)
+}
+
+let rec visit = (moduleId: String, ctx: BuildContext) => {
+  let visitStatus = Map.get(moduleId, ctx.visitState)
+  match (visitStatus) {
+    Some(2) => ctx,
+    Some(1) => {
+      let cycle = List.reverse([moduleId, ...ctx.stack])
+      let cycleText = Array.join(" -> ", Array.fromList(cycle))
+      let diag = mkError("Circular module dependency: " ++ cycleText)
+      let rec addForCycle = (
+        nodes: List<String>,
+        diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
+      ) => {
+        match (nodes) {
+          [] => diagnosticsById,
+          [id, ...rest] =>
+            addForCycle(rest, addDiagnostic(id, diag, diagnosticsById)),
+        }
+      }
+      let diagnosticsById = addForCycle(cycle, ctx.diagnosticsById)
+      { ...ctx, diagnosticsById }
+    },
+    _ => {
+      Map.set(moduleId, 1, ctx.visitState)
+      let ctx1 = { ...ctx, stack: [moduleId, ...ctx.stack] }
+      let parseResult = match (readSource(moduleId, ctx1.options)) {
+        Ok(source) => {
+          Error.clearErrors()
+          let parsed = Parser.parseResult(source)
+          let parseDiags = Error.getErrors()
+          Error.clearErrors()
+          Ok((parsed.program, parseDiags))
+        },
+        Err(fsErr) => {
+          let diag = mkError(
+            "Failed to read module '" ++ moduleId ++ "': " ++ toString(fsErr)
+          )
+          let diagnosticsById = addDiagnostic(moduleId, diag, ctx1.diagnosticsById)
+          Err({ ...ctx1, diagnosticsById })
+        },
+      }
+
+      match (parseResult) {
+        Err(ctxFailed) => {
+          Map.set(moduleId, 2, ctxFailed.visitState)
+          let fallbackProgram: SurfaceAst.Program = { items: [], core: false }
+          let node: ModuleNode = {
+            id: moduleId,
+            sourcePath: moduleId,
+            imports: [],
+            reexports: [],
+            program: fallbackProgram,
+            diagnostics: getModuleDiagnostics(moduleId, ctxFailed.diagnosticsById),
+            status: StatusFailed,
+          }
+          Map.set(moduleId, node, ctxFailed.nodes)
+          {
+            ...ctxFailed,
+            stack: match (ctxFailed.stack) {
+              [_head, ...tail] => tail,
+              [] => [],
+            },
+            topoRev: [moduleId, ...ctxFailed.topoRev],
+          }
+        },
+        Ok((program, parseDiags)) => {
+          let diagnosticsById = setModuleDiagnostics(
+            moduleId,
+            parseDiags,
+            ctx1.diagnosticsById
+          )
+          let importSpecs = extractImportPaths(program)
+          let reexportSpecs = extractReexportPaths(program)
+          let (imports, diagnosticsById2) = resolveEdges(
+            moduleId,
+            importSpecs,
+            ctx1.options,
+            diagnosticsById
+          )
+          let (reexports, diagnosticsById3) = resolveEdges(
+            moduleId,
+            reexportSpecs,
+            ctx1.options,
+            diagnosticsById2
+          )
+          let mut ctx2 = { ...ctx1, diagnosticsById: diagnosticsById3 }
+          let deps = List.append(imports, reexports)
+          List.forEach(dep => {
+            ctx2 = visit(dep, ctx2)
+          }, deps)
+          Map.set(moduleId, 2, ctx2.visitState)
+          let finalDiags = getModuleDiagnostics(moduleId, ctx2.diagnosticsById)
+          let node: ModuleNode = {
+            id: moduleId,
+            sourcePath: moduleId,
+            imports,
+            reexports,
+            program,
+            diagnostics: finalDiags,
+            status: if (List.length(finalDiags) == 0) {
+              StatusOk
+            } else {
+              StatusPartial
+            },
+          }
+          Map.set(moduleId, node, ctx2.nodes)
+          let stackTail = match (ctx2.stack) {
+            [_head, ...tail] => tail,
+            [] => [],
+          }
+          { ...ctx2, stack: stackTail, topoRev: [moduleId, ...ctx2.topoRev] }
+        },
+      }
+    },
+  }
+}
+
+provide let buildGraph = (entryPath: String, options: BuildOptions = defaultOptions()) => {
+  let entry = normalizePath(ensureWmExtension(entryPath))
+  let ctx0: BuildContext = {
+    options,
+    nodes: Map.make(),
+    diagnosticsById: Map.make(),
+    visitState: Map.make(),
+    stack: [],
+    topoRev: [],
+  }
+  let ctx = visit(entry, ctx0)
+  {
+    entry,
+    nodes: ctx.nodes,
+    topo: List.reverse(ctx.topoRev),
+    diagnosticsById: ctx.diagnosticsById,
+  }: ModuleGraph
+}

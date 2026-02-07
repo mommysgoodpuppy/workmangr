@@ -10,6 +10,8 @@ from "wasi/file" include File
 from "json" include Json
 
 from "../../core/source.gr" include Source
+from "../../core/error.gr" include Error
+from "../../module/module_system.gr" include ModuleSystem
 from "./format.gr" include Format
 from "./inlay.gr" include Inlay
 
@@ -27,9 +29,29 @@ let logErr = (text: String) => {
 }
 
 let mut debugEnabled = true
+let mut workspaceRootPath: Option<String> = None
+let v0StdRoot = "c:/GIT/workman/std"
+let mut inlayDebugEnabled = false
+let mut formatDebugEnabled = false
 
 let debug = (text: String) => {
   if (debugEnabled) {
+    logErr(text)
+  } else {
+    void
+  }
+}
+
+let debugInlay = (text: String) => {
+  if (inlayDebugEnabled) {
+    logErr(text)
+  } else {
+    void
+  }
+}
+
+let debugFormat = (text: String) => {
+  if (formatDebugEnabled) {
     logErr(text)
   } else {
     void
@@ -46,6 +68,16 @@ let sendResponse = (idText: String, resultJson: String) => {
     ++ idText
     ++ ",\"result\":"
     ++ resultJson
+    ++ "}"
+  let header = "Content-Length: " ++ toString(String.length(body)) ++ "\r\n\r\n"
+  writeStdout(header ++ body)
+}
+
+let sendNotification = (method: String, paramsJson: String) => {
+  let body = "{\"jsonrpc\":\"2.0\",\"method\":\""
+    ++ escapeJson(method)
+    ++ "\",\"params\":"
+    ++ paramsJson
     ++ "}"
   let header = "Content-Length: " ++ toString(String.length(body)) ++ "\r\n\r\n"
   writeStdout(header ++ body)
@@ -115,6 +147,227 @@ let positionToOffset = (source: String, line0: Number, col0: Number) => {
     }
   }
   loop(0, 1, 0)
+}
+
+let decodeUriPath = (uriPath: String) => {
+  let step0 = String.replaceAll("%20", " ", uriPath)
+  let step1 = String.replaceAll("%3A", ":", step0)
+  String.replaceAll("%5C", "\\", step1)
+}
+
+let uriToPath = (uri: String) => {
+  if (String.startsWith("file:///", uri)) {
+    let raw = String.slice(String.length("file:///"), uri)
+    let decoded = decodeUriPath(raw)
+    let withDrive = if (String.length(decoded) > 1 && String.charAt(1, decoded) == ':') {
+      decoded
+    } else if (String.length(decoded) > 2 && String.charAt(2, decoded) == ':') {
+      String.slice(1, decoded)
+    } else {
+      decoded
+    }
+    String.replaceAll("\\", "/", withDrive)
+  } else if (String.startsWith("file://", uri)) {
+    let raw = String.slice(String.length("file://"), uri)
+    String.replaceAll("\\", "/", decodeUriPath(raw))
+  } else {
+    String.replaceAll("\\", "/", uri)
+  }
+}
+
+let isAbsolutePath = (path: String) => {
+  String.startsWith("/", path)
+    || (String.length(path) > 1 && String.charAt(1, path) == ':')
+}
+
+let dirname = (path: String) => {
+  let normalized = String.replaceAll("\\", "/", path)
+  let mut i = String.length(normalized) - 1
+  let mut cut = -1
+  while (i >= 0 && cut < 0) {
+    if (String.charAt(i, normalized) == '/') {
+      cut = i
+    }
+    i -= 1
+  }
+  if (cut < 0) {
+    "."
+  } else if (cut == 0) {
+    "/"
+  } else {
+    String.slice(0, end=cut, normalized)
+  }
+}
+
+let toWorkspacePath = (path: String) => {
+  match (workspaceRootPath) {
+    Some(root) => {
+      let rootWithSlash = if (String.endsWith("/", root)) {
+        root
+      } else {
+        root ++ "/"
+      }
+      if (String.startsWith(rootWithSlash, path)) {
+        String.slice(String.length(rootWithSlash), path)
+      } else if (path == root) {
+        "."
+      } else {
+        path
+      }
+    },
+    None => path,
+  }
+}
+
+let pathToUri = (path: String) => {
+  let normalized = String.replaceAll("\\", "/", path)
+  let step1 = String.replaceAll(" ", "%20", normalized)
+  let encoded = String.replaceAll(":", "%3A", step1)
+  if (String.length(normalized) > 1 && String.charAt(1, normalized) == ':') {
+    "file:///" ++ encoded
+  } else {
+    "file://" ++ encoded
+  }
+}
+
+let stageToString = (stage: Error.Stage) => match (stage) {
+  _ => Error.stageName(stage),
+}
+
+let diagnosticToJson = (diag: Error.CompilerError) => {
+  let line0 = if (diag.span.line > 0) { diag.span.line - 1 } else { 0 }
+  let col0 = if (diag.span.col > 0) { diag.span.col - 1 } else { 0 }
+  let endCol0 = if (diag.span.end > diag.span.start) {
+    col0 + (diag.span.end - diag.span.start)
+  } else {
+    col0 + 1
+  }
+  let sourceTag = "workman/" ++ stageToString(diag.stage)
+  "{\"range\":{\"start\":{\"line\":"
+    ++ toString(line0)
+    ++ ",\"character\":"
+    ++ toString(col0)
+    ++ "},\"end\":{\"line\":"
+    ++ toString(line0)
+    ++ ",\"character\":"
+    ++ toString(endCol0)
+    ++ "}},\"severity\":1,\"source\":\""
+    ++ escapeJson(sourceTag)
+    ++ "\",\"message\":\""
+    ++ escapeJson(diag.message)
+    ++ "\"}"
+}
+
+let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) => {
+  debug(
+    "[LSP diag] publish uri="
+      ++ uri
+      ++ " count="
+      ++ toString(List.length(diagnostics))
+  )
+  let diagnosticsJson = "["
+    ++ Array.join(",", Array.fromList(List.map(diagnosticToJson, diagnostics)))
+    ++ "]"
+  let params = "{\"uri\":\""
+    ++ escapeJson(uri)
+    ++ "\",\"diagnostics\":"
+    ++ diagnosticsJson
+    ++ "}"
+  sendNotification("textDocument/publishDiagnostics", params)
+}
+
+let docsToOverrides = (docs: Map.Map<String, String>) => {
+  let overrides = Map.make()
+  List.forEach(((uri, source)) => {
+    let path = toWorkspacePath(uriToPath(uri))
+    Map.set(path, source, overrides)
+  }, Map.toList(docs))
+  overrides
+}
+
+let pathUriLookup = (docs: Map.Map<String, String>) => {
+  let lookup = Map.make()
+  List.forEach(((uri, _)) => {
+    let path = toWorkspacePath(uriToPath(uri))
+    Map.set(path, uri, lookup)
+  }, Map.toList(docs))
+  lookup
+}
+
+let publishGraphDiagnostics = (
+  entryUri: String,
+  docs: Map.Map<String, String>,
+  publishedUris: Map.Map<String, Bool>,
+) => {
+  let absEntryPath = uriToPath(entryUri)
+  let rootDir = match (workspaceRootPath) {
+    Some(root) => root,
+    None => dirname(absEntryPath),
+  }
+  let entryPath = toWorkspacePath(uriToPath(entryUri))
+  debug(
+    "[LSP diag] entryUri="
+      ++ entryUri
+      ++ " entryPath="
+      ++ entryPath
+      ++ " workspaceRoot="
+      ++ match (workspaceRootPath) {
+        Some(root) => root,
+        None => "<none>",
+      }
+  )
+  let overrides = docsToOverrides(docs)
+  let uriLookup = pathUriLookup(docs)
+  debug("[LSP diag] overrideCount=" ++ toString(List.length(Map.toList(overrides))))
+  debug("[LSP diag] stdRoot=" ++ v0StdRoot)
+  let graph = ModuleSystem.buildGraph(
+    entryPath,
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir,
+      stdRoots: [v0StdRoot],
+      sourceOverrides: overrides,
+    }
+  )
+  debug("[LSP diag] topo=" ++ Array.join(" -> ", Array.fromList(graph.topo)))
+  let nextPublished = Map.make()
+  List.forEach(((modulePath, diagnostics)) => {
+    debug(
+      "[LSP diag] module="
+        ++ modulePath
+        ++ " diagnostics="
+        ++ toString(List.length(diagnostics))
+    )
+    let uri = match (Map.get(modulePath, uriLookup)) {
+      Some(mappedUri) => mappedUri,
+      None => match (workspaceRootPath) {
+        Some(root) when !isAbsolutePath(modulePath) => pathToUri(root ++ "/" ++ modulePath),
+        _ => pathToUri(modulePath),
+      },
+    }
+    publishDiagnostics(uri, diagnostics)
+    List.forEach((diag: Error.CompilerError) => {
+      debug(
+        "[LSP diag] detail module="
+          ++ modulePath
+          ++ " uri="
+          ++ uri
+          ++ " message="
+          ++ diag.message
+      )
+    }, diagnostics)
+    Map.set(uri, true, nextPublished)
+  }, Map.toList(graph.diagnosticsById))
+
+  List.forEach(((uri, _)) => {
+    if (Map.get(uri, nextPublished) == None) {
+      publishDiagnostics(uri, [])
+    } else {
+      void
+    }
+  }, Map.toList(publishedUris))
+
+  nextPublished
 }
 
 let handleInitialize = (idText: String) => {
@@ -189,9 +442,9 @@ let handleInlayHint = (
             source,
             rangeStart,
             rangeEnd,
-            debug,
+            debugInlay,
             escapeJson,
-            debugEnabled
+            inlayDebugEnabled
           )
           sendResponse(idText, hintsJson)
         },
@@ -217,7 +470,7 @@ let handleFormatting = (
         Some(source) => {
           let editsJson = Format.formattingEditsForSource(
             source,
-            debug,
+            debugFormat,
             escapeJson
           )
           sendResponse(idText, editsJson)
@@ -227,17 +480,38 @@ let handleFormatting = (
   }
 }
 
-let handleMessage = (msgJson: Json.Json, docs: Map.Map<String, String>) => {
+let handleMessage = (
+  msgJson: Json.Json,
+  docs: Map.Map<String, String>,
+  publishedUris: Map.Map<String, Bool>,
+) => {
   let idOpt = jsonGet("id", msgJson)
   let methodOpt = jsonGetString("method", msgJson)
   match (methodOpt) {
-    None => void,
+    None => publishedUris,
     Some(method) => {
       if (method == "initialize") {
+        match (jsonGetObject("params", msgJson)) {
+          Some(params) => {
+            workspaceRootPath = match (jsonGetString("rootUri", params)) {
+              Some(rootUri) => Some(uriToPath(rootUri)),
+              None => workspaceRootPath,
+            }
+            debug(
+              "[LSP init] workspaceRoot="
+                ++ match (workspaceRootPath) {
+                  Some(root) => root,
+                  None => "<none>",
+                }
+            )
+          },
+          None => void,
+        }
         match (idOpt) {
           Some(idJson) => handleInitialize(jsonToIdText(idJson)),
           None => void,
         }
+        publishedUris
       } else if (method == "textDocument/didOpen") {
         match (jsonGetObject("params", msgJson)) {
           Some(params) => {
@@ -247,17 +521,29 @@ let handleMessage = (msgJson: Json.Json, docs: Map.Map<String, String>) => {
                   Some(uri) => match (jsonGetString("text", doc)) {
                     Some(text) => {
                       Map.set(uri, text, docs)
-                      void
+                      if (workspaceRootPath == None) {
+                        workspaceRootPath = Some(dirname(uriToPath(uri)))
+                        debug(
+                          "[LSP didOpen] inferred workspaceRoot="
+                            ++ match (workspaceRootPath) {
+                              Some(root) => root,
+                              None => "<none>",
+                            }
+                        )
+                      } else {
+                        void
+                      }
+                      publishGraphDiagnostics(uri, docs, publishedUris)
                     },
-                    None => void,
+                    None => publishedUris,
                   },
-                  None => void,
+                  None => publishedUris,
                 }
               },
-              None => void,
+              None => publishedUris,
             }
           },
-          None => void,
+          None => publishedUris,
         }
       } else if (method == "textDocument/didChange") {
         match (jsonGetObject("params", msgJson)) {
@@ -273,19 +559,61 @@ let handleMessage = (msgJson: Json.Json, docs: Map.Map<String, String>) => {
                   match (changes) {
                     [Json.JsonObject(first), ..._] => {
                       match (jsonGetString("text", Json.JsonObject(first))) {
-                        Some(text) => Map.set(uri, text, docs),
-                        None => void,
+                        Some(text) => {
+                          Map.set(uri, text, docs)
+                          if (workspaceRootPath == None) {
+                            workspaceRootPath = Some(dirname(uriToPath(uri)))
+                            debug(
+                              "[LSP didChange] inferred workspaceRoot="
+                                ++ match (workspaceRootPath) {
+                                  Some(root) => root,
+                                  None => "<none>",
+                                }
+                            )
+                          } else {
+                            void
+                          }
+                          publishGraphDiagnostics(uri, docs, publishedUris)
+                        },
+                        None => publishedUris,
                       }
                     },
-                    _ => void,
+                    _ => publishedUris,
                   }
                 },
-                None => void,
+                None => publishedUris,
               },
-              None => void,
+              None => publishedUris,
             }
           },
-          None => void,
+          None => publishedUris,
+        }
+      } else if (method == "textDocument/didClose") {
+        match (jsonGetObject("params", msgJson)) {
+          Some(params) => {
+            match (jsonGetObject("textDocument", params)) {
+              Some(doc) => {
+                match (jsonGetString("uri", doc)) {
+                  Some(uri) => {
+                    Map.remove(uri, docs)
+                    publishDiagnostics(uri, [])
+                    let next = Map.make()
+                    List.forEach(((u, _)) => {
+                      if (u == uri) {
+                        void
+                      } else {
+                        Map.set(u, true, next)
+                      }
+                    }, Map.toList(publishedUris))
+                    next
+                  },
+                  None => publishedUris,
+                }
+              },
+              None => publishedUris,
+            }
+          },
+          None => publishedUris,
         }
       } else if (method == "textDocument/inlayHint") {
         match (idOpt) {
@@ -295,6 +623,7 @@ let handleMessage = (msgJson: Json.Json, docs: Map.Map<String, String>) => {
           },
           None => void,
         }
+        publishedUris
       } else if (method == "textDocument/formatting") {
         match (idOpt) {
           Some(idJson) => match (jsonGetObject("params", msgJson)) {
@@ -303,15 +632,17 @@ let handleMessage = (msgJson: Json.Json, docs: Map.Map<String, String>) => {
           },
           None => void,
         }
+        publishedUris
       } else if (method == "shutdown") {
         match (idOpt) {
           Some(idJson) => sendResponse(jsonToIdText(idJson), "null"),
           None => void,
         }
+        publishedUris
       } else if (method == "exit") {
-        void
+        publishedUris
       } else {
-        void
+        publishedUris
       }
     },
   }
@@ -377,20 +708,29 @@ let readChunk = () => {
   }
 }
 
-let rec loop = (buffer: String, docs: Map.Map<String, String>) => {
+let rec loop = (
+  buffer: String,
+  docs: Map.Map<String, String>,
+  publishedUris: Map.Map<String, Bool>,
+) => {
   let (msgOpt, rest) = tryExtractMessage(buffer)
   match (msgOpt) {
     Some(msgText) => {
       match (Json.parse(msgText)) {
-        Ok(msgJson) => handleMessage(msgJson, docs),
-        Err(err) => logErr("Failed to parse JSON: " ++ toString(err)),
+        Ok(msgJson) => {
+          let nextPublished = handleMessage(msgJson, docs, publishedUris)
+          loop(rest, docs, nextPublished)
+        },
+        Err(err) => {
+          logErr("Failed to parse JSON: " ++ toString(err))
+          loop(rest, docs, publishedUris)
+        },
       }
-      loop(rest, docs)
     },
     None => {
       match (readChunk()) {
         None => void,
-        Some(chunk) => loop(buffer ++ chunk, docs),
+        Some(chunk) => loop(buffer ++ chunk, docs, publishedUris),
       }
     },
   }
@@ -398,7 +738,8 @@ let rec loop = (buffer: String, docs: Map.Map<String, String>) => {
 
 let main = () => {
   let docs = Map.make()
-  loop("", docs)
+  let publishedUris = Map.make()
+  loop("", docs, publishedUris)
 }
 
 main()

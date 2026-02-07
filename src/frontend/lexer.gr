@@ -16,6 +16,7 @@ from "../util.gr" include Util
 
 from "../core/source.gr" include Source
 from "../core/error.gr" include Error
+from "../core/surface_ast.gr" include SurfaceAst
 
 provide enum TokenKind {
   //special keywords
@@ -41,6 +42,7 @@ provide enum TokenKind {
   SemiColon, // ;
   Comma, // ,
   Colon, // :
+  Star, // *
   PipeArrow, // :>
   Slash, // /
   DSlash, // //
@@ -94,6 +96,7 @@ provide let tokenKindToString = kind => match (kind) {
   SemiColon => ";",
   Comma => ",",
   Colon => ":",
+  Star => "*",
   PipeArrow => ":>",
   Slash => "/",
   DSlash => "//",
@@ -130,11 +133,20 @@ record ReadResult {
   position: Position,
 }
 
-let nowNs = () =>
-  match (Time.monotonicTime()) {
-    Ok(t) => t,
-    Err(_) => 0L,
+let createDummyMark = (span: Source.Span) => {
+  let node: SurfaceAst.Node = { id: 0, span }
+  let mark: SurfaceAst.Mark = {
+    node,
+    kind: SurfaceAst.UnknownTopLevel("lexing error"),
+    expected: SurfaceAst.ExpectToken,
   }
+  mark
+}
+
+let nowNs = () => match (Time.monotonicTime()) {
+  Ok(t) => t,
+  Err(_) => 0L,
+}
 
 let nsDelta = (startNs: Int64, endNs: Int64) =>
   Int64.toNumber(endNs) - Int64.toNumber(startNs)
@@ -144,7 +156,11 @@ let nsToMsString = (ns: Number) => {
 }
 
 let lexInternal = (source, profiling: Bool) => {
-  let totalStart = if (profiling) { nowNs() } else { 0L }
+  let totalStart = if (profiling) {
+    nowNs()
+  } else {
+    0L
+  }
   let mut tWhitespaceNs = 0.0
   let mut tNameNs = 0.0
   let mut tNumberNs = 0.0
@@ -168,6 +184,9 @@ let lexInternal = (source, profiling: Bool) => {
   // Build byte view once and require ASCII source in this lexer implementation.
   let sourceBytes = Bytes.fromString(source)
   let sourceByteLen = Bytes.length(sourceBytes)
+  // source length in character offsets used by spans (ASCII => bytes == chars)
+  let lenght = sourceByteLen
+
   let mut bi = 0
   let mut hasNonAscii = false
   while (bi < sourceByteLen) {
@@ -179,11 +198,17 @@ let lexInternal = (source, profiling: Bool) => {
     }
   }
   if (hasNonAscii) {
-    panic("Lexer currently supports ASCII source only")
+    let mark = createDummyMark(Source.makeSpan(1, 1, 0, lenght))
+    ignore(
+      Error.createMarkedError(
+        Error.Lexing,
+        mark,
+        "Lexer currently supports ASCII source only",
+        [],
+        shouldPanic=true
+      )
+    )
   }
-
-  // source length in character offsets used by spans (ASCII => bytes == chars)
-  let lenght = sourceByteLen
 
   let asciiSlice = (start: Number, end_: Number) =>
     Bytes.toString(Bytes.slice(start, end_ - start, sourceBytes))
@@ -244,7 +269,7 @@ let lexInternal = (source, profiling: Bool) => {
 
   let isAsciiAlpha = (ch: Char) => {
     let code = Char.code(ch)
-    (code >= 97 && code <= 122) || (code >= 65 && code <= 90)
+    code >= 97 && code <= 122 || code >= 65 && code <= 90
   }
 
   let isAsciiWhitespace = (ch: Char) => {
@@ -256,8 +281,7 @@ let lexInternal = (source, profiling: Bool) => {
   }
 
   let isAsciiDigitN = (n: Number) => n >= 48 && n <= 57
-  let isAsciiAlphaN = (n: Number) =>
-    (n >= 97 && n <= 122) || (n >= 65 && n <= 90)
+  let isAsciiAlphaN = (n: Number) => n >= 97 && n <= 122 || n >= 65 && n <= 90
   let isNameStartN = (n: Number) => isAsciiAlphaN(n) || n == 95
 
   // check if uppercase
@@ -327,12 +351,26 @@ let lexInternal = (source, profiling: Bool) => {
         done = true
       } else if (b == 92) { // \
         if (idx + 1 >= lenght) {
-          let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, idx)
-          Error.createPanicError(
-            Error.Lexing,
-            span,
-            "Unclosed escape sequence in string",
-            [Error.Note("check for matching quotes and valid escape sequences")]
+          let span = Source.makeSpan(
+            startPosition.line,
+            startPosition.col,
+            startPosition.index,
+            idx
+          )
+          let mark = createDummyMark(span)
+          ignore(
+            Error.createMarkedError(
+              Error.Lexing,
+              mark,
+              "Unclosed escape sequence in string",
+              { value: StringVal(""), position: startPosition },
+              clues=[
+                Error.Note(
+                  "check for matching quotes and valid escape sequences",
+                ),
+              ],
+              shouldPanic=true
+            )
           )
         }
         let nextB = Uint8.toNumber(Bytes.getUint8(idx + 1, sourceBytes))
@@ -381,12 +419,20 @@ let lexInternal = (source, profiling: Bool) => {
         position: outPos,
       }
     } else {
-      let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, idx)
-      Error.createPanicError(
+      let span = Source.makeSpan(
+        startPosition.line,
+        startPosition.col,
+        startPosition.index,
+        idx
+      )
+      let mark = createDummyMark(span)
+      Error.createMarkedError(
         Error.Lexing,
-        span,
+        mark,
         "Unclosed string literal",
-        [Error.Expected("closing quote")]
+        { value: StringVal(""), position: startPosition },
+        clues=[Error.Expected("closing quote")],
+        shouldPanic=true
       )
     }
   }
@@ -396,8 +442,25 @@ let lexInternal = (source, profiling: Bool) => {
     match (peek(startPosition.index)) {
       Some(ch) => {
         if (ch == '\'') {
-          let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, startPosition.index + 1)
-          Error.createPanicError(Error.Lexing, span, "Empty character literal", [Error.Note("character literals must contain exactly one character")])
+          let span = Source.makeSpan(
+            startPosition.line,
+            startPosition.col,
+            startPosition.index,
+            startPosition.index + 1
+          )
+          let mark = createDummyMark(span)
+          Error.createMarkedError(
+            Error.Lexing,
+            mark,
+            "Empty character literal",
+            { value: CharVal(' '), position: startPosition },
+            clues=[
+              Error.Note(
+                "character literals must contain exactly one character",
+              ),
+            ],
+            shouldPanic=true
+          )
         } else {
           let char = ch
           let afterChar = advancePosition(startPosition, ch)
@@ -409,15 +472,41 @@ let lexInternal = (source, profiling: Bool) => {
               }
             },
             _ => {
-              let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, afterChar.index)
-              Error.createPanicError(Error.Lexing, span, "Unclosed character literal", [Error.Expected("closing single quote")])
+              let span = Source.makeSpan(
+                startPosition.line,
+                startPosition.col,
+                startPosition.index,
+                afterChar.index
+              )
+              let mark = createDummyMark(span)
+              Error.createMarkedError(
+                Error.Lexing,
+                mark,
+                "Unclosed character literal",
+                { value: CharVal(' '), position: startPosition },
+                clues=[Error.Expected("closing single quote")],
+                shouldPanic=true
+              )
             },
           }
         }
       },
       None => {
-        let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, startPosition.index)
-        Error.createPanicError(Error.Lexing, span, "Unclosed character literal", [Error.Expected("character and closing quote")])
+        let span = Source.makeSpan(
+          startPosition.line,
+          startPosition.col,
+          startPosition.index,
+          startPosition.index
+        )
+        let mark = createDummyMark(span)
+        Error.createMarkedError(
+          Error.Lexing,
+          mark,
+          "Unclosed character literal",
+          { value: CharVal(' '), position: startPosition },
+          clues=[Error.Expected("character and closing quote")],
+          shouldPanic=true
+        )
       },
     }
   }
@@ -494,8 +583,16 @@ let lexInternal = (source, profiling: Bool) => {
     let ch = Char.fromCode(chNum)
     match (ch) {
       _ when isNameStartN(chNum) => {
-        let t0 = if (profiling) { nowNs() } else { 0L }
-        let nameScanStart = if (profiling) { nowNs() } else { 0L }
+        let t0 = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
+        let nameScanStart = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         let mut endIndex = pos.index
         while (endIndex < lenght) {
           let nextNum = Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes))
@@ -509,7 +606,11 @@ let lexInternal = (source, profiling: Bool) => {
           let nameScanEnd = nowNs()
           tNameScanNs += nsDelta(nameScanStart, nameScanEnd)
         }
-        let nameSliceStart = if (profiling) { nowNs() } else { 0L }
+        let nameSliceStart = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         let ident = asciiSlice(pos.index, endIndex)
         if (profiling) {
           let nameSliceEnd = nowNs()
@@ -525,27 +626,28 @@ let lexInternal = (source, profiling: Bool) => {
           tNameNs += nsDelta(t0, t1)
           cName += 1
         }
-        let nameKindStart = if (profiling) { nowNs() } else { 0L }
+        let nameKindStart = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         let kind = tokenKindFromName(ident)
         if (profiling) {
           let nameKindEnd = nowNs()
           tNameKindNs += nsDelta(nameKindStart, nameKindEnd)
         }
         tokens = [
-          makeToken(
-            kind,
-            pos.line,
-            pos.col,
-            pos.index,
-            endIndex,
-            None
-          ),
+          makeToken(kind, pos.line, pos.col, pos.index, endIndex, None),
           ...tokens
         ]
         pos = newPos
       },
       _ when isAsciiDigitN(chNum) => {
-        let t0 = if (profiling) { nowNs() } else { 0L }
+        let t0 = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         let mut idx = pos.index
         let mut val = 0
         while (idx < lenght) {
@@ -568,20 +670,17 @@ let lexInternal = (source, profiling: Bool) => {
           cNumber += 1
         }
         tokens = [
-          makeToken(
-            LitNum(val),
-            pos.line,
-            pos.col,
-            pos.index,
-            idx,
-            None
-          ),
+          makeToken(LitNum(val), pos.line, pos.col, pos.index, idx, None),
           ...tokens
         ]
         pos = newPos
       },
       '"' => {
-        let t0 = if (profiling) { nowNs() } else { 0L }
+        let t0 = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         let res = readString(advancePosition(pos, ch))
         if (profiling) {
           let t1 = nowNs()
@@ -591,8 +690,25 @@ let lexInternal = (source, profiling: Bool) => {
         let str = match (res.value) {
           StringVal(s) => s,
           _ => {
-            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
-            Error.createPanicError(Error.Lexing, span, "Invalid string literal", [Error.Note("internal error: expected string value from string reader")])
+            let span = Source.makeSpan(
+              pos.line,
+              pos.col,
+              pos.index,
+              res.position.index
+            )
+            let mark = createDummyMark(span)
+            Error.createMarkedError(
+              Error.Lexing,
+              mark,
+              "Invalid string literal",
+              "",
+              clues=[
+                Error.Note(
+                  "internal error: expected string value from string reader",
+                ),
+              ],
+              shouldPanic=true
+            )
           },
         }
         tokens = [
@@ -609,7 +725,11 @@ let lexInternal = (source, profiling: Bool) => {
         pos = res.position
       },
       '\'' => {
-        let t0 = if (profiling) { nowNs() } else { 0L }
+        let t0 = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         let res = readChar(advancePosition(pos, ch))
         if (profiling) {
           let t1 = nowNs()
@@ -619,8 +739,25 @@ let lexInternal = (source, profiling: Bool) => {
         let chr = match (res.value) {
           CharVal(c) => c,
           _ => {
-            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
-            Error.createPanicError(Error.Lexing, span, "Invalid character literal", [Error.Note("internal error: expected character value from char reader")])
+            let span = Source.makeSpan(
+              pos.line,
+              pos.col,
+              pos.index,
+              res.position.index
+            )
+            let mark = createDummyMark(span)
+            Error.createMarkedError(
+              Error.Lexing,
+              mark,
+              "Invalid character literal",
+              ' ',
+              clues=[
+                Error.Note(
+                  "internal error: expected character value from char reader",
+                ),
+              ],
+              shouldPanic=true
+            )
           },
         }
         tokens = [
@@ -637,7 +774,11 @@ let lexInternal = (source, profiling: Bool) => {
         pos = res.position
       },
       ch => { //Var(ch)
-        let t0 = if (profiling) { nowNs() } else { 0L }
+        let t0 = if (profiling) {
+          nowNs()
+        } else {
+          0L
+        }
         match (ch) {
           '(' => {
             tokens = [
@@ -657,11 +798,10 @@ let lexInternal = (source, profiling: Bool) => {
           ')' => {
             let mateIndex = List.head(parenStack)
             parenStack = match (mateIndex) {
-              Some(_) =>
-                match (List.tail(parenStack)) {
-                  Some(tail) => tail,
-                  None => parenStack,
-                },
+              Some(_) => match (List.tail(parenStack)) {
+                Some(tail) => tail,
+                None => parenStack,
+              },
               None => parenStack,
             }
             tokens = [
@@ -695,11 +835,10 @@ let lexInternal = (source, profiling: Bool) => {
           '}' => {
             let mateIndex = List.head(braceStack)
             braceStack = match (mateIndex) {
-              Some(_) =>
-                match (List.tail(braceStack)) {
-                  Some(tail) => tail,
-                  None => braceStack,
-                },
+              Some(_) => match (List.tail(braceStack)) {
+                Some(tail) => tail,
+                None => braceStack,
+              },
               None => braceStack,
             }
             tokens = [
@@ -774,6 +913,13 @@ let lexInternal = (source, profiling: Bool) => {
                 pos = advancePosition(pos, ch)
               },
             }
+          },
+          '*' => {
+            tokens = [
+              makeToken(Star, pos.line, pos.col, pos.index, pos.index + 1, None),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
           },
           ',' => {
             tokens = [
@@ -996,14 +1142,20 @@ let lexInternal = (source, profiling: Bool) => {
           '/' => {
             match (peek(pos.index + 1)) {
               Some('/') => {
-                let commentStart = if (profiling) { nowNs() } else { 0L }
+                let commentStart = if (profiling) {
+                  nowNs()
+                } else {
+                  0L
+                }
                 let afterSlashes = advancePosition(
                   advancePosition(pos, ch),
                   '/'
                 )
                 let mut endPos = afterSlashes
                 while (endPos.index < lenght) {
-                  let c = Char.fromCode(Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes)))
+                  let c = Char.fromCode(
+                    Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes))
+                  )
                   if (c == '\n') {
                     break
                   }
@@ -1044,8 +1196,26 @@ let lexInternal = (source, profiling: Bool) => {
               },
             }
           },
+          '@' => {
+            tokens = [
+              makeToken(
+                Directive,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
           _ => {
-            let opaqueStart = if (profiling) { nowNs() } else { 0L }
+            let opaqueStart = if (profiling) {
+              nowNs()
+            } else {
+              0L
+            }
             let startIndex = pos.index
             let mut endPos = pos
             while (true) {
@@ -1056,7 +1226,9 @@ let lexInternal = (source, profiling: Bool) => {
                 _ => {
                   endPos = advancePosition(
                     endPos,
-                    Char.fromCode(Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes)))
+                    Char.fromCode(
+                      Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes))
+                    )
                   )
                 },
               }

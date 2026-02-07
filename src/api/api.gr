@@ -55,6 +55,7 @@ let tokenToJson = (tok: Lexer.Token) => {
     Lexer.SemiColon => "SemiColon",
     Lexer.Comma => "Comma",
     Lexer.Colon => "Colon",
+    Lexer.Star => "Star",
     Lexer.PipeArrow => "PipeArrow",
     Lexer.Slash => "Slash",
     Lexer.DSlash => "DSlash",

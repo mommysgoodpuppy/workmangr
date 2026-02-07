@@ -17,11 +17,10 @@ from "./lexer.gr" include Lexer
 let join = (sep: String, xs: List<String>) =>
   Array.join(sep, Array.fromList(xs))
 
-let nowNs = () =>
-  match (Time.monotonicTime()) {
-    Ok(t) => t,
-    Err(_) => 0L,
-  }
+let nowNs = () => match (Time.monotonicTime()) {
+  Ok(t) => t,
+  Err(_) => 0L,
+}
 
 let logTiming = (label: String, startNs: Int64, endNs: Int64) => {
   print(
@@ -1801,7 +1800,13 @@ let renderWithSettings = (
   mode: Mode,
   settings: Settings,
 ) =>
-  renderWithSettingsWithTokens(program, source, Lexer.lex(source), mode, settings)
+  renderWithSettingsWithTokens(
+    program,
+    source,
+    Lexer.lex(source),
+    mode,
+    settings
+  )
 
 let tokenIsIgnoredForSemis = (tok: Lexer.Token) => match (tok.kind) {
   Lexer.LineComment(_) => true,
@@ -1833,7 +1838,8 @@ let filterTokensToArray = (
   Array.fromList(List.reverse(out))
 }
 
-let tokensEqualForAlignment = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
+let tokensEqualForAlignment = (a: Lexer.Token, b: Lexer.Token) =>
+  a.kind == b.kind
 
 let alignOnceWithSourceTokensDetailed = (
   sourceText: String,
@@ -1903,7 +1909,15 @@ let alignOnceWithSourceTokensDetailed = (
       formattedText
     )
     let merged = prefixText ++ middleText ++ suffixText
-    (merged, true, sourceStart, sourceEnd, formattedStart, formattedEnd, formattedTokens)
+    (
+      merged,
+      true,
+      sourceStart,
+      sourceEnd,
+      formattedStart,
+      formattedEnd,
+      formattedTokens,
+    )
   }
 }
 
@@ -1975,18 +1989,16 @@ let alignWithOpaqueFallbackWithSourceTokens = (
   sourceTokens: Array<Lexer.Token>,
   formattedText: String,
 ) => {
-  let (a, b, c, d, e, f, g, _tokens) = alignWithOpaqueFallbackWithSourceTokensDetailed(
-    sourceText,
-    sourceTokens,
-    formattedText
-  )
+  let (a, b, c, d, e, f, g, _tokens) =
+    alignWithOpaqueFallbackWithSourceTokensDetailed(
+      sourceText,
+      sourceTokens,
+      formattedText
+    )
   (a, b, c, d, e, f, g)
 }
 
-let alignWithOpaqueFallback = (
-  sourceText: String,
-  formattedText: String,
-) => {
+let alignWithOpaqueFallback = (sourceText: String, formattedText: String) => {
   let mut current = formattedText
   let mut changed = false
   let mut lastStart = 0
@@ -1996,7 +2008,10 @@ let alignWithOpaqueFallback = (
   let mut spans: List<(Number, Number, Number, Number)> = []
   let mut attempts = 0
   while (attempts < 32) {
-    let (next, didChange, start, end, fmtStart, fmtEnd) = alignOnce(sourceText, current)
+    let (next, didChange, start, end, fmtStart, fmtEnd) = alignOnce(
+      sourceText,
+      current
+    )
     if (!didChange) {
       break
     }
@@ -2232,11 +2247,10 @@ let maybeLogTiming = (
   label: String,
   startNs: Int64,
   endNs: Int64,
-) =>
-  match (prefixOpt) {
-    Some(prefix) => logTiming(prefix ++ "/" ++ label, startNs, endNs),
-    None => void,
-  }
+) => match (prefixOpt) {
+  Some(prefix) => logTiming(prefix ++ "/" ++ label, startNs, endNs),
+  None => void,
+}
 
 let filterSemicolonAdditionsByBrokenSpans = (
   additions: List<SemicolonAddition>,
@@ -2245,11 +2259,12 @@ let filterSemicolonAdditionsByBrokenSpans = (
   let anchorBlocked = (offset: Number) => {
     let rec loop = (items: List<OpaqueSpan>) => match (items) {
       [] => false,
-      [span, ...rest] => if (offset >= span.sourceStart && offset <= span.sourceEnd) {
-        true
-      } else {
-        loop(rest)
-      },
+      [span, ...rest] =>
+        if (offset >= span.sourceStart && offset <= span.sourceEnd) {
+          true
+        } else {
+          loop(rest)
+        },
     }
     loop(brokenSpans)
   }
@@ -2261,7 +2276,7 @@ let filterSemicolonAdditionsByBrokenSpans = (
       } else {
         go(rest, [item, ...out])
       },
-  }
+    }
   go(additions, [])
 }
 
@@ -2275,22 +2290,24 @@ let semicolonAdditionsFromRenderedWithBrokenSpans = (
   let offsetInBroken = (offset: Number) => {
     let rec loop = (items: List<OpaqueSpan>) => match (items) {
       [] => false,
-      [span, ...rest] => if (offset >= span.sourceStart && offset < span.sourceEnd) {
-        true
-      } else {
-        loop(rest)
-      },
+      [span, ...rest] =>
+        if (offset >= span.sourceStart && offset < span.sourceEnd) {
+          true
+        } else {
+          loop(rest)
+        },
     }
     loop(brokenSpans)
   }
   let anchorBlocked = (offset: Number) => {
     let rec loop = (items: List<OpaqueSpan>) => match (items) {
       [] => false,
-      [span, ...rest] => if (offset >= span.sourceStart && offset <= span.sourceEnd) {
-        true
-      } else {
-        loop(rest)
-      },
+      [span, ...rest] =>
+        if (offset >= span.sourceStart && offset <= span.sourceEnd) {
+          true
+        } else {
+          loop(rest)
+        },
     }
     loop(brokenSpans)
   }
@@ -2383,22 +2400,24 @@ let semicolonAdditionsFromTokensWithBrokenSpans = (
   let offsetInBroken = (offset: Number) => {
     let rec loop = (items: List<OpaqueSpan>) => match (items) {
       [] => false,
-      [span, ...rest] => if (offset >= span.sourceStart && offset < span.sourceEnd) {
-        true
-      } else {
-        loop(rest)
-      },
+      [span, ...rest] =>
+        if (offset >= span.sourceStart && offset < span.sourceEnd) {
+          true
+        } else {
+          loop(rest)
+        },
     }
     loop(brokenSpans)
   }
   let anchorBlocked = (offset: Number) => {
     let rec loop = (items: List<OpaqueSpan>) => match (items) {
       [] => false,
-      [span, ...rest] => if (offset >= span.sourceStart && offset <= span.sourceEnd) {
-        true
-      } else {
-        loop(rest)
-      },
+      [span, ...rest] =>
+        if (offset >= span.sourceStart && offset <= span.sourceEnd) {
+          true
+        } else {
+          loop(rest)
+        },
     }
     loop(brokenSpans)
   }
@@ -2477,13 +2496,14 @@ let applySemicolonAdditions = (
   additions: List<SemicolonAddition>,
 ) => {
   let len = String.length(source)
-  let clamp = (offset: Number) => if (offset < 0) {
-    0
-  } else if (offset > len) {
-    len
-  } else {
-    offset
-  }
+  let clamp = (offset: Number) =>
+    if (offset < 0) {
+      0
+    } else if (offset > len) {
+      len
+    } else {
+      offset
+    }
   let rec consumeSameOffset = (
     offset: Number,
     items: List<SemicolonAddition>,
@@ -2551,11 +2571,12 @@ let projectAdditionsToRendered = (
   let resolveAnchor = (sourceAnchor: Number) => {
     let rec loop = (items: List<(Number, Number)>) => match (items) {
       [] => None,
-      [(srcEnd, renderedEnd), ...rest] => if (srcEnd == sourceAnchor) {
-        Some(renderedEnd)
-      } else {
-        loop(rest)
-      },
+      [(srcEnd, renderedEnd), ...rest] =>
+        if (srcEnd == sourceAnchor) {
+          Some(renderedEnd)
+        } else {
+          loop(rest)
+        },
     }
     loop(anchorMap)
   }
@@ -2746,7 +2767,11 @@ provide let profileRealFix = (source: String) => {
       renderedRealForSpans
     )
   let alignAndSpansEnd = nowNs()
-  logTiming("realfix/align_and_broken_spans", alignAndSpansStart, alignAndSpansEnd)
+  logTiming(
+    "realfix/align_and_broken_spans",
+    alignAndSpansStart,
+    alignAndSpansEnd
+  )
 
   let semisStart = nowNs()
   let additions = filterSemicolonAdditionsByBrokenSpans(
@@ -2755,7 +2780,10 @@ provide let profileRealFix = (source: String) => {
   )
   let semisEnd = nowNs()
   logTiming("realfix/semis_apply", semisStart, semisEnd)
-  print("[FormatterTiming] realfix/added_semis: " ++ toString(List.length(additions)))
+  print(
+    "[FormatterTiming] realfix/added_semis: "
+      ++ toString(List.length(additions))
+  )
 
   let realAlignStart = nowNs()
   let final = if (additions == []) {

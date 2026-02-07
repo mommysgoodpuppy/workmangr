@@ -175,10 +175,13 @@ let kindIs = (kind, expected) => kind == expected
 let isTopLevelBoundary = (tok: Lexer.Token) => match (tok.kind) {
   Lexer.EOF => true,
   Lexer.SemiColon => true,
+  Lexer.Directive => true,
   Lexer.LineComment(_) => true,
   Lexer.Opaque(_) => true,
   Lexer.LitName(name) when name == "let"
     || name == "export"
+    || name == "from"
+    || name == "reexport"
     || name == "type"
     || name == "record" => true,
   _ => false,
@@ -284,7 +287,9 @@ let isKeywordName = (name: String) =>
     || name == "type"
     || name == "record"
     || name == "export"
+    || name == "from"
     || name == "import"
+    || name == "as"
     || name == "reexport"
 
 let isOpaqueLineStart = (state: ParseState) => {
@@ -1493,6 +1498,132 @@ and parseIf = (state: ParseState) => {
   let expr = makeExpr(id, span, SurfaceAst.If(cond, thenExpr, elseExpr))
   (expr, state5)
 }
+and expectStringLiteral = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LitString(text) => (text, tok, dropToken(state)),
+    _ => {
+      let syntheticSpan = Source.makeSpan(
+        tok.span.line,
+        tok.span.col,
+        tok.span.start,
+        tok.span.start
+      )
+      let syntheticTok: Lexer.Token = {
+        kind: Lexer.LitString(""),
+        span: syntheticSpan,
+        mate: None,
+      }
+      let (markId, state1) = freshId(state)
+      let mark: SurfaceAst.Mark = {
+        node: { id: markId, span: tok.span },
+        kind: SurfaceAst.MissingToken("string literal"),
+        expected: SurfaceAst.ExpectToken,
+      }
+      let recoveryText = Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Expected string literal",
+        "",
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+      )
+      let recoveryTok = Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Expected string literal",
+        syntheticTok,
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+      )
+      (recoveryText, recoveryTok, state1)
+    },
+  }
+}
+and parseDirectiveTopItem = (state: ParseState) => {
+  let (directiveTok, state1) = expectSimple(Lexer.Directive, state)
+  let (nameText, nameTok, state2) = expectName(state1)
+  let (nameId, state3) = freshId(state2)
+  let name: SurfaceAst.Name = {
+    node: { id: nameId, span: nameTok.span },
+    text: nameText,
+  }
+  let (_, state4) = expectSimpleOrRecover(
+    Lexer.SemiColon,
+    state3,
+    "after directive"
+  )
+  let (dirId, state5) = freshId(state4)
+  let directive: SurfaceAst.Directive = { name, args: [] }
+  let topItem: SurfaceAst.TopItem = SurfaceAst.Directive(directive)
+  let _ = directiveTok
+  (topItem, state5)
+}
+and skipImportClause = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.Star => {
+      let state1 = dropToken(state)
+      if (kindIs(currentToken(state1).kind, Lexer.LitName("as"))) {
+        let (_, state2) = expectKeyword("as", state1)
+        let (_, _, state3) = expectName(state2)
+        state3
+      } else {
+        state1
+      }
+    },
+    Lexer.LBrace => {
+      let (_, state1) = expectSimple(Lexer.LBrace, state)
+      let rec loop = (stateX: ParseState) => {
+        let tokX = currentToken(stateX)
+        match (tokX.kind) {
+          Lexer.RBrace => {
+            let (_, stateY) = expectSimple(Lexer.RBrace, stateX)
+            stateY
+          },
+          Lexer.EOF => stateX,
+          _ => {
+            let stateY = dropToken(stateX)
+            loop(stateY)
+          },
+        }
+      }
+      loop(state1)
+    },
+    _ => state,
+  }
+}
+and parseImportTopItem = (state: ParseState) => {
+  let (fromTok, state1) = expectKeyword("from", state)
+  let (modulePath, _moduleTok, state2) = expectStringLiteral(state1)
+  let (_, state3) = expectKeyword("import", state2)
+  let state4 = skipImportClause(state3)
+  let (_, state5) = expectSimpleOrRecover(
+    Lexer.SemiColon,
+    state4,
+    "after import declaration"
+  )
+  let (id, state6) = freshId(state5)
+  let importDecl: SurfaceAst.ImportDecl = {
+    node: { id, span: fromTok.span },
+    modulePath,
+    alias: None,
+  }
+  (SurfaceAst.Import(importDecl), state6)
+}
+and parseReexportTopItem = (state: ParseState) => {
+  let (reexportTok, state1) = expectKeyword("reexport", state)
+  let (modulePath, _moduleTok, state2) = expectStringLiteral(state1)
+  let (_, state3) = expectSimpleOrRecover(
+    Lexer.SemiColon,
+    state2,
+    "after reexport declaration"
+  )
+  let (id, state4) = freshId(state3)
+  let reexportDecl: SurfaceAst.ReexportDecl = {
+    node: { id, span: reexportTok.span },
+    modulePath,
+  }
+  (SurfaceAst.Reexport(reexportDecl), state4)
+}
 and parseTopLevels = (state: ParseState) => {
   let tok = currentToken(state)
   //print(tok)
@@ -1524,6 +1655,21 @@ and parseTopLevels = (state: ParseState) => {
         let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
         let (rest, state3) = parseTopLevels(state2)
         ([topTrivia, ...rest], state3)
+      },
+      Lexer.Directive => {
+        let (directive, state1) = parseDirectiveTopItem(state)
+        let (rest, state2) = parseTopLevels(state1)
+        ([directive, ...rest], state2)
+      },
+      Lexer.LitName(name) when name == "from" => {
+        let (importItem, state1) = parseImportTopItem(state)
+        let (rest, state2) = parseTopLevels(state1)
+        ([importItem, ...rest], state2)
+      },
+      Lexer.LitName(name) when name == "reexport" => {
+        let (reexportItem, state1) = parseReexportTopItem(state)
+        let (rest, state2) = parseTopLevels(state1)
+        ([reexportItem, ...rest], state2)
       },
       Lexer.LitName(name) when name == "let" => {
         let (group, state1) = parseLetGroup(state)
@@ -2041,6 +2187,16 @@ and parseBlockItems = (state: ParseState) => {
         let item = SurfaceAst.TriviaItem(trivia)
         let (restItems, state3) = parseBlockItems(state2)
         ([item, ...restItems], state3)
+      },
+      Lexer.Directive => {
+        let (directiveTop, state1) = parseDirectiveTopItem(state)
+        let item: SurfaceAst.BlockItem = match (directiveTop) {
+          SurfaceAst.Directive(directive) =>
+            (SurfaceAst.Directive(directive): SurfaceAst.BlockItem),
+          _ => panic("parseDirectiveTopItem produced non-directive"),
+        }
+        let (restItems, state2) = parseBlockItems(state1)
+        ([item, ...restItems], state2)
       },
       Lexer.LitName("let") => {
         let (topItem, state1) = parseLetGroup(state)
@@ -2792,7 +2948,15 @@ let parseWithRecovery = (source: String) => {
   let tokens = Lexer.lex(source)
   let initial: ParseState = { tokens, nextId: 1, allTokens: tokens }
   let (topLevels, _finalState) = parseTopLevels(initial)
-  let program: SurfaceAst.Program = { items: topLevels, core: false }
+  let hasCoreDirective = List.some(
+    (item: SurfaceAst.TopItem) =>
+      match (item) {
+        SurfaceAst.Directive({ name, _ }) => name.text == "core",
+        _ => false,
+      },
+    topLevels
+  )
+  let program: SurfaceAst.Program = { items: topLevels, core: hasCoreDirective }
   { program, tokens }
 }
 
