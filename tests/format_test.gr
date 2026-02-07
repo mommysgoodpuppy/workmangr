@@ -292,7 +292,7 @@ let
 25
 and
 =
-67;
+67
 let
 =
 {
@@ -301,7 +301,7 @@ let
 25
 and
 =
-67
+67;
 " 
 
   let expectedVirtual =
