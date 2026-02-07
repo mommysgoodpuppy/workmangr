@@ -2,9 +2,14 @@ module Lexer
 
 from "char" include Char
 from "string" include String
+from "array" include Array
+from "bytes" include Bytes
+from "uint8" include Uint8
 from "number" include Number
 from "option" include Option
 from "list" include List
+from "wasi/time" include Time
+from "int64" include Int64
 from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
 from "../util.gr" include Util
@@ -125,11 +130,57 @@ record ReadResult {
   position: Position,
 }
 
-//lexer function
-provide let lex = source => {
+let nowNs = () =>
+  match (Time.monotonicTime()) {
+    Ok(t) => t,
+    Err(_) => 0L,
+  }
 
-  //source lenght
-  let lenght = String.length(source)
+let nsDelta = (startNs: Int64, endNs: Int64) =>
+  Int64.toNumber(endNs) - Int64.toNumber(startNs)
+
+let nsToMsString = (ns: Number) => {
+  toString(Number.trunc(ns / 1000000))
+}
+
+let lexInternal = (source, profiling: Bool) => {
+  let totalStart = if (profiling) { nowNs() } else { 0L }
+  let mut tWhitespaceNs = 0.0
+  let mut tNameNs = 0.0
+  let mut tNumberNs = 0.0
+  let mut tStringNs = 0.0
+  let mut tCharNs = 0.0
+  let mut tSymbolNs = 0.0
+  let mut tCommentNs = 0.0
+  let mut tOpaqueNs = 0.0
+  let mut cWhitespace = 0
+  let mut cName = 0
+  let mut cNumber = 0
+  let mut cString = 0
+  let mut cChar = 0
+  let mut cSymbol = 0
+  let mut cComment = 0
+  let mut cOpaque = 0
+
+  // Build byte view once and require ASCII source in this lexer implementation.
+  let sourceBytes = Bytes.fromString(source)
+  let sourceByteLen = Bytes.length(sourceBytes)
+  let mut bi = 0
+  let mut hasNonAscii = false
+  while (bi < sourceByteLen) {
+    if (Uint8.toNumber(Bytes.getUint8(bi, sourceBytes)) > 127) {
+      hasNonAscii = true
+      bi = sourceByteLen
+    } else {
+      bi += 1
+    }
+  }
+  if (hasNonAscii) {
+    panic("Lexer currently supports ASCII source only")
+  }
+
+  // source length in character offsets used by spans (ASCII => bytes == chars)
+  let lenght = sourceByteLen
 
   let mut parenStack = []
   let mut braceStack = []
@@ -137,7 +188,7 @@ provide let lex = source => {
     if (index < 0 || index >= lenght) {
       None
     } else {
-      Some(String.charAt(index, source))
+      Some(Char.fromCode(Uint8.toNumber(Bytes.getUint8(index, sourceBytes))))
     }
   }
 
@@ -159,21 +210,43 @@ provide let lex = source => {
 
   // continue until not whitespace
   let skipWhitespace = position => {
-    let mut p = position
-    while (true) {
-      match (peek(p.index)) {
+    let mut idx = position.index
+    let mut line = position.line
+    let mut col = position.col
+    while (idx < lenght) {
+      match (peek(idx)) {
         Some(ch) when Char.Ascii.isWhitespace(ch) => {
-          p = advancePosition(p, ch)
+          idx += 1
+          if (ch == '\n') {
+            line += 1
+            col = 1
+          } else {
+            col += 1
+          }
         },
         _ => break,
       }
     }
-    p
+    { index: idx, line, col }
   }
 
   // name start
+  let isAsciiDigit = (ch: Char) => {
+    let code = Char.code(ch)
+    code >= 48 && code <= 57
+  }
+
+  let isAsciiAlpha = (ch: Char) => {
+    let code = Char.code(ch)
+    (code >= 97 && code <= 122) || (code >= 65 && code <= 90)
+  }
+
+  let isAsciiWhitespace = (ch: Char) => {
+    ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t'
+  }
+
   let isNameStart = (ch: Char) => {
-    Char.Ascii.isAlpha(ch) || ch == '_'
+    isAsciiAlpha(ch) || ch == '_'
   }
 
   // check if uppercase
@@ -189,22 +262,24 @@ provide let lex = source => {
       isNameStart(ch) || Char.Ascii.isDigit(ch)
     }
 
-    let rec loop = (currentPos: Position) => {
-      match (peek(currentPos.index)) {
-        Some(ch) => {
-          if (isNameContinue(ch)) {
-            let newPos = advancePosition(currentPos, ch)
-            loop(newPos)
-          } else {
-            currentPos
-          }
-        },
-        _ => currentPos,
+    let mut endIndex = startPosition.index
+    while (endIndex < lenght) {
+      let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes)))
+      if (isNameContinue(ch)) {
+        endIndex += 1
+      } else {
+        break
       }
     }
-    let endPos = loop(startPosition)
-    let name = String.slice(startPosition.index, end=endPos.index, source)
-    { value: StringVal(name), position: endPos }
+    let name = String.slice(startPosition.index, end=endIndex, source)
+    {
+      value: StringVal(name),
+      position: {
+        index: endIndex,
+        line: startPosition.line,
+        col: startPosition.col + (endIndex - startPosition.index),
+      },
+    }
   }
 
   //read a number to end
@@ -214,35 +289,36 @@ provide let lex = source => {
       Char.code(ch) - Char.code('0')
     }
 
-    let firstCh = String.charAt(startPosition.index, source)
-    let initialAcc = digitValue(firstCh)
-
-    let rec loop = (currentPos: Position, acc: Number) => {
-      match (peek(currentPos.index)) {
-        Some(ch) => {
-          if (Char.Ascii.isDigit(ch)) {
-            let newAcc = acc * 10 + digitValue(ch)
-            let newPos = advancePosition(currentPos, ch)
-            loop(newPos, newAcc)
-          } else {
-            { value: NumVal(acc), position: currentPos }
-          }
-        },
-        _ => { value: NumVal(acc), position: currentPos },
+    let mut idx = startPosition.index
+    let mut acc = 0
+    while (idx < lenght) {
+      let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
+      if (Char.Ascii.isDigit(ch)) {
+        acc = acc * 10 + digitValue(ch)
+        idx += 1
+      } else {
+        break
       }
     }
-    let startAfterFirst = advancePosition(startPosition, firstCh)
-    loop(startAfterFirst, initialAcc)
+    {
+      value: NumVal(acc),
+      position: {
+        index: idx,
+        line: startPosition.line,
+        col: startPosition.col + (idx - startPosition.index),
+      },
+    }
   }
 
   //read string to end
   let readString = (startPosition: Position) => {
-    let rec loop = (currentPos: Position, acc: String) => {
+    let rec loop = (currentPos: Position, chunks: List<String>) => {
       match (peek(currentPos.index)) {
         Some(ch) => {
           if (ch == '"') {
             // end of string
-            { value: StringVal(acc), position: advancePosition(currentPos, ch) }
+            let value = Array.join("", Array.fromList(List.reverse(chunks)))
+            { value: StringVal(value), position: advancePosition(currentPos, ch) }
           } else if (ch == '\\') {
             // escape sequence
             match (peek(currentPos.index + 1)) {
@@ -264,12 +340,11 @@ provide let lex = source => {
                     source
                   ) // treat as literal
                 }
-                let newAcc = acc ++ escaped
                 let newPos = advancePosition(
                   advancePosition(currentPos, ch),
                   nextCh
                 )
-                loop(newPos, newAcc)
+                loop(newPos, [escaped, ...chunks])
               },
               None => {
                 let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, currentPos.index)
@@ -282,9 +357,8 @@ provide let lex = source => {
               end=currentPos.index + 1,
               source
             )
-            let newAcc = acc ++ charStr
             let newPos = advancePosition(currentPos, ch)
-            loop(newPos, newAcc)
+            loop(newPos, [charStr, ...chunks])
           }
         },
         None => {
@@ -293,7 +367,7 @@ provide let lex = source => {
         },
       }
     }
-    loop(startPosition, "")
+    loop(startPosition, [])
   }
 
   //read char to end
@@ -351,18 +425,73 @@ provide let lex = source => {
   let mut tokens = []
   let mut pos = { index: 0, line: 1, col: 1 }
   while (pos.index < lenght) {
-    pos = skipWhitespace(pos)
+    if (profiling) {
+      let t0 = nowNs()
+      let mut idx = pos.index
+      let mut line = pos.line
+      let mut col = pos.col
+      while (idx < lenght) {
+        let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
+        if (isAsciiWhitespace(ch)) {
+          idx += 1
+          if (ch == '\n') {
+            line += 1
+            col = 1
+          } else {
+            col += 1
+          }
+        } else {
+          break
+        }
+      }
+      pos = { index: idx, line, col }
+      let t1 = nowNs()
+      tWhitespaceNs += nsDelta(t0, t1)
+      cWhitespace += 1
+    } else {
+      let mut idx = pos.index
+      let mut line = pos.line
+      let mut col = pos.col
+      while (idx < lenght) {
+        let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
+        if (isAsciiWhitespace(ch)) {
+          idx += 1
+          if (ch == '\n') {
+            line += 1
+            col = 1
+          } else {
+            col += 1
+          }
+        } else {
+          break
+        }
+      }
+      pos = { index: idx, line, col }
+    }
     if (pos.index >= lenght) break
-    let ch = String.charAt(pos.index, source)
+    let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(pos.index, sourceBytes)))
     match (ch) {
       ch when isNameStart(ch) => {
-        let res = readName(pos)
-        let ident = match (res.value) {
-          StringVal(s) => s,
-          _ => {
-            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
-            Error.createPanicError(Error.Lexing, span, "Invalid identifier", [Error.Note("internal error: expected string value from name reader")])
-          },
+        let t0 = if (profiling) { nowNs() } else { 0L }
+        let mut endIndex = pos.index
+        while (endIndex < lenght) {
+          let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes)))
+          if (isNameStart(ch) || isAsciiDigit(ch)) {
+            endIndex += 1
+          } else {
+            break
+          }
+        }
+        let ident = String.slice(pos.index, end=endIndex, source)
+        let newPos = {
+          index: endIndex,
+          line: pos.line,
+          col: pos.col + (endIndex - pos.index),
+        }
+        if (profiling) {
+          let t1 = nowNs()
+          tNameNs += nsDelta(t0, t1)
+          cName += 1
         }
         let kind = tokenKindFromName(ident)
         tokens = [
@@ -371,23 +500,35 @@ provide let lex = source => {
             pos.line,
             pos.col,
             pos.index,
-            res.position.index,
+            endIndex,
             None
           ),
           ...tokens
         ]
-        pos = res.position
+        pos = newPos
       },
-      ch when Char.Ascii.isDigit(ch) => {
-        let res = readNumber(pos)
-        let val = match (res.value) {
-          NumVal(ident) => {
-            ident
-          },
-          _ => {
-            let span = Source.makeSpan(pos.line, pos.col, pos.index, res.position.index)
-            Error.createPanicError(Error.Lexing, span, "Invalid constructor", [Error.Note("internal error: expected string value from constructor reader")])
-          },
+      ch when isAsciiDigit(ch) => {
+        let t0 = if (profiling) { nowNs() } else { 0L }
+        let mut idx = pos.index
+        let mut val = 0
+        while (idx < lenght) {
+          let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
+          if (isAsciiDigit(ch)) {
+            val = val * 10 + (Char.code(ch) - 48)
+            idx += 1
+          } else {
+            break
+          }
+        }
+        let newPos = {
+          index: idx,
+          line: pos.line,
+          col: pos.col + (idx - pos.index),
+        }
+        if (profiling) {
+          let t1 = nowNs()
+          tNumberNs += nsDelta(t0, t1)
+          cNumber += 1
         }
         tokens = [
           makeToken(
@@ -395,15 +536,21 @@ provide let lex = source => {
             pos.line,
             pos.col,
             pos.index,
-            res.position.index,
+            idx,
             None
           ),
           ...tokens
         ]
-        pos = res.position
+        pos = newPos
       },
       '"' => {
+        let t0 = if (profiling) { nowNs() } else { 0L }
         let res = readString(advancePosition(pos, ch))
+        if (profiling) {
+          let t1 = nowNs()
+          tStringNs += nsDelta(t0, t1)
+          cString += 1
+        }
         let str = match (res.value) {
           StringVal(s) => s,
           _ => {
@@ -425,7 +572,13 @@ provide let lex = source => {
         pos = res.position
       },
       '\'' => {
+        let t0 = if (profiling) { nowNs() } else { 0L }
         let res = readChar(advancePosition(pos, ch))
+        if (profiling) {
+          let t1 = nowNs()
+          tCharNs += nsDelta(t0, t1)
+          cChar += 1
+        }
         let chr = match (res.value) {
           CharVal(c) => c,
           _ => {
@@ -447,6 +600,7 @@ provide let lex = source => {
         pos = res.position
       },
       ch => { //Var(ch)
+        let t0 = if (profiling) { nowNs() } else { 0L }
         match (ch) {
           '(' => {
             tokens = [
@@ -805,18 +959,19 @@ provide let lex = source => {
           '/' => {
             match (peek(pos.index + 1)) {
               Some('/') => {
-                let rec skipLine = (p: Position) => {
-                  match (peek(p.index)) {
-                    None => p,
-                    Some('\n') => p,
-                    Some(c) => skipLine(advancePosition(p, c)),
-                  }
-                }
+                let commentStart = if (profiling) { nowNs() } else { 0L }
                 let afterSlashes = advancePosition(
                   advancePosition(pos, ch),
                   '/'
                 )
-                let endPos = skipLine(afterSlashes)
+                let mut endPos = afterSlashes
+                while (endPos.index < lenght) {
+                  let c = Char.fromCode(Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes)))
+                  if (c == '\n') {
+                    break
+                  }
+                  endPos = advancePosition(endPos, c)
+                }
                 let commentText = String.slice(pos.index, end=endPos.index, source)
                 tokens = [
                   makeToken(
@@ -830,6 +985,11 @@ provide let lex = source => {
                   ...tokens
                 ]
                 pos = endPos
+                if (profiling) {
+                  let commentEnd = nowNs()
+                  tCommentNs += nsDelta(commentStart, commentEnd)
+                  cComment += 1
+                }
               },
               _ => {
                 tokens = [
@@ -848,6 +1008,7 @@ provide let lex = source => {
             }
           },
           _ => {
+            let opaqueStart = if (profiling) { nowNs() } else { 0L }
             let startIndex = pos.index
             let mut endPos = pos
             while (true) {
@@ -856,8 +1017,10 @@ provide let lex = source => {
                 None => break,
                 Some('\n') => break,
                 _ => {
-                  let currentChar = String.charAt(endPos.index, source)
-                  endPos = advancePosition(endPos, currentChar)
+                  endPos = advancePosition(
+                    endPos,
+                    Char.fromCode(Uint8.toNumber(Bytes.getUint8(endPos.index, sourceBytes)))
+                  )
                 },
               }
             }
@@ -874,7 +1037,17 @@ provide let lex = source => {
               ...tokens
             ]
             pos = endPos
+            if (profiling) {
+              let opaqueEnd = nowNs()
+              tOpaqueNs += nsDelta(opaqueStart, opaqueEnd)
+              cOpaque += 1
+            }
           },
+        }
+        if (profiling) {
+          let t1 = nowNs()
+          tSymbolNs += nsDelta(t0, t1)
+          cSymbol += 1
         }
       },
     }
@@ -883,5 +1056,75 @@ provide let lex = source => {
     makeToken(EOF, pos.line, pos.col, pos.index, pos.index, None),
     ...tokens
   ]
-  List.reverse(tokens)
+  let out = List.reverse(tokens)
+  if (profiling) {
+    let totalEnd = nowNs()
+    let totalNs = nsDelta(totalStart, totalEnd)
+    print("[LexerTiming] input length: " ++ toString(lenght))
+    print("[LexerTiming] total: " ++ nsToMsString(totalNs) ++ "ms")
+    print(
+      "[LexerTiming] whitespace: "
+        ++ nsToMsString(tWhitespaceNs)
+        ++ "ms (calls="
+        ++ toString(cWhitespace)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] names: "
+        ++ nsToMsString(tNameNs)
+        ++ "ms (tokens="
+        ++ toString(cName)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] numbers: "
+        ++ nsToMsString(tNumberNs)
+        ++ "ms (tokens="
+        ++ toString(cNumber)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] strings: "
+        ++ nsToMsString(tStringNs)
+        ++ "ms (tokens="
+        ++ toString(cString)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] chars: "
+        ++ nsToMsString(tCharNs)
+        ++ "ms (tokens="
+        ++ toString(cChar)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] symbols_total: "
+        ++ nsToMsString(tSymbolNs)
+        ++ "ms (dispatches="
+        ++ toString(cSymbol)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] comments: "
+        ++ nsToMsString(tCommentNs)
+        ++ "ms (tokens="
+        ++ toString(cComment)
+        ++ ")"
+    )
+    print(
+      "[LexerTiming] opaque: "
+        ++ nsToMsString(tOpaqueNs)
+        ++ "ms (tokens="
+        ++ toString(cOpaque)
+        ++ ")"
+    )
+    print("[LexerTiming] token count: " ++ toString(List.length(out)))
+  }
+  out
 }
+
+// lexer without profiling logs
+provide let lex = source => lexInternal(source, false)
+
+// lexer with phase timing logs
+provide let lexProfile = source => lexInternal(source, true)
