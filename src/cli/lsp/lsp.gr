@@ -21,14 +21,6 @@ record Position {
   character: Number,
 }
 
-record MatchPoint {
-  virtOffset: Number,
-  virtLine: Number,
-  virtCol: Number,
-  srcLine: Number,
-  srcCol: Number,
-}
-
 record InsertChunk {
   anchorOffset: Number,
   virtOffset: Number,
@@ -215,6 +207,19 @@ let lastNewlineIndex = (text: String) => {
   last
 }
 
+let countNewlines = (text: String) => {
+  let len = String.length(text)
+  let mut i = 0
+  let mut count = 0
+  while (i < len) {
+    if (String.charAt(i, text) == '\n') {
+      count += 1
+    }
+    i += 1
+  }
+  count
+}
+
 let virtualInsertionsFromDiff = (source: String, virtualText: String) => {
   let srcTokens = List.filter(t => !tokenIsIgnorable(t), Lexer.lex(source))
   let virtTokens = List.filter(
@@ -251,133 +256,140 @@ let virtualInsertionsFromDiff = (source: String, virtualText: String) => {
     i -= 1
   }
 
-  let mut inserts: List<InsertChunk> = []
-  let mut matches: List<MatchPoint> = []
+  let mut matches: List<(Number, Number, Number, Number)> = []
   let mut si = 0
   let mut vi = 0
-  let mut prevMatchEnd = 0
-  let mut currentAnchor: Option<Number> = None
-  let mut currentStart = 0
-  let mut currentEnd = 0
-  let mut currentTrailing = false
-  let mut currentVirtOffset = 0
 
-  let flush = () => {
-    match (currentAnchor) {
-      None => void,
-      Some(anchor) => {
-        if (currentEnd > currentStart) {
-          let text = String.slice(currentStart, end=currentEnd, virtualText)
-          inserts = [
-            {
-              anchorOffset: anchor,
-              virtOffset: currentVirtOffset,
-              text,
-              trailing: currentTrailing,
-            },
-            ...inserts
-          ]
-        }
-        currentAnchor = None
-        currentStart = 0
-        currentEnd = 0
-        currentTrailing = false
-        currentVirtOffset = 0
-      },
-    }
-  }
-
-  while (si < n || vi < m) {
-    if (si < n && vi < m) {
-      let a = Array.get(si, srcArr)
-      let b = Array.get(vi, virtArr)
-      if (tokensEqual(a, b)) {
-        flush()
-        prevMatchEnd = b.span.end
-        let virtLC = Source.offsetToLineCol(virtualText, b.span.start)
-        let srcLC = Source.offsetToLineCol(source, a.span.start)
-        matches = [
-          {
-            virtOffset: b.span.start,
-            virtLine: virtLC.line,
-            virtCol: virtLC.col,
-            srcLine: srcLC.line,
-            srcCol: srcLC.col,
-          },
-          ...matches
-        ]
-        si += 1
-        vi += 1
-      } else {
-        let nextRight = Array.get(idx(si, vi + 1), dp)
-        let nextDown = Array.get(idx(si + 1, vi), dp)
-        if (vi < m && (si == n || nextRight >= nextDown)) {
-          let anchor = if (si < n) {
-            Array.get(si, srcArr).span.start
-          } else {
-            String.length(source)
-          }
-          let trailingFlag = si >= n
-          match (currentAnchor) {
-            Some(a) => if (a == anchor) {
-              currentEnd = b.span.end
-              currentTrailing = currentTrailing || trailingFlag
-            } else {
-              flush()
-              currentAnchor = Some(anchor)
-              currentStart = prevMatchEnd
-              currentEnd = b.span.end
-              currentTrailing = trailingFlag
-              currentVirtOffset = prevMatchEnd
-            },
-            None => {
-              currentAnchor = Some(anchor)
-              currentStart = prevMatchEnd
-              currentEnd = b.span.end
-              currentTrailing = trailingFlag
-              currentVirtOffset = prevMatchEnd
-            },
-          }
-          vi += 1
-        } else {
-          si += 1
-        }
-      }
-    } else if (vi < m) {
-      let b = Array.get(vi, virtArr)
-      let anchor = if (n > 0) {
-        Array.get(n - 1, srcArr).span.end
-      } else {
-        lastNonEmptyLineEndOffset(source)
-      }
-      let trailingFlag = true
-      match (currentAnchor) {
-        Some(a) => if (a == anchor) {
-          currentEnd = b.span.end
-          currentTrailing = currentTrailing || trailingFlag
-        } else {
-          flush()
-          currentAnchor = Some(anchor)
-          currentStart = prevMatchEnd
-          currentEnd = b.span.end
-          currentTrailing = trailingFlag
-          currentVirtOffset = prevMatchEnd
-        },
-        None => {
-          currentAnchor = Some(anchor)
-          currentStart = prevMatchEnd
-          currentEnd = b.span.end
-          currentTrailing = trailingFlag
-          currentVirtOffset = prevMatchEnd
-        },
-      }
+  while (si < n && vi < m) {
+    let a = Array.get(si, srcArr)
+    let b = Array.get(vi, virtArr)
+    if (tokensEqual(a, b)) {
+      matches = [
+        (a.span.start, a.span.end, b.span.start, b.span.end),
+        ...matches
+      ]
+      si += 1
       vi += 1
     } else {
-      break
+      let nextRight = Array.get(idx(si, vi + 1), dp)
+      let nextDown = Array.get(idx(si + 1, vi), dp)
+      if (nextRight >= nextDown) {
+        vi += 1
+      } else {
+        si += 1
+      }
     }
   }
-  flush()
-  (List.reverse(inserts), List.reverse(matches))
+
+  let orderedMatches = List.reverse(matches)
+  let trailingAnchor = lastNonEmptyLineEndOffset(source)
+  let srcLen = String.length(source)
+  let virtLen = String.length(virtualText)
+
+  let emitGapInsertions = (
+    srcStart: Number,
+    srcEnd: Number,
+    virtStart: Number,
+    virtEnd: Number,
+  ) => {
+    if (virtEnd <= virtStart) {
+      []
+    } else {
+      let sourceGap = if (srcEnd > srcStart) {
+        String.slice(srcStart, end=srcEnd, source)
+      } else {
+        ""
+      }
+      let virtGap = String.slice(virtStart, end=virtEnd, virtualText)
+      let srcGapLen = String.length(sourceGap)
+      let virtGapLen = String.length(virtGap)
+      let mut si = 0
+      let mut vi = 0
+      let mut out: List<InsertChunk> = []
+      while (si < srcGapLen && vi < virtGapLen) {
+        let sc = String.charAt(si, sourceGap)
+        let vc = String.charAt(vi, virtGap)
+        if (sc == vc) {
+          si += 1
+          vi += 1
+        } else {
+          let start = vi
+          let mut vj = vi
+          while (vj < virtGapLen && String.charAt(vj, virtGap) != sc) {
+            vj += 1
+          }
+          let text = if (vj > start) {
+            String.slice(start, end=vj, virtGap)
+          } else {
+            ""
+          }
+          if (String.length(text) > 0) {
+            let anchor = srcStart + si
+            let trailingFlag = anchor >= trailingAnchor
+            out = [
+              {
+                anchorOffset: anchor,
+                virtOffset: virtStart + start,
+                text,
+                trailing: trailingFlag,
+              },
+              ...out
+            ]
+          }
+          vi = vj
+          if (vj >= virtGapLen) {
+            vi = virtGapLen
+          }
+        }
+      }
+      if (vi < virtGapLen) {
+        let text = String.slice(vi, end=virtGapLen, virtGap)
+        if (String.length(text) > 0) {
+          let anchor = srcStart + si
+          let trailingFlag = anchor >= trailingAnchor
+          out = [
+            {
+              anchorOffset: anchor,
+              virtOffset: virtStart + vi,
+              text,
+              trailing: trailingFlag,
+            },
+            ...out
+          ]
+        }
+      }
+      List.reverse(out)
+    }
+  }
+
+  let mut inserts: List<InsertChunk> = []
+  let mut prevSrcEnd = 0
+  let mut prevVirtEnd = 0
+  let rec walkMatches = (items: List<(Number, Number, Number, Number)>) =>
+    match (items) {
+      [] => {
+        let tailSrcEnd = if (srcLen > trailingAnchor) {
+          trailingAnchor
+        } else {
+          srcLen
+        }
+        inserts = List.append(
+          inserts,
+          emitGapInsertions(prevSrcEnd, tailSrcEnd, prevVirtEnd, virtLen)
+        )
+      },
+      [(srcStart, srcEnd, virtStart, virtEnd), ...rest] => {
+        inserts = List.append(
+          inserts,
+          emitGapInsertions(prevSrcEnd, srcStart, prevVirtEnd, virtStart)
+        )
+        prevSrcEnd = srcEnd
+        prevVirtEnd = virtEnd
+        walkMatches(rest)
+      },
+    }
+  walkMatches(orderedMatches)
+  inserts
 }
 
 let inlayHintsForSource = (source: String, rangeStart: Number, rangeEnd: Number) => {
@@ -390,7 +402,7 @@ let inlayHintsForSource = (source: String, rangeStart: Number, rangeEnd: Number)
   let virtText = virtualResult.text
   debug("[LSP] virtual text:")
   debug(virtText)
-  let (diffInserts, matchPoints) = virtualInsertionsFromDiff(source, virtText)
+  let diffInserts = virtualInsertionsFromDiff(source, virtText)
   debug("[LSP] diff inserts:")
   let rec dumpInserts = (items: List<InsertChunk>) => match (items) {
     [] => void,
@@ -655,16 +667,7 @@ let inlayHintsForSource = (source: String, rangeStart: Number, rangeEnd: Number)
               )
             )
           )
-          let inlineLead = leadingWhitespaceCount(inlineTextRaw)
-          let inlineText = if (inlineLead > 0) {
-            String.slice(
-              inlineLead,
-              end=String.length(inlineTextRaw),
-              inlineTextRaw
-            )
-          } else {
-            inlineTextRaw
-          }
+          let inlineText = inlineTextRaw
           let trailingText = Array.join(
             "",
             Array.fromList(
@@ -676,38 +679,7 @@ let inlayHintsForSource = (source: String, rangeStart: Number, rangeEnd: Number)
           )
           debug("  inlineText=\"" ++ inlineText ++ "\"")
           debug("  trailingText=\"" ++ trailingText ++ "\"")
-          let mapVirtOffsetToSourcePos = (virtOffset: Number) => {
-            let rec find = (items: List<MatchPoint>) => match (items) {
-              [] => None,
-              [m, ...rest] => if (m.virtOffset <= virtOffset) {
-                Some(m)
-              } else {
-                find(rest)
-              },
-            }
-            match (find(matchPoints)) {
-              None => offsetToPosition(source, offset),
-              Some(m) => {
-                let virtLC = Source.offsetToLineCol(virtText, virtOffset)
-                let lineDelta = virtLC.line - m.virtLine
-                let colDelta = if (lineDelta == 0) {
-                  virtLC.col - m.virtCol
-                } else {
-                  virtLC.col
-                }
-                {
-                  line: m.srcLine - 1 + lineDelta,
-                  character: if (lineDelta == 0) {
-                    m.srcCol + colDelta
-                  } else {
-                    colDelta
-                  },
-                }
-              },
-            }
-          }
-
-          let basePos = mapVirtOffsetToSourcePos(chunk.virtOffset + inlineLead)
+          let basePos = offsetToPosition(source, offset)
           let acc1 = if (
             offset >= rangeStart
             && offset <= rangeEnd
@@ -741,12 +713,17 @@ let inlayHintsForSource = (source: String, rangeStart: Number, rangeEnd: Number)
           }
           let acc2 = if (String.length(trailingText) > 0) {
             let lastNl = lastNewlineIndex(chunk.text)
-            let trailingVirtOffset = if (lastNl >= 0) {
-              chunk.virtOffset + lastNl + 1
+            let pos = if (lastNl >= 0) {
+              let nlCount = countNewlines(
+                String.slice(0, end=lastNl + 1, chunk.text)
+              )
+              {
+                line: basePos.line + nlCount,
+                character: 0,
+              }
             } else {
-              chunk.virtOffset
+              basePos
             }
-            let pos = mapVirtOffsetToSourcePos(trailingVirtOffset)
             debug(
               "[LSP] trailing inlay at line "
                 ++ toString(pos.line)
