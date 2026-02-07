@@ -153,6 +153,9 @@ let lexInternal = (source, profiling: Bool) => {
   let mut tSymbolNs = 0.0
   let mut tCommentNs = 0.0
   let mut tOpaqueNs = 0.0
+  let mut tNameScanNs = 0.0
+  let mut tNameSliceNs = 0.0
+  let mut tNameKindNs = 0.0
   let mut cWhitespace = 0
   let mut cName = 0
   let mut cNumber = 0
@@ -181,6 +184,9 @@ let lexInternal = (source, profiling: Bool) => {
 
   // source length in character offsets used by spans (ASCII => bytes == chars)
   let lenght = sourceByteLen
+
+  let asciiSlice = (start: Number, end_: Number) =>
+    Bytes.toString(Bytes.slice(start, end_ - start, sourceBytes))
 
   let mut parenStack = []
   let mut braceStack = []
@@ -249,6 +255,11 @@ let lexInternal = (source, profiling: Bool) => {
     isAsciiAlpha(ch) || ch == '_'
   }
 
+  let isAsciiDigitN = (n: Number) => n >= 48 && n <= 57
+  let isAsciiAlphaN = (n: Number) =>
+    (n >= 97 && n <= 122) || (n >= 65 && n <= 90)
+  let isNameStartN = (n: Number) => isAsciiAlphaN(n) || n == 95
+
   // check if uppercase
   let isUpper = (ch: Char) => {
     let code = Char.code(ch)
@@ -257,21 +268,16 @@ let lexInternal = (source, profiling: Bool) => {
 
   //read a name to end
   let readName = (startPosition: Position) => {
-    // name cont
-    let isNameContinue = (ch: Char) => {
-      isNameStart(ch) || Char.Ascii.isDigit(ch)
-    }
-
     let mut endIndex = startPosition.index
     while (endIndex < lenght) {
-      let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes)))
-      if (isNameContinue(ch)) {
+      let chNum = Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes))
+      if (isNameStartN(chNum) || isAsciiDigitN(chNum)) {
         endIndex += 1
       } else {
         break
       }
     }
-    let name = String.slice(startPosition.index, end=endIndex, source)
+    let name = asciiSlice(startPosition.index, endIndex)
     {
       value: StringVal(name),
       position: {
@@ -284,17 +290,12 @@ let lexInternal = (source, profiling: Bool) => {
 
   //read a number to end
   let readNumber = (startPosition: Position) => {
-    // number
-    let digitValue = (ch: Char) => {
-      Char.code(ch) - Char.code('0')
-    }
-
     let mut idx = startPosition.index
     let mut acc = 0
     while (idx < lenght) {
-      let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
-      if (Char.Ascii.isDigit(ch)) {
-        acc = acc * 10 + digitValue(ch)
+      let chNum = Uint8.toNumber(Bytes.getUint8(idx, sourceBytes))
+      if (isAsciiDigitN(chNum)) {
+        acc = acc * 10 + (chNum - 48)
         idx += 1
       } else {
         break
@@ -312,62 +313,82 @@ let lexInternal = (source, profiling: Bool) => {
 
   //read string to end
   let readString = (startPosition: Position) => {
-    let rec loop = (currentPos: Position, chunks: List<String>) => {
-      match (peek(currentPos.index)) {
-        Some(ch) => {
-          if (ch == '"') {
-            // end of string
-            let value = Array.join("", Array.fromList(List.reverse(chunks)))
-            { value: StringVal(value), position: advancePosition(currentPos, ch) }
-          } else if (ch == '\\') {
-            // escape sequence
-            match (peek(currentPos.index + 1)) {
-              Some(nextCh) => {
-                let escaped = if (nextCh == '"') {
-                  "\""
-                } else if (nextCh == '\\') {
-                  "\\"
-                } else if (nextCh == 'n') {
-                  "\n"
-                } else if (nextCh == 't') {
-                  "\t"
-                } else if (nextCh == 'r') {
-                  "\r"
-                } else {
-                  String.slice(
-                    currentPos.index + 1,
-                    end=currentPos.index + 2,
-                    source
-                  ) // treat as literal
-                }
-                let newPos = advancePosition(
-                  advancePosition(currentPos, ch),
-                  nextCh
-                )
-                loop(newPos, [escaped, ...chunks])
-              },
-              None => {
-                let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, currentPos.index)
-                Error.createPanicError(Error.Lexing, span, "Unclosed escape sequence in string", [Error.Note("check for matching quotes and valid escape sequences")])
-              },
-            }
-          } else {
-            let charStr = String.slice(
-              currentPos.index,
-              end=currentPos.index + 1,
-              source
-            )
-            let newPos = advancePosition(currentPos, ch)
-            loop(newPos, [charStr, ...chunks])
+    let mut idx = startPosition.index
+    let mut line = startPosition.line
+    let mut col = startPosition.col
+    let mut chunks: List<String> = []
+    let mut done = false
+    let mut outPos = startPosition
+
+    while (idx < lenght && !done) {
+      let b = Uint8.toNumber(Bytes.getUint8(idx, sourceBytes))
+      if (b == 34) { // "
+        outPos = { index: idx + 1, line, col: col + 1 }
+        done = true
+      } else if (b == 92) { // \
+        if (idx + 1 >= lenght) {
+          let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, idx)
+          Error.createPanicError(
+            Error.Lexing,
+            span,
+            "Unclosed escape sequence in string",
+            [Error.Note("check for matching quotes and valid escape sequences")]
+          )
+        }
+        let nextB = Uint8.toNumber(Bytes.getUint8(idx + 1, sourceBytes))
+        let escaped = if (nextB == 34) {
+          "\""
+        } else if (nextB == 92) {
+          "\\"
+        } else if (nextB == 110) {
+          "\n"
+        } else if (nextB == 116) {
+          "\t"
+        } else if (nextB == 114) {
+          "\r"
+        } else {
+          asciiSlice(idx + 1, idx + 2) // treat as literal
+        }
+        chunks = [escaped, ...chunks]
+        idx += 2
+        col += 2
+      } else {
+        let segmentStart = idx
+        let mut segLine = line
+        let mut segCol = col
+        while (idx < lenght) {
+          let x = Uint8.toNumber(Bytes.getUint8(idx, sourceBytes))
+          if (x == 34 || x == 92) {
+            break
           }
-        },
-        None => {
-          let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, currentPos.index)
-          Error.createPanicError(Error.Lexing, span, "Unclosed string literal", [Error.Expected("closing quote")])
-        },
+          idx += 1
+          if (x == 10) {
+            segLine += 1
+            segCol = 1
+          } else {
+            segCol += 1
+          }
+        }
+        chunks = [asciiSlice(segmentStart, idx), ...chunks]
+        line = segLine
+        col = segCol
       }
     }
-    loop(startPosition, [])
+
+    if (done) {
+      {
+        value: StringVal(Array.join("", Array.fromList(List.reverse(chunks)))),
+        position: outPos,
+      }
+    } else {
+      let span = Source.makeSpan(startPosition.line, startPosition.col, startPosition.index, idx)
+      Error.createPanicError(
+        Error.Lexing,
+        span,
+        "Unclosed string literal",
+        [Error.Expected("closing quote")]
+      )
+    }
   }
 
   //read char to end
@@ -431,10 +452,10 @@ let lexInternal = (source, profiling: Bool) => {
       let mut line = pos.line
       let mut col = pos.col
       while (idx < lenght) {
-        let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
-        if (isAsciiWhitespace(ch)) {
+        let chNum = Uint8.toNumber(Bytes.getUint8(idx, sourceBytes))
+        if (chNum == 32 || chNum == 10 || chNum == 13 || chNum == 9) {
           idx += 1
-          if (ch == '\n') {
+          if (chNum == 10) {
             line += 1
             col = 1
           } else {
@@ -453,10 +474,10 @@ let lexInternal = (source, profiling: Bool) => {
       let mut line = pos.line
       let mut col = pos.col
       while (idx < lenght) {
-        let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
-        if (isAsciiWhitespace(ch)) {
+        let chNum = Uint8.toNumber(Bytes.getUint8(idx, sourceBytes))
+        if (chNum == 32 || chNum == 10 || chNum == 13 || chNum == 9) {
           idx += 1
-          if (ch == '\n') {
+          if (chNum == 10) {
             line += 1
             col = 1
           } else {
@@ -469,20 +490,31 @@ let lexInternal = (source, profiling: Bool) => {
       pos = { index: idx, line, col }
     }
     if (pos.index >= lenght) break
-    let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(pos.index, sourceBytes)))
+    let chNum = Uint8.toNumber(Bytes.getUint8(pos.index, sourceBytes))
+    let ch = Char.fromCode(chNum)
     match (ch) {
-      ch when isNameStart(ch) => {
+      _ when isNameStartN(chNum) => {
         let t0 = if (profiling) { nowNs() } else { 0L }
+        let nameScanStart = if (profiling) { nowNs() } else { 0L }
         let mut endIndex = pos.index
         while (endIndex < lenght) {
-          let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes)))
-          if (isNameStart(ch) || isAsciiDigit(ch)) {
+          let nextNum = Uint8.toNumber(Bytes.getUint8(endIndex, sourceBytes))
+          if (isNameStartN(nextNum) || isAsciiDigitN(nextNum)) {
             endIndex += 1
           } else {
             break
           }
         }
-        let ident = String.slice(pos.index, end=endIndex, source)
+        if (profiling) {
+          let nameScanEnd = nowNs()
+          tNameScanNs += nsDelta(nameScanStart, nameScanEnd)
+        }
+        let nameSliceStart = if (profiling) { nowNs() } else { 0L }
+        let ident = asciiSlice(pos.index, endIndex)
+        if (profiling) {
+          let nameSliceEnd = nowNs()
+          tNameSliceNs += nsDelta(nameSliceStart, nameSliceEnd)
+        }
         let newPos = {
           index: endIndex,
           line: pos.line,
@@ -493,7 +525,12 @@ let lexInternal = (source, profiling: Bool) => {
           tNameNs += nsDelta(t0, t1)
           cName += 1
         }
+        let nameKindStart = if (profiling) { nowNs() } else { 0L }
         let kind = tokenKindFromName(ident)
+        if (profiling) {
+          let nameKindEnd = nowNs()
+          tNameKindNs += nsDelta(nameKindStart, nameKindEnd)
+        }
         tokens = [
           makeToken(
             kind,
@@ -507,14 +544,14 @@ let lexInternal = (source, profiling: Bool) => {
         ]
         pos = newPos
       },
-      ch when isAsciiDigit(ch) => {
+      _ when isAsciiDigitN(chNum) => {
         let t0 = if (profiling) { nowNs() } else { 0L }
         let mut idx = pos.index
         let mut val = 0
         while (idx < lenght) {
-          let ch = Char.fromCode(Uint8.toNumber(Bytes.getUint8(idx, sourceBytes)))
-          if (isAsciiDigit(ch)) {
-            val = val * 10 + (Char.code(ch) - 48)
+          let nextNum = Uint8.toNumber(Bytes.getUint8(idx, sourceBytes))
+          if (isAsciiDigitN(nextNum)) {
+            val = val * 10 + (nextNum - 48)
             idx += 1
           } else {
             break
@@ -972,7 +1009,7 @@ let lexInternal = (source, profiling: Bool) => {
                   }
                   endPos = advancePosition(endPos, c)
                 }
-                let commentText = String.slice(pos.index, end=endPos.index, source)
+                let commentText = asciiSlice(pos.index, endPos.index)
                 tokens = [
                   makeToken(
                     LineComment(commentText),
@@ -1024,7 +1061,7 @@ let lexInternal = (source, profiling: Bool) => {
                 },
               }
             }
-            let text = String.slice(startIndex, end=endPos.index, source)
+            let text = asciiSlice(startIndex, endPos.index)
             tokens = [
               makeToken(
                 Opaque(text),
@@ -1076,6 +1113,9 @@ let lexInternal = (source, profiling: Bool) => {
         ++ toString(cName)
         ++ ")"
     )
+    print("[LexerTiming] names/scan: " ++ nsToMsString(tNameScanNs) ++ "ms")
+    print("[LexerTiming] names/slice: " ++ nsToMsString(tNameSliceNs) ++ "ms")
+    print("[LexerTiming] names/kind: " ++ nsToMsString(tNameKindNs) ++ "ms")
     print(
       "[LexerTiming] numbers: "
         ++ nsToMsString(tNumberNs)
