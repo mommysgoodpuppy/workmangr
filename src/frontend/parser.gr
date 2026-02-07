@@ -1267,7 +1267,10 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
         let (_, state2) = expectSimple(Lexer.LBrace, state1)
         let mut fields = []
         let mut currentState = state2
-        while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
+        while (
+          !kindIs(currentToken(currentState).kind, Lexer.RBrace)
+            && !kindIs(currentToken(currentState).kind, Lexer.EOF)
+        ) {
           let before = currentState
           if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
             let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
@@ -1481,7 +1484,10 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
       let (_, state2) = expectSimple(Lexer.DotBrace, state1)
       let mut fields = []
       let mut currentState = state2
-      while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
+      while (
+        !kindIs(currentToken(currentState).kind, Lexer.RBrace)
+          && !kindIs(currentToken(currentState).kind, Lexer.EOF)
+      ) {
         let before = currentState
         if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
           // Skip leading/trailing commas
@@ -2720,7 +2726,9 @@ and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
       }
     },
     _ => {
-      let (id, state1) = freshId(state)
+      // Consume one token on recovery to avoid stalling on malformed patterns.
+      let state0 = dropToken(state)
+      let (id, state1) = freshId(state0)
       let span = tok.span
       let pat: SurfaceAst.Pattern = {
         node: { id, span },
@@ -3004,7 +3012,10 @@ and parseMatch = (state: ParseState) => {
     let (_, state4) = expectSimple(Lexer.LBrace, stateX)
     let mut items: List<SurfaceAst.FnItem> = []
     let mut currentState = state4
-    while (!kindIs(currentToken(currentState).kind, Lexer.RBrace)) {
+    while (
+      !kindIs(currentToken(currentState).kind, Lexer.RBrace)
+        && !kindIs(currentToken(currentState).kind, Lexer.EOF)
+    ) {
       let before = currentState
       let tok = currentToken(currentState)
       let nextTok = currentToken(dropToken(currentState))

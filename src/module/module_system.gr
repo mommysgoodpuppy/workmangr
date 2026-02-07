@@ -195,19 +195,6 @@ let addDiagnostic = (
   diagnosticsById
 }
 
-let isStdModuleId = (moduleId: String, options: BuildOptions) => {
-  let moduleNorm = normalizePath(moduleId)
-  List.some(root => {
-    let rootNorm = normalizePath(String.replaceAll("\\", "/", root))
-    let rootWithSlash = if (hasSuffix(rootNorm, "/")) {
-      rootNorm
-    } else {
-      rootNorm ++ "/"
-    }
-    moduleNorm == rootNorm || String.startsWith(rootWithSlash, moduleNorm)
-  }, options.stdRoots)
-}
-
 let resolveSpecifier = (
   importerPath: String,
   specifier: String,
@@ -403,35 +390,6 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
     _ => {
       Map.set(moduleId, 1, ctx.visitState)
       let ctx1 = { ...ctx, stack: [moduleId, ...ctx.stack] }
-      let hasOverride = match (Map.get(moduleId, ctx1.options.sourceOverrides)) {
-        Some(_) => true,
-        None => false,
-      }
-      if (
-        ctx1.options.skipStdParsing
-        && isStdModuleId(moduleId, ctx1.options)
-        && !hasOverride
-      ) {
-        log(ctx1.options, "parse skipped module=" ++ moduleId ++ " reason=std_module")
-        Map.set(moduleId, 2, ctx1.visitState)
-        let fallbackProgram: SurfaceAst.Program = { items: [], core: false }
-        let node: ModuleNode = {
-          id: moduleId,
-          sourcePath: moduleId,
-          imports: [],
-          reexports: [],
-          program: fallbackProgram,
-          diagnostics: getModuleDiagnostics(moduleId, ctx1.diagnosticsById),
-          status: StatusOk,
-        }
-        Map.set(moduleId, node, ctx1.nodes)
-        let stackTail = match (ctx1.stack) {
-          [_head, ...tail] => tail,
-          [] => [],
-        }
-        log(ctx1.options, "visit end module=" ++ moduleId ++ " status=skipped_std")
-        { ...ctx1, stack: stackTail, topoRev: [moduleId, ...ctx1.topoRev] }
-      } else {
       log(ctx.options, "parse start module=" ++ moduleId)
       let parseResult = match (readSource(moduleId, ctx1.options)) {
         Ok(source) => {
@@ -544,7 +502,6 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
           )
           { ...ctx2, stack: stackTail, topoRev: [moduleId, ...ctx2.topoRev] }
         },
-      }
       }
     },
   }
