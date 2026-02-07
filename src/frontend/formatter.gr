@@ -1921,6 +1921,36 @@ let tokenIsIgnoredForSemis = (tok: Lexer.Token) => match (tok.kind) {
 }
 
 let semicolonAdditionsFromRendered = (source: String, renderedText: String) => {
+  let brokenSpans = opaqueSpansForModeRaw(source, Real)
+  let offsetInBroken = (offset: Number) => {
+    let rec loop = (items: List<OpaqueSpan>) => match (items) {
+      [] => false,
+      [span, ...rest] => if (offset >= span.sourceStart && offset < span.sourceEnd) {
+        true
+      } else {
+        loop(rest)
+      },
+    }
+    loop(brokenSpans)
+  }
+  let anchorBlocked = (offset: Number) => {
+    let rec loop = (items: List<OpaqueSpan>) => match (items) {
+      [] => false,
+      [span, ...rest] => if (offset >= span.sourceStart && offset <= span.sourceEnd) {
+        true
+      } else {
+        loop(rest)
+      },
+    }
+    loop(brokenSpans)
+  }
+  let tokenTouchesBroken = (tok: Lexer.Token) => {
+    if (tok.span.end <= tok.span.start) {
+      offsetInBroken(tok.span.start)
+    } else {
+      offsetInBroken(tok.span.start) || offsetInBroken(tok.span.end - 1)
+    }
+  }
   let sourceTokens = Array.fromList(
     List.filter(tok => !tokenIsIgnoredForSemis(tok), Lexer.lex(source))
   )
@@ -1936,7 +1966,10 @@ let semicolonAdditionsFromRendered = (source: String, renderedText: String) => {
   while (si < sourceLen && ri < renderedLen) {
     let src = Array.get(si, sourceTokens)
     let rnd = Array.get(ri, renderedTokens)
-    if (src.kind == rnd.kind) {
+    if (tokenTouchesBroken(src)) {
+      prevSourceEnd = src.span.end
+      si += 1
+    } else if (src.kind == rnd.kind) {
       prevSourceEnd = src.span.end
       si += 1
       ri += 1
@@ -1960,37 +1993,20 @@ let semicolonAdditionsFromRendered = (source: String, renderedText: String) => {
         let count = ri - runStart
         let mut n = 0
         while (n < count) {
-          out = [{ anchorOffset: prevSourceEnd, text: ";" }, ...out]
+          if (!anchorBlocked(prevSourceEnd)) {
+            out = [{ anchorOffset: prevSourceEnd, text: ";" }, ...out]
+          }
           n += 1
         }
       }
     } else {
-      let canDropRendered = if (ri + 1 < renderedLen) {
-        let nextRendered = Array.get(ri + 1, renderedTokens)
-        nextRendered.kind == src.kind
-      } else {
-        false
-      }
-      let canAdvanceSource = if (si + 1 < sourceLen) {
-        let nextSource = Array.get(si + 1, sourceTokens)
-        rnd.kind == nextSource.kind
-      } else {
-        false
-      }
-      if (canDropRendered) {
-        ri += 1
-      } else if (canAdvanceSource) {
-        prevSourceEnd = src.span.end
-        si += 1
-      } else {
-        ri += 1
-      }
+      ri += 1
     }
   }
   if (si >= sourceLen) {
     while (ri < renderedLen) {
       let tok = Array.get(ri, renderedTokens)
-      if (tok.kind == Lexer.SemiColon) {
+      if (tok.kind == Lexer.SemiColon && !anchorBlocked(prevSourceEnd)) {
         out = [{ anchorOffset: prevSourceEnd, text: ";" }, ...out]
       }
       ri += 1

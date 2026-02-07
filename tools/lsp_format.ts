@@ -144,16 +144,16 @@ const positionToOffset = (text: string, line: number, character: number) => {
 };
 
 let updated = source;
-const sorted = edits.slice().sort((a: any, b: any) => {
-  const aStart = positionToOffset(source, a.range.start.line, a.range.start.character);
-  const bStart = positionToOffset(source, b.range.start.line, b.range.start.character);
-  return bStart - aStart;
-});
+const sorted = edits
+  .map((edit: any) => ({
+    ...edit,
+    __start: positionToOffset(source, edit.range.start.line, edit.range.start.character),
+    __end: positionToOffset(source, edit.range.end.line, edit.range.end.character),
+  }))
+  .sort((a: any, b: any) => b.__start - a.__start);
 
 for (const edit of sorted) {
-  const start = positionToOffset(updated, edit.range.start.line, edit.range.start.character);
-  const end = positionToOffset(updated, edit.range.end.line, edit.range.end.character);
-  updated = updated.slice(0, start) + edit.newText + updated.slice(end);
+  updated = updated.slice(0, edit.__start) + edit.newText + updated.slice(edit.__end);
 }
 
 console.log("[LSP] formatted text:");
