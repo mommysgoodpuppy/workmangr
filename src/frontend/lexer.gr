@@ -8,7 +8,6 @@ from "list" include List
 from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
 from "../util.gr" include Util
-use Util.{ testStr }
 
 from "../core/source.gr" include Source
 from "../core/error.gr" include Error
@@ -886,5 +885,3 @@ provide let lex = source => {
   ]
   List.reverse(tokens)
 }
-
-// print(lex(testStr))

@@ -17,6 +17,7 @@ use Util.{ testStr }
 
 provide record ParseResult {
   program: SurfaceAst.Program,
+  tokens: List<Lexer.Token>,
 }
 
 record ParseState {
@@ -2792,7 +2793,7 @@ let parseWithRecovery = (source: String) => {
   let initial: ParseState = { tokens, nextId: 1, allTokens: tokens }
   let (topLevels, _finalState) = parseTopLevels(initial)
   let program: SurfaceAst.Program = { items: topLevels, core: false }
-  { program, }
+  { program, tokens }
 }
 
 provide let parseResult = (source: String) => parseWithRecovery(source)
