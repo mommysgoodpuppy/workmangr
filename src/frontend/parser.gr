@@ -755,6 +755,7 @@ let blockItemsToBody = (
             }
           },
           SurfaceAst.Semicolon |
+          SurfaceAst.Comma |
           SurfaceAst.MarkItem(_) |
           SurfaceAst.TriviaItem(_) |
           SurfaceAst.Directive(_) => (nextOpt, state1),
@@ -999,7 +1000,8 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
     SurfaceAst.MarkItem(mark) => mark.node.span,
     SurfaceAst.TriviaItem(trivia) => trivia.node.span,
     SurfaceAst.Directive(directive) => directive.name.node.span,
-    SurfaceAst.Semicolon => lbraceTok.span,
+    SurfaceAst.Semicolon |
+    SurfaceAst.Comma => lbraceTok.span,
   }
   let anchorSpan = match (List.head(List.reverse(items))) {
     Some(item) => blockItemSpan(item),
@@ -1972,22 +1974,44 @@ and parseBlockItems = (state: ParseState) => {
     let makeMissingSemicolonItem = (stateX: ParseState, anchorSpan: Source.Span) => {
       let atTok = currentToken(stateX)
       let (id, state1) = freshId(stateX)
-      let mark: SurfaceAst.Mark = {
-        node: { id, span: atTok.span },
-        kind: SurfaceAst.MissingSemicolon,
-        expected: SurfaceAst.ExpectToken,
+      match (atTok.kind) {
+        Lexer.Comma => {
+          let mark: SurfaceAst.Mark = {
+            node: { id, span: atTok.span },
+            kind: SurfaceAst.UnexpectedToken(","),
+            expected: SurfaceAst.ExpectToken,
+          }
+          let item: SurfaceAst.BlockItem = Error.createMarkedError(
+            Error.Parsing,
+            mark,
+            "Unexpected ',' after statement; expected ';'",
+            SurfaceAst.MarkItem(mark),
+            clues=[
+              Error.Expected(";"),
+              Error.Received(","),
+            ]
+          )
+          (item, state1)
+        },
+        _ => {
+          let mark: SurfaceAst.Mark = {
+            node: { id, span: atTok.span },
+            kind: SurfaceAst.MissingSemicolon,
+            expected: SurfaceAst.ExpectToken,
+          }
+          let item: SurfaceAst.BlockItem = Error.createMarkedError(
+            Error.Parsing,
+            mark,
+            "Expected ';' after statement",
+            SurfaceAst.MarkItem(mark),
+            clues=[
+              Error.Expected(";"),
+              Error.Received(Lexer.tokenKindToString(atTok.kind)),
+            ]
+          )
+          (item, state1)
+        },
       }
-      let item: SurfaceAst.BlockItem = Error.createMarkedError(
-        Error.Parsing,
-        mark,
-        "Expected ';' after statement",
-        SurfaceAst.MarkItem(mark),
-        clues=[
-          Error.Expected(";"),
-          Error.Received(Lexer.tokenKindToString(atTok.kind)),
-        ]
-      )
-      (item, state1)
     }
 
     let tok = currentToken(state)
@@ -1995,7 +2019,12 @@ and parseBlockItems = (state: ParseState) => {
       Lexer.RBrace => ([], state),
       Lexer.EOF => ([], state),
       Lexer.SemiColon => parseBlockItems(dropToken(state)),
-      Lexer.Comma => parseBlockItems(dropToken(state)),
+      Lexer.Comma => {
+        let state1 = dropToken(state)
+        let item = SurfaceAst.Comma
+        let (restItems, state2) = parseBlockItems(state1)
+        ([item, ...restItems], state2)
+      },
       Lexer.LineComment(text) => {
         let state1 = dropToken(state)
         let (id, state2) = freshId(state1)

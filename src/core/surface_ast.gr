@@ -153,6 +153,7 @@ and provide enum BlockItem {
   LetItem(LetBinding),
   DeclGroup(DeclGroup),
   Semicolon,
+  Comma,
   MarkItem(Mark),
   TriviaItem(Trivia), // includes comments AND islands
   Directive(Directive),

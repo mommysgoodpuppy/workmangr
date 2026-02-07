@@ -298,6 +298,7 @@ let renderWithSettings = (
           _ => false,
         },
         SurfaceAst.Semicolon => false,
+        SurfaceAst.Comma => false,
         _ => false,
       }
       hasHole || anyBlockItems(xs)
@@ -1131,6 +1132,7 @@ let renderWithSettings = (
             SurfaceAst.TriviaItem(_) |
             SurfaceAst.Directive(_) |
             SurfaceAst.Semicolon => true,
+            SurfaceAst.Comma => true,
             SurfaceAst.MarkItem(_) => hasNextConcrete(rest),
           },
         }
@@ -1202,6 +1204,10 @@ let renderWithSettings = (
               },
               SurfaceAst.Semicolon => {
                 write(";")
+                emitItems(tail, prevStmt)
+              },
+              SurfaceAst.Comma => {
+                write(",")
                 emitItems(tail, prevStmt)
               },
               SurfaceAst.MarkItem(mark) => {
