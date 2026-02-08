@@ -1,0 +1,12 @@
+module LexerTiming
+
+from "../src/util.gr" include Util
+from "../src/frontend/lexer.gr" include Lexer
+
+let main = () => {
+  let _ = Lexer.lexProfile(Util.testStrLong)
+  void
+}
+
+main()
+

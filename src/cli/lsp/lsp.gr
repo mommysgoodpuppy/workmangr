@@ -526,20 +526,38 @@ let handleInlayHint = (
     None => None,
   }
   match (uriOpt) {
-    None => sendResponse(idText, "[]"),
+    None => {
+      logErr("[LSP inlay] hint request missing uri")
+      sendResponse(idText, "[]")
+    },
     Some(uri) => {
       let version = documentVersion(uri)
+      logErr("[LSP inlay] hint uri=" ++ uri ++ " v" ++ toString(version))
       match (Map.get(uri, inlayCachedVersion)) {
         Some(v) when v == version => {
           match (Map.get(uri, inlayCache)) {
-            Some(cached) => sendResponse(idText, cached),
-            None => sendResponse(idText, "[]"),
+            Some(cached) => {
+              logErr(
+                "[LSP inlay] cache hit uri=" ++ uri ++ " v" ++ toString(version)
+              )
+              sendResponse(idText, cached)
+            },
+            None => {
+              logErr("[LSP inlay] cache hit but empty uri=" ++ uri)
+              sendResponse(idText, "[]")
+            },
           }
         },
         _ => {
           match (Map.get(uri, docs)) {
-            None => sendResponse(idText, "[]"),
+            None => {
+              logErr("[LSP inlay] doc not open uri=" ++ uri)
+              sendResponse(idText, "[]")
+            },
             Some(source) => {
+              logErr(
+                "[LSP inlay] computing uri=" ++ uri ++ " v" ++ toString(version)
+              )
               let hintsJson = computeInlayHints(uri, source, version)
               sendResponse(idText, hintsJson)
             },
@@ -778,6 +796,14 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/inlayHint") {
+        logErr(
+          "[LSP] inlayHint request isInlayWorker="
+            ++ (if (isInlayWorker) {
+              "true"
+            } else {
+              "false"
+            })
+        )
         if (isInlayWorker) {
           match (idOpt) {
             Some(idJson) => match (jsonGetObject("params", msgJson)) {

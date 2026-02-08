@@ -456,7 +456,7 @@ let lowerDecl = (d: SurfaceAst.Decl) => match (d) {
         typeParams: List.map(lowerName, td.typeParams),
         body: match (td.body) {
           SurfaceAst.Alias(t) => CoreAst.Alias(lowerTypeExpr(t)),
-          SurfaceAst.Variant(cases) =>
+          SurfaceAst.Variant(cases, _) =>
             CoreAst.Variant(
               List.map(
                 ((name, payload, annotation)) =>

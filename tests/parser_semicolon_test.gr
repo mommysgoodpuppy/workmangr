@@ -38,11 +38,9 @@ test("parser semicolon mark smoke", () => {
         _ => false,
       },
     },
-    marked,
+    marked
   )
-  assertTrue(
-    hasMissingTopLevelSemi,
-  )
+  assertTrue(hasMissingTopLevelSemi)
 })
 
 test("parser folds block body into let", () => {
@@ -55,7 +53,10 @@ test("parser folds block body into let", () => {
           SurfaceAst.Block(block) => match (block.body.kind) {
             SurfaceAst.Let(letBinding, letBody) =>
               match ((letBinding.value.kind, letBody.kind)) {
-                (SurfaceAst.Lit(SurfaceAst.Int(1)), SurfaceAst.Ident({ _, text })) when text == "y" => true,
+                (
+                  SurfaceAst.Lit(SurfaceAst.Int(1)),
+                  SurfaceAst.Ident({ text, _ }),
+                ) when text == "y" => true,
                 _ => false,
               },
             _ => false,
@@ -78,14 +79,13 @@ test("parser treats top-level semicolon as sequencing in let RHS", () => {
     [SurfaceAst.DeclGroup(dg)] => match (dg.decls) {
       [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
         [binding] => match (binding.value.kind) {
-          SurfaceAst.Seq(items) =>
-            match (items) {
-              [
-                { kind: SurfaceAst.Lit(SurfaceAst.Int(1)), _ },
-                { kind: SurfaceAst.Lit(SurfaceAst.Int(2)), _ },
-              ] => true,
-              _ => false,
-            },
+          SurfaceAst.Seq(items) => match (items) {
+            [
+              { kind: SurfaceAst.Lit(SurfaceAst.Int(1)), _ },
+              { kind: SurfaceAst.Lit(SurfaceAst.Int(2)), _ },
+            ] => true,
+            _ => false,
+          },
           _ => false,
         },
         _ => false,
@@ -99,8 +99,7 @@ test("parser treats top-level semicolon as sequencing in let RHS", () => {
 
 test("parser supports generic record declarations and type arguments", () => {
   clearErrors()
-  let source =
-    "record Helper<T> = { trues: List<T>, falses: List<T> };"
+  let source = "record Helper<T> = { trues: List<T>, falses: List<T> };"
   let parsed = Parser.parse(source)
 
   let shapeOk = match (parsed.items) {
@@ -109,18 +108,17 @@ test("parser supports generic record declarations and type arguments", () => {
         let hasOneTypeParam = List.length(recordDecl.typeParams) == 1
         let fieldTypesLookGeneric = List.reduce(
           (acc: Bool, entry: (SurfaceAst.Name, SurfaceAst.TypeExpr)) =>
-            acc
-              && match (entry) {
-                (_, ty) => match (ty.kind) {
-                  SurfaceAst.Ref(_, [arg]) => match (arg.kind) {
-                    SurfaceAst.Ref(_, []) => true,
-                    _ => false,
-                  },
+            acc && match (entry) {
+              (_, ty) => match (ty.kind) {
+                SurfaceAst.Ref(_, [arg]) => match (arg.kind) {
+                  SurfaceAst.Ref(_, []) => true,
                   _ => false,
                 },
+                _ => false,
               },
+            },
           true,
-          recordDecl.fields,
+          recordDecl.fields
         )
         hasOneTypeParam && fieldTypesLookGeneric
       },
@@ -141,17 +139,19 @@ test("parser supports if condition with equality comparison", () => {
   assertFalse(hasErrors)
 })
 
-test("parser supports multiline functional call arguments with multiplication", () => {
-  clearErrors()
-  let source =
-    "let x = makeStep(\n"
+test(
+  "parser supports multiline functional call arguments with multiplication",
+  () => {
+    clearErrors()
+    let source = "let x = makeStep(\n"
       ++ "  leftStep.value * rightStep.value,\n"
       ++ "  expectCharAt(chars, rightStep.next, charCloseParen, ExpectedCloseParen)\n"
       ++ ");"
-  let _ = Parser.parseResult(source)
-  let hasErrors = List.length(getMarkedErrors()) > 0
-  assertFalse(hasErrors)
-})
+    let _ = Parser.parseResult(source)
+    let hasErrors = List.length(getMarkedErrors()) > 0
+    assertFalse(hasErrors)
+  }
+)
 
 test("parser supports exported generic variant type aliases", () => {
   clearErrors()
@@ -170,9 +170,11 @@ test("parser supports exported generic variant type aliases", () => {
       } else {
         match (group.decls) {
           [SurfaceAst.TypeDecl(typeDecl)] => match (typeDecl.body) {
-            SurfaceAst.Variant(cases) => match (cases) {
-              [({ text: "Some", _ }, Some(payload), _), ({ text: "None", _ }, None, _)] =>
-                isGenericParamType(payload),
+            SurfaceAst.Variant(cases, _) => match (cases) {
+              [
+                ({ text: "Some", _ }, Some(payload), _),
+                ({ text: "None", _ }, None, _),
+              ] => isGenericParamType(payload),
               _ => false,
             },
             _ => false,

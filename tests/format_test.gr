@@ -5,7 +5,10 @@ use Test.*
 
 from "../src/util.gr" include Util
 from "../src/frontend/formatter.gr" include Formatter
+from "../src/core/error.gr" include Error
+from "../src/core/surface_ast.gr" include SurfaceAst
 from "string" include String
+from "list" include List
 
 setSourceFile("./tests/format_test.gr")
 
@@ -17,13 +20,61 @@ let canonicalNonWs = (text: String) => {
 }
 
 test("formatting is stable on a small program", () => {
-  let source =
-    "
+  let source = "
 let x = (y) => { match(y) { y => { 1 } } };
 "
   let formatted1 = Formatter.format(source)
   let formatted2 = Formatter.format(formatted1)
   assertEquals(formatted1, formatted2)
+})
+
+test("formatting ocaml type", () => {
+  let source =
+    "
+type ParseResult =
+  | NotMul
+  | ExpectedDigit
+  | ExpectedComma
+  | ExpectedCloseParen;
+"
+  Error.clearErrors()
+  let formatted = Formatter.formatWithMode(source, Formatter.RealFix)
+  let marks = Error.getMarkedErrors()
+  assertEquals(canonicalNonWs(source), canonicalNonWs(formatted))
+  assertEquals(marks, [])
+})
+
+test("formatting ts union", () => {
+  let source =
+    "
+type ParseResult = NotMul
+  | ExpectedDigit
+  | ExpectedComma
+  | ExpectedCloseParen;
+"
+  Error.clearErrors()
+  let formatted = Formatter.formatWithMode(source, Formatter.RealFix)
+  let marks = Error.getMarkedErrors()
+  assertEquals(canonicalNonWs(source), canonicalNonWs(formatted))
+  assertEquals(marks, [])
+})
+
+test("formatter produces mark on broken input", () => {
+  let source = "
+record broekn = .{ value: Int, next: Int };
+"
+  Error.clearErrors()
+  let formatted = Formatter.formatWithMode(source, Formatter.RealFix)
+  let marks = Error.getMarkedErrors()
+  let fmtMarks = List.filter(
+    (m: Error.MarkedError) => match (m.mark.kind) {
+      SurfaceAst.FormattingMismatch(_) => true,
+      _ => false,
+    },
+    marks
+  )
+  assertEquals(canonicalNonWs(source), canonicalNonWs(formatted))
+  assertTrue(List.length(fmtMarks) > 0)
 })
 
 test("formatting roundtrips util.testStr", () => {
@@ -38,8 +89,7 @@ test("real formatter preserves non-whitespace tokens on util.testStr", () => {
 })
 
 test("fix mode doesnt insert semicolon in broken case", () => {
-    let source =
-    "
+  let source = "
 let= 25
 and= 
 
@@ -48,8 +98,7 @@ let= {
   and= 6
 "
 
-  let fixExpected =
-    "
+  let fixExpected = "
 let= 25
 and= 
 
@@ -57,7 +106,7 @@ let= {
   let= 25
   and= 6
 "
-  
+
   let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
   assertEquals(canonicalNonWs(fixExpected), canonicalNonWs(fixOut))
 })
@@ -90,8 +139,7 @@ let x = 1;
 })
 
 test("formatter real handles incomplete example", () => {
-  let source =
-    "
+  let source = "
 let main = => {
   let x =
 "
@@ -100,8 +148,7 @@ let main = => {
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 
   //step2
-  let source =
-    "
+  let source = "
 let incompl
 "
 
@@ -110,8 +157,7 @@ let incompl
 })
 
 test("preserve trivia", () => {
-  let source =
-    "
+  let source = "
 let main = => {
   let x =
 
@@ -121,10 +167,8 @@ let main = => {
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 
-
   //step2
-  let source =
-    "
+  let source = "
 let incompl
 
 // comment
@@ -133,7 +177,6 @@ let incompl
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 })
-
 
 test("formatter real handles opaque trivia", () => {
   let source =
@@ -190,17 +233,13 @@ let x =
 "
 
   let outVirtual = Formatter.formatWithMode(source, Formatter.Virtual)
-  let outFix = Formatter.formatWithMode(source, Formatter.RealFix
-  )
+  let outFix = Formatter.formatWithMode(source, Formatter.RealFix)
   assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(outVirtual))
   assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(outFix))
-
 })
 
-
 test("formatter modes handle missing semicolon and brace", () => {
-  let source =
-    "
+  let source = "
 let main = => {
   let x = 
 "
@@ -211,8 +250,7 @@ let main = => {
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
   assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
 
-  let expectedVirtual =
-    "
+  let expectedVirtual = "
 let main = () => {
   let x = ?
 };
@@ -221,44 +259,44 @@ let main = () => {
 })
 
 test("formatter handles broken record decl", () => {
-  let source =
-    "
+  let source = "
 let start: Location = .{ x= 0, y= 0 };
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
   let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
-  let expectedVirtual =
-    "
+  let expectedVirtual = "
 let start : Location = .{ x = 0, y = 0 };
 "
-  all([
-    assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
-    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(fixOut)),
-    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut)),
-  ])
+  all(
+    [
+      assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
+      assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(fixOut)),
+      assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut)),
+    ]
+  )
 })
 
 test("formatter modes handle missing semicolon and brace 2", () => {
-  let source =
-    "
+  let source = "
 let main = => {
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
   let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
-  let expectedVirtual =
-    "
+  let expectedVirtual = "
 let main = () => {
 };
-" 
-  all([
-    assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
-    assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
-    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
-  ])
+"
+  all(
+    [
+      assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
+      assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut)),
+      assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut)),
+    ]
+  )
 })
 
 test("format virtual difficult", () => {
@@ -284,7 +322,6 @@ and
   let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
   let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
-
   let expectedFix =
     "
 let
@@ -302,7 +339,7 @@ let
 and
 =
 67
-" 
+"
 
   let expectedVirtual =
     "
@@ -313,17 +350,19 @@ let _ = {
   let _ = 25
   and _ = 67
 };
-" 
-  all([
-    assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
-    assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(fixOut)),
-    assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
-  ])
+"
+  all(
+    [
+      assertEquals(canonicalNonWs(source), canonicalNonWs(realOut)),
+      assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(fixOut)),
+      assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut)),
+    ]
+  )
 })
 
 test("formatter fix aoc", () => {
-
-  let source ="
+  let source =
+    "
 let input = \"L1, R3, R1, L5, L2, L5\";
 
 export type GenericError =
@@ -423,7 +462,8 @@ print(process(input));
 let x = 1
 "
 
-let target = "
+  let target =
+    "
 let input = \"L1, R3, R1, L5, L2, L5\";
 
 
@@ -541,13 +581,11 @@ let x = 1;"
 
   let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
 
-
   assertEquals(canonicalNonWs(target), canonicalNonWs(fixOut))
 })
 
 test("formatter modes mode handles incomplete top level statement", () => {
-  let source =
-    "
+  let source = "
 let x = 
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
@@ -557,16 +595,14 @@ let x =
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
   assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
 
-  let expectedVirtual =
-    "
+  let expectedVirtual = "
 let x = ?;
 "
   assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
 })
 
 test("formatter modes mode handles incomplete top level statement2", () => {
-  let source =
-    "
+  let source = "
 let x = x
 "
   let realOut = Formatter.formatWithMode(source, Formatter.Real)
@@ -575,18 +611,15 @@ let x = x
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 
-  let expected =
-    "
+  let expected = "
 let x = x;
 "
   assertEquals(canonicalNonWs(expected), canonicalNonWs(fixOut))
   assertEquals(canonicalNonWs(expected), canonicalNonWs(virtualOut))
 })
 
-
 test("fix mode inserts decidable semicolons", () => {
-  let source =
-    "
+  let source = "
 let main = => {
   let x = 1
   let y = 2
@@ -597,8 +630,7 @@ let main = => {
 
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 
-  let expectedFix =
-    "
+  let expectedFix = "
 let main = => {
   let x = 1;
   let y = 2
@@ -625,8 +657,6 @@ export type GenericError =
   assertEquals(canonicalNonWs(source), canonicalNonWs(fixOut))
   assertEquals(canonicalNonWs(source), canonicalNonWs(virtualOut))
 })
-
-
 
 let results = runTests()
 printResultsAndExit(results)

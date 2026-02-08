@@ -261,7 +261,7 @@ and provide record TypeDecl {
 and provide type Annotation = String
 and provide enum TypeDeclBody {
   Alias(TypeExpr),
-  Variant(List<(Name, Option<TypeExpr>, Option<Annotation>)>), // enum-like
+  Variant(List<(Name, Option<TypeExpr>, Option<Annotation>)>, Bool), // enum-like, hasLeadingPipe
 }
 and provide record RecordDecl {
   node: Node,
@@ -284,7 +284,6 @@ and provide record PrefixDecl {
   node: Node,
   name: Name,
 }
-
 and provide record ImportDecl {
   node: Node,
   modulePath: String,

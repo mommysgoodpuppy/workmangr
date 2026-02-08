@@ -783,16 +783,24 @@ let renderWithSettingsWithTokens = (
         space()
         emitTypeExpr(typeExpr)
       },
-      SurfaceAst.Variant(cases) => {
+      SurfaceAst.Variant(cases, hasLeadingPipe) => {
         space()
         write("=")
         space()
         match (cases) {
           [] => void,
           [single] => {
+            if (hasLeadingPipe) {
+              write("|")
+              space()
+            }
             emitTypeConstructor(single)
           },
           [first, ...tail] => {
+            if (hasLeadingPipe) {
+              write("|")
+              space()
+            }
             emitTypeConstructor(first)
             let rec emitTail = (
               rest: List<
@@ -1657,7 +1665,7 @@ let renderWithSettingsWithTokens = (
 
   let typeDeclIsDecidable = (decl: SurfaceAst.TypeDecl) => match (decl.body) {
     SurfaceAst.Alias(ty) => !typeHasHole(ty),
-    SurfaceAst.Variant(cases) => {
+    SurfaceAst.Variant(cases, _) => {
       let rec anyCaseHole = (
         items: List<
           (

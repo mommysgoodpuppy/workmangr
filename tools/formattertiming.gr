@@ -1,0 +1,51 @@
+module FormatterTiming
+
+from "../src/util.gr" include Util
+from "../src/frontend/formatter.gr" include Formatter
+from "../src/frontend/lexer.gr" include Lexer
+from "../src/frontend/parser.gr" include Parser
+from "list" include List
+from "string" include String
+from "wasi/time" include Time
+from "int64" include Int64
+from "float64" include Float64
+
+let nowNs = () =>
+  match (Time.monotonicTime()) {
+    Ok(t) => t,
+    Err(_) => 0L,
+  }
+
+let toMs = (startNs: Int64, endNs: Int64) =>
+  Float64.fromNumber((Int64.toNumber(endNs) - Int64.toNumber(startNs)) / 1000000)
+
+let main = () => {
+  print("[FormatterTiming] input length: " ++ toString(String.length(Util.testStrLong)))
+
+  let lexStart = nowNs()
+  let lexed = Lexer.lex(Util.testStrLong)
+  let lexEnd = nowNs()
+  print(
+    "[FormatterTiming] lexer_only: "
+      ++ toString(toMs(lexStart, lexEnd))
+      ++ "ms (tokens="
+      ++ toString(List.length(lexed))
+      ++ ")"
+  )
+
+  let parseStart = nowNs()
+  let parsed = Parser.parseResult(Util.testStrLong)
+  let parseEnd = nowNs()
+  print(
+    "[FormatterTiming] parse_result_total: "
+      ++ toString(toMs(parseStart, parseEnd))
+      ++ "ms (tokens="
+      ++ toString(List.length(parsed.tokens))
+      ++ ")"
+  )
+
+  let out = Formatter.profileRealFix(Util.testStrLong)
+  print("[FormatterTiming] output length: " ++ toString(String.length(out)))
+}
+
+main()

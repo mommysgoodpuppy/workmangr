@@ -2237,8 +2237,9 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
           (List.reverse(nextItems), stateY3)
         }
       }
+      let hadLeadingPipe = kindIs(tok.kind, Lexer.Pipe)
       let (cases, stateAfter) = parseConstructors([], stateAfterPipe)
-      (SurfaceAst.Variant(cases), stateAfter)
+      (SurfaceAst.Variant(cases, hadLeadingPipe), stateAfter)
     } else {
       // Check if the first token after = is a @value/@effect annotation
       let (firstAnnotOpt, stateBeforeFirst) = if (
@@ -2336,7 +2337,7 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
               }
             }
             let (restCases, stateAfter) = parseRest([firstCase], statePipe)
-            (SurfaceAst.Variant(restCases), stateAfter)
+            (SurfaceAst.Variant(restCases, false), stateAfter)
           },
           _ => {
             lastSpan = firstTy.node.span
