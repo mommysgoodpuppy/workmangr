@@ -178,6 +178,27 @@ let incompl
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 })
 
+test("format edge case match", () => {
+  let source = "
+let x = => { 
+match y {
+1 => \"true\"
+2 => \"false\"
+} 
+"
+let expected =
+"
+let x = () => { 
+match (y) {
+  1 => {\"true\"},
+  2 => {\"false\"}
+};
+"
+
+  let vout = Formatter.formatWithMode(source, Formatter.Virtual)
+  assertEquals(canonicalNonWs(expected), canonicalNonWs(vout))
+})
+
 test("formatter real handles opaque trivia", () => {
   let source =
     "

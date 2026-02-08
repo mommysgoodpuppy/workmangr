@@ -1,0 +1,14 @@
+module Subst
+
+from "./types.gr" include Types
+
+provide type Subst = Types.Subst
+
+provide let empty = Types.emptySubst
+provide let applyType = Types.applySubstType
+provide let applyScheme = Types.applySubstScheme
+provide let applyEnv = Types.applySubstEnv
+provide let generalize = Types.generalize
+provide let instantiate = Types.instantiate
+provide let containsVar = Types.containsVar
+provide let freeVars = Types.freeVars

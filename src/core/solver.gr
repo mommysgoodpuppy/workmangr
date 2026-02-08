@@ -1,0 +1,103 @@
+module Solver
+
+from "list" include List
+from "map" include Map
+
+from "./types.gr" include Types
+from "./constraints.gr" include Constraints
+
+provide type Subst = Types.Subst
+
+provide record SolverState {
+  subst: Subst,
+  constraints: List<Constraints.Constraint>,
+}
+
+provide enum SolveError {
+  Occurs(Constraints.Origin),
+  CannotUnify(Types.Type, Types.Type, Constraints.Origin),
+}
+
+provide record SolveSuccess {
+  subst: Subst,
+  domainConstraints: List<Constraints.Constraint>,
+}
+
+let emptyState = () =>
+  { subst: Types.emptySubst(), constraints: [] }: SolverState
+
+provide let makeState = emptyState
+
+provide let withSubst = (subst: Subst) =>
+  { subst, constraints: [] }: SolverState
+
+provide let addConstraint = (
+  state: SolverState,
+  constraint: Constraints.Constraint,
+) => { ...state, constraints: [constraint, ...state.constraints] }
+
+let occurs = (varId: Number, ty: Types.Type, subst: Subst) => {
+  let applied = Types.applySubstType(subst, ty)
+  let vars = Types.freeVars(applied)
+  Types.containsVar(vars, varId)
+}
+
+let bindVar = (
+  varId: Number,
+  ty: Types.Type,
+  subst: Subst,
+  origin: Constraints.Origin,
+) => {
+  let applied = Types.applySubstType(subst, ty)
+  if (applied == Types.TVar(varId)) {
+    Ok(subst)
+  } else if (occurs(varId, applied, subst)) {
+    Err(Occurs(origin))
+  } else {
+    Map.set(varId, applied, subst)
+    Ok(subst)
+  }
+}
+
+let rec unify = (
+  left: Types.Type,
+  right: Types.Type,
+  subst: Subst,
+  origin: Constraints.Origin,
+) => {
+  let l = Types.applySubstType(subst, left)
+  let r = Types.applySubstType(subst, right)
+  match ((l, r)) {
+    (Types.TNumber, Types.TNumber) => Ok(subst),
+    (Types.TVoid, Types.TVoid) => Ok(subst),
+    (Types.TVar(id), ty) => bindVar(id, ty, subst, origin),
+    (ty, Types.TVar(id)) => bindVar(id, ty, subst, origin),
+    (Types.TFun(a1, b1), Types.TFun(a2, b2)) =>
+      match (unify(a1, a2, subst, origin)) {
+        Err(err) => Err(err),
+        Ok(subst1) => unify(b1, b2, subst1, origin),
+      },
+    _ => Err(CannotUnify(l, r, origin)),
+  }
+}
+
+provide let solve = (state: SolverState) => {
+  let rec loop = (
+    remaining: List<Constraints.Constraint>,
+    subst: Subst,
+    domainAcc: List<Constraints.Constraint>,
+  ) => match (remaining) {
+    [] =>
+      Ok({ subst, domainConstraints: List.reverse(domainAcc) }: SolveSuccess),
+    [constraint, ...rest] => match (constraint) {
+      Constraints.Equality(left, right, origin) =>
+        match (unify(left, right, subst, origin)) {
+          Ok(nextSubst) => loop(rest, nextSubst, domainAcc),
+          Err(err) => Err(err),
+        },
+      Constraints.Domain(_, _) => loop(rest, subst, [constraint, ...domainAcc]),
+    },
+  }
+
+  loop(state.constraints, state.subst, [])
+}

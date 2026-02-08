@@ -1,0 +1,27 @@
+module Constraints
+
+from "./types.gr" include Types
+
+provide record Origin {
+  nodeId: Number,
+  description: String,
+}
+
+provide enum Constraint {
+  Equality(Types.Type, Types.Type, Origin),
+  Domain(String, Origin),
+}
+
+provide let equality = (left: Types.Type, right: Types.Type, origin: Origin) =>
+  Equality(left, right, origin)
+
+provide let domain = (label: String, origin: Origin) => Domain(label, origin)
+
+provide let makeOrigin = (nodeId: Number, description: String) =>
+  { nodeId, description }
+
+provide let anonymousOrigin = (description: String) =>
+  { nodeId: -1, description }
+
+provide let originToString = (origin: Origin) =>
+  "node=" ++ toString(origin.nodeId) ++ " " ++ origin.description

@@ -1,0 +1,10 @@
+module Kinds
+
+provide enum Kind {
+  Star,
+}
+
+provide let kindToString = (kind: Kind) =>
+  match (kind) {
+    Star => "*",
+  }

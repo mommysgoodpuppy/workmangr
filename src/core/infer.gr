@@ -1,26 +1,40 @@
 module Infer
 
+from "list" include List
 from "map" include Map
 from "runtime/unsafe/panic" include Panic
 
 from "./core_ast.gr" include CoreAst
 from "./types.gr" include Types
+from "./env.gr" include Env
+from "./constraints.gr" include Constraints
+from "./solver.gr" include Solver
 
 provide record InferState {
   nextVar: Number,
   subst: Types.Subst,
-  env: Types.Env,
+  env: Env.TypingEnv,
   nodeTypes: Map.Map<Number, Types.Type>,
   topBindings: Map.Map<String, Types.Scheme>,
+  constraints: List<Constraints.Constraint>,
 }
 
 let makeInitialState = () => {
   let subst = Types.emptySubst()
-  let env = Types.emptyEnv()
+  let env = Env.empty()
   let nodeTypes = Map.make()
   let topBindings = Map.make()
-  { nextVar: 1, subst, env, nodeTypes, topBindings }
+  { nextVar: 1, subst, env, nodeTypes, topBindings, constraints: [] }
 }
+
+let recordConstraint = (state: InferState, constraint: Constraints.Constraint) =>
+  { ...state, constraints: [constraint, ...state.constraints] }
+
+let originForNode = (nodeId: Number, description: String) =>
+  Constraints.makeOrigin(nodeId, description)
+
+let panicWithOrigin = (message: String, origin: Constraints.Origin) =>
+  Panic.panic(message ++ " (" ++ Constraints.originToString(origin) ++ ")")
 
 let freshVar = (state: InferState) => {
   let id = state.nextVar
@@ -35,34 +49,54 @@ let occurs = (varId: Number, t: Types.Type, state: InferState) => {
   Types.containsVar(fv, varId)
 }
 
-let bindVar = (varId: Number, t: Types.Type, state: InferState) => {
+let bindVar = (
+  varId: Number,
+  t: Types.Type,
+  state: InferState,
+  origin: Constraints.Origin,
+) => {
   let tApplied = apply(state, t)
   if (tApplied == Types.TVar(varId)) {
     state
   } else if (occurs(varId, tApplied, state)) {
-    Panic.panic("Type error: occurs check failed")
+    panicWithOrigin("Type error: occurs check failed", origin)
   } else {
     Map.set(varId, tApplied, state.subst)
     state
   }
 }
 
-let rec unify = (left: Types.Type, right: Types.Type, state: InferState) => {
-  let l = apply(state, left)
-  let r = apply(state, right)
+let rec unify = (
+  left: Types.Type,
+  right: Types.Type,
+  origin: Constraints.Origin,
+  state: InferState,
+) => {
+  let constraint = Constraints.Equality(left, right, origin)
+  let state1 = recordConstraint(state, constraint)
+  let l = apply(state1, left)
+  let r = apply(state1, right)
 
   match ((l, r)) {
-    (Types.TNumber, Types.TNumber) => state,
-    (Types.TVoid, Types.TVoid) => state,
-    (Types.TVar(id), t) => bindVar(id, t, state),
-    (t, Types.TVar(id)) => bindVar(id, t, state),
+    (Types.TNumber, Types.TNumber) => state1,
+    (Types.TVoid, Types.TVoid) => state1,
+    (Types.TVar(id), t) => bindVar(id, t, state1, origin),
+    (t, Types.TVar(id)) => bindVar(id, t, state1, origin),
     (Types.TFun(a1, b1), Types.TFun(a2, b2)) => {
-      let state1 = unify(a1, a2, state)
-      unify(b1, b2, state1)
+      let state2 = unify(a1, a2, origin, state1)
+      unify(b1, b2, origin, state2)
     },
-    _ => Panic.panic("Type error: cannot unify types"),
+    _ => panicWithOrigin("Type error: cannot unify types", origin),
   }
 }
+
+let unifyForNode = (
+  nodeId: Number,
+  description: String,
+  left: Types.Type,
+  right: Types.Type,
+  state: InferState,
+) => unify(left, right, originForNode(nodeId, description), state)
 
 let recordNodeType = (id: Number, t: Types.Type, state: InferState) => {
   let applied = apply(state, t)
@@ -71,7 +105,7 @@ let recordNodeType = (id: Number, t: Types.Type, state: InferState) => {
 }
 
 let lookupEnv = (name: String, state: InferState) => {
-  match (Map.get(name, state.env)) {
+  match (Env.lookupValue(state.env, name)) {
     Some(scheme) => {
       let (inst, nextVar) = Types.instantiate(scheme, state.nextVar)
       (Types.applySubstType(state.subst, inst), { ...state, nextVar })
@@ -86,12 +120,12 @@ let withBinding = (
   state: InferState,
   fn: InferState => (Types.Type, InferState),
 ) => {
-  let previous = Map.get(name, state.env)
-  Map.set(name, scheme, state.env)
+  let previous = Env.lookupValue(state.env, name)
+  let envWithBinding = Env.defineValue(state.env, name, scheme)
   let (resultType, stateAfter) = fn(state)
   match (previous) {
-    Some(prevScheme) => Map.set(name, prevScheme, state.env),
-    None => Map.remove(name, state.env),
+    Some(prevScheme) => Env.defineValue(envWithBinding, name, prevScheme),
+    None => Env.removeValue(state.env, name),
   }
   (resultType, stateAfter)
 }
@@ -119,11 +153,10 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
     },
     CoreAst.Fn(fnExpr) => {
       let clause = match (fnExpr.items) {
-        [item, ..._] =>
-          match (item.kind) {
-            CoreAst.Clause(c) => c,
-            _ => Panic.panic("Type error: function item is not a clause"),
-          },
+        [item, ..._] => match (item.kind) {
+          CoreAst.Clause(c) => c,
+          _ => Panic.panic("Type error: function item is not a clause"),
+        },
         _ => Panic.panic("Type error: empty function clauses"),
       }
       let paramName = match (clause.param.kind) {
@@ -132,15 +165,10 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       }
       let (paramType, state1) = freshVar(state)
       let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
-      let (fnType, stFn) = withBinding(
-        paramName,
-        monoScheme,
-        state1,
-        st => {
-          let (tBody, stBody) = inferExpr(clause.body, st)
-          (Types.TFun(paramType, tBody), stBody)
-        }
-      )
+      let (fnType, stFn) = withBinding(paramName, monoScheme, state1, st => {
+        let (tBody, stBody) = inferExpr(clause.body, st)
+        (Types.TFun(paramType, tBody), stBody)
+      })
       let tRecorded = recordNodeType(expr.node.id, fnType, stFn)
       (tRecorded, stFn)
     },
@@ -148,15 +176,25 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       let (tCallee, state1) = inferExpr(callee, state)
       let (tArg, state2) = inferExpr(arg, state1)
       let (tRes, state3) = freshVar(state2)
-      let state4 = unify(tCallee, Types.TFun(tArg, tRes), state3)
+      let state4 = unifyForNode(
+        expr.node.id,
+        "function application",
+        tCallee,
+        Types.TFun(tArg, tRes),
+        state3
+      )
       let tApplied = apply(state4, tRes)
       let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
       (tRecorded, state4)
     },
     CoreAst.Let(binding, body) => {
       let (tValue, state1) = inferExpr(binding.value, state)
-      Types.applySubstEnv(state1.subst, state1.env)
-      let scheme = Types.generalize(state1.env, state1.subst, tValue)
+      Env.applySubst(state1.env, state1.subst)
+      let scheme = Types.generalize(
+        Env.snapshotValues(state1.env),
+        state1.subst,
+        tValue
+      )
       let bindingName = match (binding.name.kind) {
         CoreAst.Var(name) => name.text,
         _ => "_",
@@ -177,7 +215,13 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
         None => (Types.TVoid, state2),
         Some(e) => inferExpr(e, state2),
       }
-      let state4 = unify(tThen, tElse, state3)
+      let state4 = unifyForNode(
+        expr.node.id,
+        "if branches",
+        tThen,
+        tElse,
+        state3
+      )
       let t = recordNodeType(expr.node.id, tThen, state4)
       (t, state4)
     },
@@ -190,7 +234,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       let (t, state1) = freshVar(state)
       let tRecorded = recordNodeType(expr.node.id, t, state1)
       (tRecorded, state1)
-    }
+    },
   }
 }
 and inferExprList = (exprs: List<CoreAst.Expr>, state: InferState) => {
@@ -206,13 +250,17 @@ and inferExprList = (exprs: List<CoreAst.Expr>, state: InferState) => {
 
 let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
   let (tValue, state1) = inferExpr(binding.value, state)
-  Types.applySubstEnv(state1.subst, state1.env)
-  let scheme = Types.generalize(state1.env, state1.subst, tValue)
+  Env.applySubst(state1.env, state1.subst)
+  let scheme = Types.generalize(
+    Env.snapshotValues(state1.env),
+    state1.subst,
+    tValue
+  )
   let bindingName = match (binding.name.kind) {
     CoreAst.Var(name) => name.text,
     _ => "_",
   }
-  Map.set(bindingName, scheme, state1.env)
+  Env.defineValue(state1.env, bindingName, scheme)
   Map.set(bindingName, scheme, state1.topBindings)
   state1
 }
@@ -229,39 +277,70 @@ let rec inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) => {
               [decl, ...restDecls] => {
                 let st1 = match (decl) {
                   CoreAst.LetDecl(ld) => {
-                    let rec inferBindings = (bindings: List<CoreAst.LetBinding>, s: InferState) => {
+                    let rec inferBindings = (
+                      bindings: List<CoreAst.LetBinding>,
+                      s: InferState,
+                    ) => {
                       match (bindings) {
                         [] => s,
-                        [b, ...restBindings] => inferBindings(restBindings, inferLetBinding(b, s))
+                        [b, ...restBindings] =>
+                          inferBindings(restBindings, inferLetBinding(b, s)),
                       }
                     }
                     inferBindings(ld.bindings, st)
                   },
-                  _ => st
+                  _ => st,
                 }
                 inferDecls(restDecls, st1)
-              }
+              },
             }
           }
           inferDecls(dg.decls, state)
         },
-        _ => state
+        _ => state,
       }
       inferTopItems(rest, state1)
-    }
+    },
+  }
+}
+
+let solveConstraints = (state: InferState) => {
+  let solverState = List.reduce(
+    (acc, constraint) => Solver.addConstraint(acc, constraint),
+    Solver.withSubst(state.subst),
+    List.reverse(state.constraints)
+  )
+  match (Solver.solve(solverState)) {
+    Ok(result) => {
+      Env.applySubst(state.env, result.subst)
+      { ...state, subst: result.subst, constraints: result.domainConstraints }
+    },
+    Err(Solver.Occurs(origin)) =>
+      panicWithOrigin("Type error: occurs check failed", origin),
+    Err(Solver.CannotUnify(left, right, origin)) =>
+      panicWithOrigin(
+        "Type error: cannot unify "
+          ++ Types.typeToString(left)
+          ++ " with "
+          ++ Types.typeToString(right),
+        origin
+      ),
   }
 }
 
 provide let inferProgram = (program: CoreAst.Program) => {
   let state = makeInitialState()
-  let finalState = inferTopItems(program.items, state)
-  Types.applySubstEnv(finalState.subst, finalState.env)
-  finalState
+  let inferred = inferTopItems(program.items, state)
+  solveConstraints(inferred)
 }
 
 provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) => {
-  let state = { ...makeInitialState(), env }
-  let finalState = inferTopItems(program.items, state)
-  Types.applySubstEnv(finalState.subst, finalState.env)
-  finalState
+  let baseEnv = Env.empty()
+  Map.forEach((name, scheme) => {
+    Env.defineValue(baseEnv, name, scheme)
+    void
+  }, env)
+  let state = { ...makeInitialState(), env: baseEnv }
+  let inferred = inferTopItems(program.items, state)
+  solveConstraints(inferred)
 }

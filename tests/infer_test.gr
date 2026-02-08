@@ -1,0 +1,49 @@
+module InferTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "../src/frontend/frontend.gr" include Frontend
+from "../src/core/infer.gr" include Infer
+from "../src/core/types.gr" include Types
+from "map" include Map
+from "list" include List
+
+setSourceFile("./tests/infer_test.gr")
+
+let inferSource = (source: String) => {
+  let program = Frontend.parseAndLower(source)
+  Infer.inferProgram(program)
+}
+
+let assertFunScheme = (scheme: Types.Scheme) => {
+  let quantCount = List.length(scheme.quantifiers)
+  assertTrue(quantCount >= 1)
+
+  match (scheme.ty) {
+    Types.TFun(Types.TVar(arg), Types.TVar(result)) =>
+      assertEquals(arg, result),
+    _ => fail "expected function scheme",
+  }
+}
+
+let expectTopBinding = (state: Infer.InferState, name: String) =>
+  match (Map.get(name, state.topBindings)) {
+    Some(scheme) => scheme,
+    None => fail "missing binding: " ++ name,
+  }
+
+test("let generalization produces polymorphic scheme", () => {
+  let source =
+    "
+let id = (x) => { x };
+let useNumber = (n) => { id(n) };
+let useFunction = (f) => { id(f) };
+let main = => { useNumber(5); useFunction((x) => { x }); void };
+"
+
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "id")
+  assertFunScheme(scheme)
+  assertEquals(0, List.length(state.constraints))
+})

@@ -153,6 +153,25 @@ let dropToken = (state: ParseState) => {
   }
 }
 
+let previousToken = (state: ParseState) => {
+  let cur = currentToken(state).span.start
+  let rec walk = (prev: Lexer.Token, tokens: List<Lexer.Token>) =>
+    match (tokens) {
+      [] => prev,
+      [tok, ...rest] => if (tok.span.start >= cur) {
+        prev
+      } else {
+        walk(tok, rest)
+      },
+    }
+  let fallback: Lexer.Token = {
+    kind: Lexer.EOF,
+    span: Source.makeSpan(1, 0, 0, 0),
+    mate: None,
+  }
+  walk(fallback, state.allTokens)
+}
+
 let tokenCursor = (state: ParseState) => currentToken(state).span.start
 
 let parserLog = (text: String) => {
@@ -240,11 +259,13 @@ let recoverMissingTopLevelSemicolon = (
   anchorSpan: Source.Span,
 ) => {
   let atTok = currentToken(state)
+  let prevTok = previousToken(state)
+  let endCol = prevTok.span.col + (prevTok.span.end - prevTok.span.start)
   let errSpan = Source.makeSpan(
-    atTok.span.line,
-    atTok.span.col,
-    atTok.span.start,
-    atTok.span.start
+    prevTok.span.line,
+    endCol,
+    prevTok.span.end,
+    prevTok.span.end
   )
   let (markId, state1) = freshId(state)
   let mark: SurfaceAst.Mark = {
