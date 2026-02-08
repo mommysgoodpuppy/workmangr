@@ -1393,6 +1393,14 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
         (expr, state3)
       } else {
         let (inner, state3) = parseExpr(state2)
+        // Handle optional type annotation (name: Type) for typed lambda params
+        let state3 = if (kindIs(currentToken(state3).kind, Lexer.Colon)) {
+          let (_, stateColon) = expectSimple(Lexer.Colon, state3)
+          let (_, stateAfterTy) = parseTypeExpr(stateColon)
+          stateAfterTy
+        } else {
+          state3
+        }
         if (kindIs(currentToken(state3).kind, Lexer.Comma)) {
           let mut exprs = [inner]
           let mut currentState = state3
@@ -2105,7 +2113,28 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
   } else {
     (SurfaceAst.Plain, state2)
   }
-  let (name, nameTok, state4) = expectConstructor(state3)
+  // Parse optional 'infectious <domain>' modifier
+  let (infectionOpt, state3b) = if (
+    kindIs(currentToken(state3).kind, Lexer.LitName("infectious"))
+  ) {
+    let stateInf = dropToken(state3)
+    let domainTok = currentToken(stateInf)
+    match (domainTok.kind) {
+      Lexer.LitName(domainName) => {
+        let stateDom = dropToken(stateInf)
+        let (domId, stateDom2) = freshId(stateDom)
+        let domainNameNode: SurfaceAst.Name = {
+          node: { id: domId, span: domainTok.span },
+          text: domainName,
+        }
+        (Some(domainNameNode), stateDom2)
+      },
+      _ => (None, stateInf),
+    }
+  } else {
+    (None, state3)
+  }
+  let (name, nameTok, state4) = expectConstructor(state3b)
   let mut lastSpan = nameTok.span
   let (typeParams, state5) = parseTypeParams(state4)
   if (List.length(typeParams) > 0) {
@@ -2119,6 +2148,7 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
     let tok = currentToken(stateEq)
     let isVariantStart = match (tok.kind) {
       Lexer.Pipe => true,
+      Lexer.Directive => true,
       Lexer.ConstructorTok(_) => false,
       _ => false,
     }
@@ -2130,7 +2160,23 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
         stateEq
       }
       let rec parseConstructors = (items, stateX) => {
-        let (cname, cTok, stateY) = expectConstructor(stateX)
+        // Parse optional @value or @effect annotation
+        let (annotOpt, stateAnnot) = if (
+          kindIs(currentToken(stateX).kind, Lexer.Directive)
+        ) {
+          let stateAt = dropToken(stateX)
+          let annotTok = currentToken(stateAt)
+          match (annotTok.kind) {
+            Lexer.LitName(aname) when aname == "value" || aname == "effect" => {
+              let stateA = dropToken(stateAt)
+              (Some(aname), stateA)
+            },
+            _ => (None, stateAt),
+          }
+        } else {
+          (None, stateX)
+        }
+        let (cname, cTok, stateY) = expectConstructor(stateAnnot)
         let (nameId, stateY2) = freshId(stateY)
         let ctorName: SurfaceAst.Name = {
           node: { id: nameId, span: cTok.span },
@@ -2149,10 +2195,21 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
           )
           lastSpan = payload.node.span
           (Some(payload), stateP3)
+        } else if (kindIs(currentToken(stateY2).kind, Lexer.LAngle)) {
+          // Also accept <T> type arguments (e.g. ISome<T>)
+          let (_, stateA) = expectSimple(Lexer.LAngle, stateY2)
+          let (payload, stateA2) = parseTypeExpr(stateA)
+          let (_, stateA3) = expectSimpleOrRecover(
+            Lexer.Arrow,
+            stateA2,
+            "to close type argument list"
+          )
+          lastSpan = payload.node.span
+          (Some(payload), stateA3)
         } else {
           (None, stateY2)
         }
-        let entry = (ctorName, payloadOpt, None)
+        let entry = (ctorName, payloadOpt, annotOpt)
         let nextItems = [entry, ...items]
         let tokNext = currentToken(stateY3)
         if (kindIs(tokNext.kind, Lexer.Pipe)) {
@@ -2165,22 +2222,81 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
       let (cases, stateAfter) = parseConstructors([], stateAfterPipe)
       (SurfaceAst.Variant(cases), stateAfter)
     } else {
-      let (firstTy, stateAfterFirst) = parseTypeExpr(stateEq)
+      // Check if the first token after = is a @value/@effect annotation
+      let (firstAnnotOpt, stateBeforeFirst) = if (
+        kindIs(currentToken(stateEq).kind, Lexer.Directive)
+      ) {
+        let stateAt = dropToken(stateEq)
+        let annotTok = currentToken(stateAt)
+        match (annotTok.kind) {
+          Lexer.LitName(aname) when aname == "value" || aname == "effect" => {
+            let stateA = dropToken(stateAt)
+            (Some(aname), stateA)
+          },
+          _ => (None, stateAt),
+        }
+      } else {
+        (None, stateEq)
+      }
+      let (firstTy, stateAfterFirst) = parseTypeExpr(stateBeforeFirst)
       if (kindIs(currentToken(stateAfterFirst).kind, Lexer.Pipe)) {
-        match (firstTy.kind) {
-          SurfaceAst.Ref(name, []) => {
-            let firstCase = (name, None, None)
-            let (_, statePipe) = expectSimple(Lexer.Pipe, stateAfterFirst)
-            let rec parseRest = (items, stateX) => {
-              let (cname, cTok, stateY) = expectConstructor(stateX)
-              let (nameId, stateY2) = freshId(stateY)
-              let ctorName: SurfaceAst.Name = {
-                node: { id: nameId, span: cTok.span },
-                text: cname,
+        let packCtorPayload = (
+          args: List<SurfaceAst.TypeExpr>,
+          stateX: ParseState,
+        ) => {
+          match (args) {
+            [] => (None, stateX),
+            [only] => (Some(only), stateX),
+            [firstArg, ...restArgs] => {
+              let allArgs = [firstArg, ...restArgs]
+              let lastArg = List.head(List.reverse(allArgs))
+              let tupleSpan = match (lastArg) {
+                Some(lastTy) => spanFromTokens(firstArg.node.span, lastTy.node.span),
+                None => firstArg.node.span,
               }
-              lastSpan = cTok.span
-              let entry = (ctorName, None, None)
-              let nextItems = [entry, ...items]
+              let (tupleId, stateY) = freshId(stateX)
+              let tupleTy = makeTypeExpr(tupleId, tupleSpan, SurfaceAst.Tuple(allArgs))
+              (Some(tupleTy), stateY)
+            },
+          }
+        }
+        match (firstTy.kind) {
+          SurfaceAst.Ref(name, firstArgs) => {
+            let (firstPayload, stateAfterFirstPayload) = packCtorPayload(
+              firstArgs,
+              stateAfterFirst
+            )
+            let firstCase = (name, firstPayload, firstAnnotOpt)
+            let (_, statePipe) = expectSimple(Lexer.Pipe, stateAfterFirstPayload)
+            let rec parseRest = (items, stateX) => {
+              // Parse optional @value or @effect annotation
+              let (restAnnotOpt, stateBeforeType) = if (
+                kindIs(currentToken(stateX).kind, Lexer.Directive)
+              ) {
+                let stateAt = dropToken(stateX)
+                let annotTok = currentToken(stateAt)
+                match (annotTok.kind) {
+                  Lexer.LitName(aname) when aname == "value" || aname == "effect" => {
+                    let stateA = dropToken(stateAt)
+                    (Some(aname), stateA)
+                  },
+                  _ => (None, stateAt),
+                }
+              } else {
+                (None, stateX)
+              }
+              let (caseTy, stateY) = parseTypeExpr(stateBeforeType)
+              let (nextItems, stateY2) = match (caseTy.kind) {
+                SurfaceAst.Ref(ctorName, ctorArgs) => {
+                  let (payload, statePayload) = packCtorPayload(ctorArgs, stateY)
+                  lastSpan = caseTy.node.span
+                  ([(ctorName, payload, restAnnotOpt), ...items], statePayload)
+                },
+                _ => {
+                  lastSpan = caseTy.node.span
+                  (items, stateY)
+                },
+              }
               let tokNext = currentToken(stateY2)
               if (kindIs(tokNext.kind, Lexer.Pipe)) {
                 let (_, stateP) = expectSimple(Lexer.Pipe, stateY2)
@@ -2230,7 +2346,7 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
           {
             node: { id: typeDeclId, span: fullSpan },
             name: { node: { id: nameId, span: nameTok.span }, text: name },
-            infection: None,
+            infection: infectionOpt,
             typeParams,
             body,
           },

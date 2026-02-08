@@ -153,5 +153,40 @@ test("parser supports multiline functional call arguments with multiplication", 
   assertFalse(hasErrors)
 })
 
+test("parser supports exported generic variant type aliases", () => {
+  clearErrors()
+  let source = "export type Option<T> = Some<T> | None;"
+  let parsed = Parser.parse(source)
+  let isGenericParamType = (ty: SurfaceAst.TypeExpr) => match (ty.kind) {
+    SurfaceAst.Var({ text: "T", _ }) => true,
+    SurfaceAst.Ref({ text: "T", _ }, []) => true,
+    _ => false,
+  }
+
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.Export(_), SurfaceAst.DeclGroup(group)] => {
+      if (!group.exported) {
+        false
+      } else {
+        match (group.decls) {
+          [SurfaceAst.TypeDecl(typeDecl)] => match (typeDecl.body) {
+            SurfaceAst.Variant(cases) => match (cases) {
+              [({ text: "Some", _ }, Some(payload), _), ({ text: "None", _ }, None, _)] =>
+                isGenericParamType(payload),
+              _ => false,
+            },
+            _ => false,
+          },
+          _ => false,
+        }
+      }
+    },
+    _ => false,
+  }
+
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
 let results = runTests()
 printResultsAndExit(results)

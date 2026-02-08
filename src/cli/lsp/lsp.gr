@@ -455,6 +455,21 @@ let diagnosticToJson = (diag: Error.CompilerError) => {
     ++ "\"}"
 }
 
+let joinStrings = (sep: String, parts: List<String>) => {
+  let rec loop = (remaining: List<String>, out: String) => {
+    match (remaining) {
+      [] => out,
+      [head, ...rest] =>
+        if (out == "") {
+          loop(rest, head)
+        } else {
+          loop(rest, out ++ sep ++ head)
+        },
+    }
+  }
+  loop(parts, "")
+}
+
 let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) => {
   debug(
     "[LSP diag] publish uri="
@@ -462,9 +477,7 @@ let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) =
       ++ " count="
       ++ toString(List.length(diagnostics))
   )
-  let diagnosticsJson = "["
-    ++ Array.join(",", Array.fromList(List.map(diagnosticToJson, diagnostics)))
-    ++ "]"
+  let diagnosticsJson = "[" ++ joinStrings(",", List.map(diagnosticToJson, diagnostics)) ++ "]"
   let params = "{\"uri\":\""
     ++ escapeJson(uri)
     ++ "\",\"diagnostics\":"
@@ -530,7 +543,7 @@ let publishGraphDiagnostics = (
     }
   )
   debug("[LSP diag] finished ModuleSystem.buildGraph")
-  debug("[LSP diag] topo=" ++ Array.join(" -> ", Array.fromList(graph.topo)))
+  debug("[LSP diag] topoCount=" ++ toString(List.length(graph.topo)))
   let nextPublished = Map.make()
   List.forEach(((modulePath, diagnostics)) => {
     debug(
