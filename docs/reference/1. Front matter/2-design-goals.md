@@ -24,6 +24,7 @@ defined behavior in other sections.
    - Canonical Workman intentionally avoids multiple spellings or redundant
      constructs.
    - Example: `if/else` exists only as sugar over `match` on booleans.
+   - all forms of optional syntax must be a no-op ( trailing commas, leading pipe, comments )
 
 2. **Predictability over cleverness**
    - Deterministic evaluation order.
