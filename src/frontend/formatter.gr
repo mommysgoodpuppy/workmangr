@@ -753,20 +753,24 @@ let renderWithSettingsWithTokens = (
     ),
   ) => {
     let (name, payload, annotation) = entry
+    match (annotation) {
+      None => void,
+      Some(text) => {
+        write("@")
+        write(text)
+        space()
+      },
+    }
     write(name.text)
     match (payload) {
       None => void,
       Some(ty) => {
-        write("(")
-        emitTypeExpr(ty)
-        write(")")
-      },
-    }
-    match (annotation) {
-      None => void,
-      Some(text) => {
-        space()
-        write(text)
+        write("<")
+        match (ty.kind) {
+          SurfaceAst.Tuple(items) => emitCommaSeparated(emitTypeExpr, items),
+          _ => emitTypeExpr(ty),
+        }
+        write(">")
       },
     }
   }
@@ -786,8 +790,6 @@ let renderWithSettingsWithTokens = (
         match (cases) {
           [] => void,
           [single] => {
-            write("|")
-            space()
             emitTypeConstructor(single)
           },
           [first, ...tail] => {
@@ -1096,9 +1098,11 @@ let renderWithSettingsWithTokens = (
   and emitDirective = (directive: SurfaceAst.Directive) => {
     write("@")
     write(directive.name.text)
-    write("(")
-    emitCommaSeparated(emitExpr, directive.args)
-    write(")")
+    if (directive.args != []) {
+      write("(")
+      emitCommaSeparated(emitExpr, directive.args)
+      write(")")
+    }
   }
   and emitBlock = (block: SurfaceAst.Block) => {
     write("{")
@@ -1376,17 +1380,17 @@ let renderWithSettingsWithTokens = (
   }
 
   let emitTypeDecl = (typeDecl: SurfaceAst.TypeDecl) => {
-    write(typeDecl.name.text)
-    emitTypeParams(typeDecl.typeParams)
     match (typeDecl.infection) {
       None => void,
       Some(domain) => {
-        space()
         write("infectious")
         space()
         write(domain.text)
+        space()
       },
     }
+    write(typeDecl.name.text)
+    emitTypeParams(typeDecl.typeParams)
     emitTypeDeclBody(typeDecl.body)
   }
 

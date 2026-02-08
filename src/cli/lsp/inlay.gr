@@ -83,6 +83,28 @@ let tokenIsIgnorable = (tok: Lexer.Token) => match (tok.kind) {
   _ => false,
 }
 
+let commentSpans = (source: String) => {
+  let tokens = Lexer.lex(source)
+  List.filterMap((tok: Lexer.Token) => match (tok.kind) {
+    Lexer.LineComment(_) => Some((tok.span.start, tok.span.end)),
+    _ => None,
+  }, tokens)
+}
+
+let insideComment = (offset: Number, spans: List<(Number, Number)>) => {
+  let rec check = (items) => match (items) {
+    [] => false,
+    [(s, e), ...rest] => {
+      if (offset >= s && offset < e) {
+        true
+      } else {
+        check(rest)
+      }
+    },
+  }
+  check(spans)
+}
+
 let tokensEqual = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
 
 let lastNonEmptyLineEndOffset = (source: String) => {
@@ -652,6 +674,11 @@ provide let inlayHintsForSource = (
       group(rest)
     },
   }
+  let cSpans = commentSpans(source)
+  let diffInserts = List.filter(
+    (chunk: InsertChunk) => !insideComment(chunk.anchorOffset, cSpans),
+    diffInserts
+  )
   group(diffInserts)
 
   let seen = Map.make()

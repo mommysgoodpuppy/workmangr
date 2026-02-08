@@ -44,6 +44,7 @@ let inlayCacheMaxEntries = 256
 let mut inlayCachedUri: Option<String> = None
 let mut pendingInlayWarmUri: Option<String> = None
 let mut pendingInlayWarmVersion = 0
+let cachedGraphNodes: Map.Map<String, ModuleSystem.ModuleNode> = Map.make()
 
 let debug = (text: String) => {
   if (debugEnabled) {
@@ -471,12 +472,16 @@ let joinStrings = (sep: String, parts: List<String>) => {
 }
 
 let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) => {
-  debug(
-    "[LSP diag] publish uri="
-      ++ uri
-      ++ " count="
-      ++ toString(List.length(diagnostics))
-  )
+  if (List.length(diagnostics) > 0) {
+    debug(
+      "[LSP diag] publish uri="
+        ++ uri
+        ++ " count="
+        ++ toString(List.length(diagnostics))
+    )
+  } else {
+    void
+  }
   let diagnosticsJson = "[" ++ joinStrings(",", List.map(diagnosticToJson, diagnostics)) ++ "]"
   let params = "{\"uri\":\""
     ++ escapeJson(uri)
@@ -509,29 +514,14 @@ let publishGraphDiagnostics = (
   docs: Map.Map<String, String>,
   publishedUris: Map.Map<String, Bool>,
 ) => {
-  debug("[LSP diag] begin publishGraphDiagnostics")
   let absEntryPath = uriToPath(entryUri)
   let rootDir = match (workspaceRootPath) {
     Some(root) => root,
     None => dirname(absEntryPath),
   }
   let entryPath = toWorkspacePath(uriToPath(entryUri))
-  debug(
-    "[LSP diag] entryUri="
-      ++ entryUri
-      ++ " entryPath="
-      ++ entryPath
-      ++ " workspaceRoot="
-      ++ match (workspaceRootPath) {
-        Some(root) => root,
-        None => "<none>",
-      }
-  )
   let overrides = docsToOverrides(docs)
   let uriLookup = pathUriLookup(docs)
-  debug("[LSP diag] overrideCount=" ++ toString(List.length(Map.toList(overrides))))
-  debug("[LSP diag] stdRoot=" ++ v0StdRoot)
-  debug("[LSP diag] starting ModuleSystem.buildGraph")
   let graph = ModuleSystem.buildGraph(
     entryPath,
     options={
@@ -539,19 +529,19 @@ let publishGraphDiagnostics = (
       stdRoots: [v0StdRoot],
       sourceOverrides: overrides,
       debugLog: Some(debug),
-      skipStdParsing: true,
+      cachedNodes: cachedGraphNodes,
     }
   )
-  debug("[LSP diag] finished ModuleSystem.buildGraph")
-  debug("[LSP diag] topoCount=" ++ toString(List.length(graph.topo)))
+  List.forEach(((moduleId, node)) => {
+    Map.set(moduleId, node, cachedGraphNodes)
+  }, Map.toList(graph.nodes))
+  debug(
+    "[LSP diag] entry=" ++ entryPath
+      ++ " topo=" ++ toString(List.length(graph.topo))
+      ++ " cached=" ++ toString(List.length(Map.toList(cachedGraphNodes)))
+  )
   let nextPublished = Map.make()
   List.forEach(((modulePath, diagnostics)) => {
-    debug(
-      "[LSP diag] module="
-        ++ modulePath
-        ++ " diagnostics="
-        ++ toString(List.length(diagnostics))
-    )
     let uri = match (Map.get(modulePath, uriLookup)) {
       Some(mappedUri) => mappedUri,
       None => match (workspaceRootPath) {
@@ -560,16 +550,18 @@ let publishGraphDiagnostics = (
       },
     }
     publishDiagnostics(uri, diagnostics)
-    List.forEach((diag: Error.CompilerError) => {
-      debug(
-        "[LSP diag] detail module="
-          ++ modulePath
-          ++ " uri="
-          ++ uri
-          ++ " message="
-          ++ diag.message
-      )
-    }, diagnostics)
+    if (List.length(diagnostics) > 0) {
+      List.forEach((diag: Error.CompilerError) => {
+        debug(
+          "[LSP diag] module="
+            ++ modulePath
+            ++ " message="
+            ++ diag.message
+        )
+      }, diagnostics)
+    } else {
+      void
+    }
     Map.set(uri, true, nextPublished)
   }, Map.toList(graph.diagnosticsById))
 
@@ -582,7 +574,6 @@ let publishGraphDiagnostics = (
     }
   }, Map.toList(publishedUris))
 
-  debug("[LSP diag] end publishGraphDiagnostics")
   nextPublished
 }
 
@@ -603,43 +594,23 @@ let handleInlayHint = (
   params: Json.Json,
   docs: Map.Map<String, String>,
 ) => {
-  debug("[LSP inlay] request received")
   let uriOpt = match (jsonGetObject("textDocument", params)) {
     Some(obj) => jsonGetString("uri", obj),
     None => None,
   }
   match (uriOpt) {
     None => {
-      debug("[LSP inlay] missing URI, returning empty")
       sendResponse(idText, "[]")
-      debug("[LSP inlay] done status=missing_uri")
     },
     Some(uri) => {
-      debug("[LSP inlay] start uri=" ++ uri)
       match (Map.get(uri, docs)) {
         None => {
-          debug("[LSP inlay] document not open, returning empty uri=" ++ uri)
           sendResponse(idText, "[]")
-          debug("[LSP inlay] done uri=" ++ uri ++ " status=document_not_open")
         },
         Some(source) => {
           let sourceLen = String.length(source)
           if (sourceLen > inlayMaxSourceChars) {
-            debug(
-              "[LSP inlay] skipped uri="
-                ++ uri
-                ++ " reason=source_too_large chars="
-                ++ toString(sourceLen)
-                ++ " limit="
-                ++ toString(inlayMaxSourceChars)
-            )
             sendResponse(idText, "[]")
-            debug(
-              "[LSP inlay] done uri="
-                ++ uri
-                ++ " status=skipped_source_too_large chars="
-                ++ toString(sourceLen)
-            )
           } else {
           let rangeOpt = jsonGetObject("range", params)
           let rangeStart = match (rangeOpt) {
@@ -689,49 +660,16 @@ let handleInlayHint = (
           let fullCacheKey = inlayCacheKey(uri, version, fullStart, fullEnd)
           match (Map.get(cacheKey, inlayCache)) {
             Some(cachedHints) => {
-              debug(
-                "[LSP inlay] cache hit uri="
-                  ++ uri
-                  ++ " version="
-                  ++ toString(version)
-                  ++ " range="
-                  ++ toString(rangeStart)
-                  ++ "-"
-                  ++ toString(rangeEnd)
-              )
               sendResponse(idText, cachedHints)
-              debug(
-                "[LSP inlay] done uri="
-                  ++ uri
-                  ++ " status=ok_cached hint_json_chars="
-                  ++ toString(String.length(cachedHints))
-              )
             },
             None => {
               match (Map.get(fullCacheKey, inlayCache)) {
                 Some(fullCachedHints) => {
-                  debug(
-                    "[LSP inlay] cache hit uri="
-                      ++ uri
-                      ++ " version="
-                      ++ toString(version)
-                      ++ " range="
-                      ++ toString(rangeStart)
-                      ++ "-"
-                      ++ toString(rangeEnd)
-                      ++ " strategy=full_fallback"
-                  )
                   sendResponse(idText, fullCachedHints)
-                  debug(
-                    "[LSP inlay] done uri="
-                      ++ uri
-                      ++ " status=ok_cached hint_json_chars="
-                      ++ toString(String.length(fullCachedHints))
-                  )
                 },
                 None => {
                   ensureSingleUriInlayCache(uri)
-                  debug("[LSP inlay] building hints uri=" ++ uri)
+                  debug("[LSP inlay] build uri=" ++ uri)
                   let hintsJson = Inlay.inlayHintsForSource(
                     source,
                     fullStart,
@@ -753,14 +691,7 @@ let handleInlayHint = (
                   }
                   Map.set(fullCacheKey, hintsJson, inlayCache)
                   inlayCacheSize += 1
-                  debug("[LSP inlay] sending response uri=" ++ uri)
                   sendResponse(idText, hintsJson)
-                  debug(
-                    "[LSP inlay] done uri="
-                      ++ uri
-                      ++ " status=ok hint_json_chars="
-                      ++ toString(String.length(hintsJson))
-                  )
                 },
               }
             },
@@ -911,7 +842,6 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/didChange") {
-        debug("[LSP msg] handling didChange")
         match (jsonGetObject("params", msgJson)) {
           Some(params) => {
             let textDocOpt = jsonGetObject("textDocument", params)
@@ -1021,7 +951,6 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/inlayHint") {
-        debug("[LSP msg] handling inlayHint")
         match (idOpt) {
           Some(idJson) => match (jsonGetObject("params", msgJson)) {
             Some(params) => handleInlayHint(jsonToIdText(idJson), params, docs),

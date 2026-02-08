@@ -40,7 +40,7 @@ provide record BuildOptions {
   stdRoots: List<String>,
   sourceOverrides: Map.Map<String, String>,
   debugLog: Option<(String) => Void>,
-  skipStdParsing: Bool,
+  cachedNodes: Map.Map<String, ModuleNode>,
 }
 
 record BuildContext {
@@ -59,7 +59,7 @@ provide let defaultOptions = () => {
     stdRoots: [],
     sourceOverrides: overrides,
     debugLog: None,
-    skipStdParsing: false,
+    cachedNodes: Map.make(),
   }: BuildOptions
 }
 
@@ -225,7 +225,6 @@ let resolveSpecifier = (
 }
 
 let readSource = (moduleId: String, options: BuildOptions) => {
-  log(options, "readSource start module=" ++ moduleId)
   let tryRead = (candidates: List<String>) => {
     let rec loop = (remaining: List<String>) => {
       match (remaining) {
@@ -242,10 +241,7 @@ let readSource = (moduleId: String, options: BuildOptions) => {
     loop(candidates)
   }
   match (Map.get(moduleId, options.sourceOverrides)) {
-    Some(text) => {
-      log(options, "readSource end module=" ++ moduleId ++ " source=override")
-      Ok(text)
-    },
+    Some(text) => Ok(text),
     None => {
       let absPath = absolutePathFor(moduleId, options.rootDir)
       let relPath = relativeToRoot(absPath, options.rootDir)
@@ -255,12 +251,11 @@ let readSource = (moduleId: String, options: BuildOptions) => {
         tryRead([moduleId, relPath, absPath])
       }
       match (result) {
-        Ok(_) =>
-          log(options, "readSource end module=" ++ moduleId ++ " source=file"),
+        Ok(_) => void,
         Err(err) =>
           log(
             options,
-            "readSource end module=" ++ moduleId ++ " source=missing err="
+            "readSource missing module=" ++ moduleId ++ " err="
               ++ toString(err)
           ),
       }
@@ -308,15 +303,6 @@ let resolveEdges = (
   options: BuildOptions,
   diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
 ) => {
-  log(
-    options,
-    "resolveEdges start module="
-      ++ moduleId
-      ++ " kind="
-      ++ edgeKind
-      ++ " count="
-      ++ toString(List.length(rawSpecifiers))
-  )
   let rec loop = (
     remaining: List<String>,
     resolved: List<String>,
@@ -336,36 +322,13 @@ let resolveEdges = (
       },
     }
   }
-  let result = loop(rawSpecifiers, [], diagnosticsById)
-  let (resolved, _diags) = result
-  log(
-    options,
-    "resolveEdges end module="
-      ++ moduleId
-      ++ " kind="
-      ++ edgeKind
-      ++ " resolved="
-      ++ toString(List.length(resolved))
-  )
-  result
+  loop(rawSpecifiers, [], diagnosticsById)
 }
 
 let rec visit = (moduleId: String, ctx: BuildContext) => {
   let visitStatus = Map.get(moduleId, ctx.visitState)
-  log(
-    ctx.options,
-    "visit start module="
-      ++ moduleId
-      ++ " state="
-      ++ match (visitStatus) {
-        Some(2) => "visited",
-        Some(1) => "visiting",
-        _ => "new",
-      }
-  )
   match (visitStatus) {
     Some(2) => {
-      log(ctx.options, "visit end module=" ++ moduleId ++ " status=already_visited")
       ctx
     },
     Some(1) => {
@@ -384,123 +347,145 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
         }
       }
       let diagnosticsById = addForCycle(cycle, ctx.diagnosticsById)
-      log(ctx.options, "visit end module=" ++ moduleId ++ " status=cycle")
       { ...ctx, diagnosticsById }
     },
     _ => {
-      Map.set(moduleId, 1, ctx.visitState)
-      let ctx1 = { ...ctx, stack: [moduleId, ...ctx.stack] }
-      log(ctx.options, "parse start module=" ++ moduleId)
-      let parseResult = match (readSource(moduleId, ctx1.options)) {
-        Ok(source) => {
-          Error.clearErrors()
-          let parsed = Parser.parseResult(source)
-          let parseDiags = Error.getErrors()
-          Error.clearErrors()
-          log(
-            ctx1.options,
-            "parse end module="
-              ++ moduleId
-              ++ " diagnostics="
-              ++ toString(List.length(parseDiags))
-          )
-          Ok((parsed.program, parseDiags))
-        },
-        Err(fsErr) => {
-          log(
-            ctx1.options,
-            "parse end module="
-              ++ moduleId
-              ++ " diagnostics=1 read_error="
-              ++ toString(fsErr)
-          )
-          let diag = mkError(
-            "Failed to read module '" ++ moduleId ++ "': " ++ toString(fsErr)
-          )
-          let diagnosticsById = addDiagnostic(moduleId, diag, ctx1.diagnosticsById)
-          Err({ ...ctx1, diagnosticsById })
-        },
-      }
-
-      match (parseResult) {
-        Err(ctxFailed) => {
-          Map.set(moduleId, 2, ctxFailed.visitState)
-          let fallbackProgram: SurfaceAst.Program = { items: [], core: false }
-          let node: ModuleNode = {
-            id: moduleId,
-            sourcePath: moduleId,
-            imports: [],
-            reexports: [],
-            program: fallbackProgram,
-            diagnostics: getModuleDiagnostics(moduleId, ctxFailed.diagnosticsById),
-            status: StatusFailed,
-          }
-          Map.set(moduleId, node, ctxFailed.nodes)
-          {
-            ...ctxFailed,
-            stack: match (ctxFailed.stack) {
-              [_head, ...tail] => tail,
-              [] => [],
-            },
-            topoRev: [moduleId, ...ctxFailed.topoRev],
-          }
-        },
-        Ok((program, parseDiags)) => {
+      let hasOverride = Map.get(moduleId, ctx.options.sourceOverrides) != None
+      let cachedNode = Map.get(moduleId, ctx.options.cachedNodes)
+      let useCache = !hasOverride && cachedNode != None
+      match (cachedNode) {
+        Some(cached) when useCache => {
+          Map.set(moduleId, 1, ctx.visitState)
+          let ctx1 = { ...ctx, stack: [moduleId, ...ctx.stack] }
           let diagnosticsById = setModuleDiagnostics(
             moduleId,
-            parseDiags,
+            cached.diagnostics,
             ctx1.diagnosticsById
           )
-          let importSpecs = extractImportPaths(program)
-          let reexportSpecs = extractReexportPaths(program)
-          let (imports, diagnosticsById2) = resolveEdges(
-            moduleId,
-            "imports",
-            importSpecs,
-            ctx1.options,
-            diagnosticsById
-          )
-          let (reexports, diagnosticsById3) = resolveEdges(
-            moduleId,
-            "reexports",
-            reexportSpecs,
-            ctx1.options,
-            diagnosticsById2
-          )
-          let mut ctx2 = { ...ctx1, diagnosticsById: diagnosticsById3 }
-          let deps = List.append(imports, reexports)
+          let mut ctx2 = { ...ctx1, diagnosticsById }
+          let deps = List.append(cached.imports, cached.reexports)
           List.forEach(dep => {
-            log(ctx2.options, "visit recurse from=" ++ moduleId ++ " to=" ++ dep)
             ctx2 = visit(dep, ctx2)
           }, deps)
           Map.set(moduleId, 2, ctx2.visitState)
-          let finalDiags = getModuleDiagnostics(moduleId, ctx2.diagnosticsById)
-          let node: ModuleNode = {
-            id: moduleId,
-            sourcePath: moduleId,
-            imports,
-            reexports,
-            program,
-            diagnostics: finalDiags,
-            status: if (List.length(finalDiags) == 0) {
-              StatusOk
-            } else {
-              StatusPartial
-            },
-          }
-          Map.set(moduleId, node, ctx2.nodes)
+          Map.set(moduleId, cached, ctx2.nodes)
           let stackTail = match (ctx2.stack) {
             [_head, ...tail] => tail,
             [] => [],
           }
-          log(
-            ctx2.options,
-            "visit end module="
-              ++ moduleId
-              ++ " status="
-              ++ if (List.length(finalDiags) == 0) { "ok" } else { "partial" }
-          )
           { ...ctx2, stack: stackTail, topoRev: [moduleId, ...ctx2.topoRev] }
+        },
+        _ => {
+          Map.set(moduleId, 1, ctx.visitState)
+          let ctx1 = { ...ctx, stack: [moduleId, ...ctx.stack] }
+          let parseResult = match (readSource(moduleId, ctx1.options)) {
+            Ok(source) => {
+              Error.clearErrors()
+              let parsed = Parser.parseResult(source)
+              let parseDiags = Error.getErrors()
+              Error.clearErrors()
+              if (List.length(parseDiags) > 0) {
+                log(
+                  ctx1.options,
+                  "parsed module="
+                    ++ moduleId
+                    ++ " diagnostics="
+                    ++ toString(List.length(parseDiags))
+                )
+              } else {
+                void
+              }
+              Ok((parsed.program, parseDiags))
+            },
+            Err(fsErr) => {
+              log(
+                ctx1.options,
+                "parse error module="
+                  ++ moduleId
+                  ++ " read_error="
+                  ++ toString(fsErr)
+              )
+              let diag = mkError(
+                "Failed to read module '" ++ moduleId ++ "': " ++ toString(fsErr)
+              )
+              let diagnosticsById = addDiagnostic(moduleId, diag, ctx1.diagnosticsById)
+              Err({ ...ctx1, diagnosticsById })
+            },
+          }
+
+          match (parseResult) {
+            Err(ctxFailed) => {
+              Map.set(moduleId, 2, ctxFailed.visitState)
+              let fallbackProgram: SurfaceAst.Program = { items: [], core: false }
+              let node: ModuleNode = {
+                id: moduleId,
+                sourcePath: moduleId,
+                imports: [],
+                reexports: [],
+                program: fallbackProgram,
+                diagnostics: getModuleDiagnostics(moduleId, ctxFailed.diagnosticsById),
+                status: StatusFailed,
+              }
+              Map.set(moduleId, node, ctxFailed.nodes)
+              {
+                ...ctxFailed,
+                stack: match (ctxFailed.stack) {
+                  [_head, ...tail] => tail,
+                  [] => [],
+                },
+                topoRev: [moduleId, ...ctxFailed.topoRev],
+              }
+            },
+            Ok((program, parseDiags)) => {
+              let diagnosticsById = setModuleDiagnostics(
+                moduleId,
+                parseDiags,
+                ctx1.diagnosticsById
+              )
+              let importSpecs = extractImportPaths(program)
+              let reexportSpecs = extractReexportPaths(program)
+              let (imports, diagnosticsById2) = resolveEdges(
+                moduleId,
+                "imports",
+                importSpecs,
+                ctx1.options,
+                diagnosticsById
+              )
+              let (reexports, diagnosticsById3) = resolveEdges(
+                moduleId,
+                "reexports",
+                reexportSpecs,
+                ctx1.options,
+                diagnosticsById2
+              )
+              let mut ctx2 = { ...ctx1, diagnosticsById: diagnosticsById3 }
+              let deps = List.append(imports, reexports)
+              List.forEach(dep => {
+                ctx2 = visit(dep, ctx2)
+              }, deps)
+              Map.set(moduleId, 2, ctx2.visitState)
+              let finalDiags = getModuleDiagnostics(moduleId, ctx2.diagnosticsById)
+              let node: ModuleNode = {
+                id: moduleId,
+                sourcePath: moduleId,
+                imports,
+                reexports,
+                program,
+                diagnostics: finalDiags,
+                status: if (List.length(finalDiags) == 0) {
+                  StatusOk
+                } else {
+                  StatusPartial
+                },
+              }
+              Map.set(moduleId, node, ctx2.nodes)
+              let stackTail = match (ctx2.stack) {
+                [_head, ...tail] => tail,
+                [] => [],
+              }
+              { ...ctx2, stack: stackTail, topoRev: [moduleId, ...ctx2.topoRev] }
+            },
+          }
         },
       }
     },
@@ -509,7 +494,6 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
 
 provide let buildGraph = (entryPath: String, options: BuildOptions = defaultOptions()) => {
   let entry = normalizePath(ensureWmExtension(entryPath))
-  log(options, "buildGraph start entry=" ++ entry)
   let ctx0: BuildContext = {
     options,
     nodes: Map.make(),
@@ -525,14 +509,6 @@ provide let buildGraph = (entryPath: String, options: BuildOptions = defaultOpti
     topo: List.reverse(ctx.topoRev),
     diagnosticsById: ctx.diagnosticsById,
   }: ModuleGraph
-  log(
-    options,
-    "buildGraph end entry="
-      ++ entry
-      ++ " topoCount="
-      ++ toString(List.length(graph.topo))
-      ++ " nodeCount="
-      ++ toString(List.length(Map.toList(graph.nodes)))
-  )
+  void
   graph
 }
