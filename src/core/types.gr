@@ -2,12 +2,20 @@ module Types
 
 from "list" include List
 from "map" include Map
+from "string" include String
+
+let joinStrings = (sep: String, strs: List<String>) => match (strs) {
+  [] => "",
+  [x, ...xs] => List.reduce((acc, s) => acc ++ sep ++ s, x, xs),
+}
 
 provide enum rec Type {
   TNumber,
   TVoid,
   TVar(Number),
   TFun(Type, Type),
+  TTuple(List<Type>),
+  TNominal(String, List<Type>),
 }
 
 provide record Scheme {
@@ -31,6 +39,18 @@ provide let rec typeToString = (t: Type) => match (t) {
       _ => typeToString(a),
     }
     left ++ " -> " ++ typeToString(b)
+  },
+  TTuple(items) => {
+    let parts = List.map(typeToString, items)
+    "(" ++ joinStrings(", ", parts) ++ ")"
+  },
+  TNominal(name, args) => {
+    if (args == []) {
+      name
+    } else {
+      let rendered = List.map(typeToString, args)
+      name ++ "<" ++ joinStrings(", ", rendered) ++ ">"
+    }
   },
 }
 
@@ -63,6 +83,8 @@ let rec freeVars = (t: Type) => match (t) {
   TVoid => [],
   TVar(id) => [id],
   TFun(a, b) => List.append(freeVars(a), freeVars(b)),
+  TTuple(items) => List.flatten(List.map(freeVars, items)),
+  TNominal(_, args) => List.flatten(List.map(freeVars, args)),
 }
 
 let freeVarsScheme = (scheme: Scheme) => {
@@ -87,6 +109,9 @@ let rec applySubstType = (subst: Subst, t: Type) => match (t) {
     Some(t2) => applySubstType(subst, t2),
     None => t,
   },
+  TTuple(items) => TTuple(List.map(item => applySubstType(subst, item), items)),
+  TNominal(name, args) =>
+    TNominal(name, List.map(arg => applySubstType(subst, arg), args)),
 }
 
 let applySubstScheme = (subst: Subst, scheme: Scheme) => {

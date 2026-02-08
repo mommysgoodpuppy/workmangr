@@ -65,10 +65,10 @@ provide enum rec PatternKind {
   List(List<Pattern>, Option<Pattern>),
   AllErrors,
 }
-
 and provide record Pattern {
   node: Node,
   kind: PatternKind,
+  resolvedConstructor: Option<Name>,
 }
 
 provide enum rec TypeExprKind {
@@ -83,12 +83,10 @@ provide enum rec TypeExprKind {
   EffectRow(List<EffectCase>, Bool),
   UnitType,
 }
-
 and provide record TypeExpr {
   node: Node,
   kind: TypeExprKind,
 }
-
 and provide record EffectCase {
   node: Node,
   name: Name,
@@ -107,40 +105,34 @@ provide enum rec ExprKind {
   RecordLit(List<RecordItem>),
   Hole(Hole),
 }
-
 and provide record Expr {
   node: Node,
   kind: ExprKind,
 }
-
 and provide enum RecordItem {
   Field(Name, Expr),
   Spread(Expr),
 }
-
 and provide record FnClause {
   node: Node,
   param: Pattern,
   guard: Option<Expr>,
+  matchConstructor: Option<Name>,
   body: Expr,
 }
-
 and provide enum FnItemKind {
   Clause(FnClause),
   Include(Name),
   Hole(Hole),
 }
-
 and provide record FnItem {
   node: Node,
   kind: FnItemKind,
 }
-
 and provide record FnExpr {
   node: Node,
   items: List<FnItem>,
 }
-
 and provide record LetBinding {
   node: Node,
   name: Pattern,
@@ -159,12 +151,10 @@ provide enum rec Decl {
   InfixDecl(InfixDecl),
   PrefixDecl(PrefixDecl),
 }
-
 and provide record LetDecl {
   node: Node,
   bindings: List<LetBinding>,
 }
-
 and provide record TypeDecl {
   node: Node,
   name: Name,
@@ -172,32 +162,27 @@ and provide record TypeDecl {
   typeParams: List<Name>,
   body: TypeDeclBody,
 }
-
 and provide enum TypeDeclBody {
   Alias(TypeExpr),
   Variant(List<(Name, Option<TypeExpr>, Option<Annotation>)>),
 }
-
 and provide record RecordDecl {
   node: Node,
   name: Name,
   typeParams: List<Name>,
   fields: List<(Name, TypeExpr)>,
 }
-
 and provide record InfixDecl {
   node: Node,
   name: Name,
   precedence: Number,
   associativity: InfixAssociativity,
 }
-
 and provide enum InfixAssociativity {
   Left,
   Right,
   NonAssoc,
 }
-
 and provide record PrefixDecl {
   node: Node,
   name: Name,
@@ -224,7 +209,6 @@ provide record rec DeclGroup {
   kind: DeclGroupKind,
   decls: List<Decl>,
 }
-
 and provide enum DeclGroupKind {
   LetGroup(LetGroupMods),
   TypeGroup(TypeGroupMods),
@@ -232,23 +216,19 @@ and provide enum DeclGroupKind {
   OpGroup,
   RuleGroup(RuleKind),
 }
-
 and provide enum LetGroupMods {
   Plain,
   Rec,
   Mut,
 }
-
 and provide enum TypeGroupMods {
   Plain,
   Rec,
 }
-
 and provide enum RecordGroupMods {
   Plain,
   Rec,
 }
-
 and provide enum RuleKind {
   Domain,
   Policy,

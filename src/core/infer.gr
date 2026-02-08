@@ -10,6 +10,12 @@ from "./env.gr" include Env
 from "./constraints.gr" include Constraints
 from "./solver.gr" include Solver
 
+provide record MatchArmInfo {
+  clauseId: Number,
+  typeName: String,
+  constructor: Env.ConstructorInfo,
+}
+
 provide record InferState {
   nextVar: Number,
   subst: Types.Subst,
@@ -17,6 +23,7 @@ provide record InferState {
   nodeTypes: Map.Map<Number, Types.Type>,
   topBindings: Map.Map<String, Types.Scheme>,
   constraints: List<Constraints.Constraint>,
+  matchArms: Map.Map<Number, List<MatchArmInfo>>,
 }
 
 let makeInitialState = () => {
@@ -24,7 +31,15 @@ let makeInitialState = () => {
   let env = Env.empty()
   let nodeTypes = Map.make()
   let topBindings = Map.make()
-  { nextVar: 1, subst, env, nodeTypes, topBindings, constraints: [] }
+  {
+    nextVar: 1,
+    subst,
+    env,
+    nodeTypes,
+    topBindings,
+    constraints: [],
+    matchArms: Map.make(),
+  }
 }
 
 let recordConstraint = (state: InferState, constraint: Constraints.Constraint) =>
@@ -35,6 +50,141 @@ let originForNode = (nodeId: Number, description: String) =>
 
 let panicWithOrigin = (message: String, origin: Constraints.Origin) =>
   Panic.panic(message ++ " (" ++ Constraints.originToString(origin) ++ ")")
+
+let rec containsString = (values: List<String>, target: String) =>
+  match (values) {
+    [] => false,
+    [head, ...tail] => if (head == target) {
+      true
+    } else {
+      containsString(tail, target)
+    },
+  }
+
+let rec dedupeStrings = (values: List<String>, acc: List<String>) =>
+  match (values) {
+    [] => List.reverse(acc),
+    [head, ...tail] => if (containsString(acc, head)) {
+      dedupeStrings(tail, acc)
+    } else {
+      dedupeStrings(tail, [head, ...acc])
+    },
+  }
+
+let rec findConstructorInfo = (
+  constructors: List<Env.ConstructorInfo>,
+  target: String,
+) => match (constructors) {
+  [] => None,
+  [ctor, ...rest] => if (ctor.name == target) {
+    Some(ctor)
+  } else {
+    findConstructorInfo(rest, target)
+  },
+}
+
+let recordMatchArms = (fnExpr: CoreAst.FnExpr, state: InferState) => {
+  let rec gather = (
+    items: List<CoreAst.FnItem>,
+    acc: List<(Number, String, Option<String>)>,
+    hasWildcard: Bool,
+  ) => match (items) {
+    [] => (acc, hasWildcard),
+    [item, ...rest] => match (item.kind) {
+      CoreAst.Clause(clause) => match (clause.matchConstructor) {
+        Some(name) => {
+          let owner: Option<String> = Env.lookupConstructorOwner(
+            state.env,
+            name.text
+          )
+          let newWildcard = hasWildcard || owner == None
+          gather(
+            rest,
+            [(clause.node.id, name.text, owner), ...acc],
+            newWildcard
+          )
+        },
+        None => gather(rest, acc, true),
+      },
+      _ => gather(rest, acc, hasWildcard),
+    },
+  }
+
+  let (seeds, hasWildcard) = gather(fnExpr.items, [], false)
+  if (seeds == []) {
+    state
+  } else {
+    let owners = dedupeStrings(
+      List.filterMap((entry: (Number, String, Option<String>)) => {
+        let (_, _, owner) = entry
+        owner
+      }, seeds),
+      []
+    )
+    match (owners) {
+      [] => state,
+      [_only, ...more] when more != [] =>
+        Panic.panic("Match clauses reference multiple nominal types"),
+      [typeName] => match (Env.lookupConstructors(state.env, typeName)) {
+        None => state,
+        Some(expectedConstructors) => {
+          let typedSeeds = List.filter(
+            (entry: (Number, String, Option<String>)) => {
+              let (_, _, owner) = entry
+              match (owner) {
+                Some(name) => name == typeName,
+                None => false,
+              }
+            },
+            seeds
+          )
+          if (typedSeeds == []) {
+            state
+          } else {
+            let actualNames = dedupeStrings(
+              List.map(
+                (entry: (Number, String, Option<String>)) => {
+                  let (_, ctorName, _) = entry
+                  ctorName
+                },
+                typedSeeds
+              ),
+              []
+            )
+            let missing = if (hasWildcard) {
+              []
+            } else {
+              List.filter(
+                (ctor: Env.ConstructorInfo) =>
+                  !containsString(actualNames, ctor.name),
+                expectedConstructors
+              )
+            }
+            if (missing != []) {
+              Panic.panic("Match missing constructors for type " ++ typeName)
+            }
+            let armInfos = List.filterMap(
+              (entry: (Number, String, Option<String>)) => {
+                let (clauseId, ctorName, _) = entry
+                match (findConstructorInfo(expectedConstructors, ctorName)) {
+                  Some(info) => Some({ clauseId, typeName, constructor: info }),
+                  None => None,
+                }
+              },
+              typedSeeds
+            )
+            if (armInfos == []) {
+              state
+            } else {
+              Map.set(fnExpr.node.id, armInfos, state.matchArms)
+              { ...state, matchArms: state.matchArms }
+            }
+          }
+        },
+      },
+    }
+  }
+}
 
 let freshVar = (state: InferState) => {
   let id = state.nextVar
@@ -104,6 +254,73 @@ let recordNodeType = (id: Number, t: Types.Type, state: InferState) => {
   applied
 }
 
+let instantiateTypeParams = (typeParams: List<String>, state: InferState) => {
+  let paramMap: Map.Map<String, Types.Type> = Map.make()
+  let rec loop = (params: List<String>, st: InferState, acc: List<Types.Type>) =>
+    match (params) {
+      [] => (List.reverse(acc), paramMap, st),
+      [name, ...rest] => {
+        let (tVar, st1) = freshVar(st)
+        Map.set(name, tVar, paramMap)
+        loop(rest, st1, [tVar, ...acc])
+      },
+    }
+  loop(typeParams, state, [])
+}
+
+let rec typeExprToType = (
+  typeExpr: CoreAst.TypeExpr,
+  paramMap: Map.Map<String, Types.Type>,
+) => {
+  match (typeExpr.kind) {
+    CoreAst.Var(name) => match (Map.get(name.text, paramMap)) {
+      Some(t) => t,
+      None => Types.TNominal(name.text, []),
+    },
+    CoreAst.Ref(name, args) =>
+      Types.TNominal(
+        name.text,
+        List.map(arg => typeExprToType(arg, paramMap), args),
+      ),
+    CoreAst.Tuple(items) =>
+      Types.TTuple(List.map(item => typeExprToType(item, paramMap), items)),
+    CoreAst.UnitType => Types.TVoid,
+    _ => Panic.panic("Unsupported constructor type expression"),
+  }
+}
+
+let handleMatchApplication = (
+  fnExpr: CoreAst.FnExpr,
+  argType: Types.Type,
+  state: InferState,
+) => {
+  match (Map.get(fnExpr.node.id, state.matchArms)) {
+    Some(armInfos) => match (armInfos) {
+      [] => state,
+      [first, ..._] => {
+        match (Env.lookupType(state.env, first.typeName)) {
+          None => Panic.panic("Unknown nominal type " ++ first.typeName),
+          Some(typeInfo) => {
+            let (paramTypes, _paramMap, state1) = instantiateTypeParams(
+              typeInfo.typeParams,
+              state
+            )
+            let scrutineeType = Types.TNominal(typeInfo.name, paramTypes)
+            unifyForNode(
+              fnExpr.node.id,
+              "match scrutinee",
+              argType,
+              scrutineeType,
+              state1
+            )
+          },
+        }
+      },
+    },
+    None => state,
+  }
+}
+
 let lookupEnv = (name: String, state: InferState) => {
   match (Env.lookupValue(state.env, name)) {
     Some(scheme) => {
@@ -152,6 +369,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       (tRecorded, state1)
     },
     CoreAst.Fn(fnExpr) => {
+      let stateWithMatch = recordMatchArms(fnExpr, state)
       let clause = match (fnExpr.items) {
         [item, ..._] => match (item.kind) {
           CoreAst.Clause(c) => c,
@@ -163,7 +381,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
         CoreAst.Var(name) => name.text,
         _ => "_",
       }
-      let (paramType, state1) = freshVar(state)
+      let (paramType, state1) = freshVar(stateWithMatch)
       let monoScheme: Types.Scheme = { quantifiers: [], ty: paramType }
       let (fnType, stFn) = withBinding(paramName, monoScheme, state1, st => {
         let (tBody, stBody) = inferExpr(clause.body, st)
@@ -183,9 +401,13 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
         Types.TFun(tArg, tRes),
         state3
       )
-      let tApplied = apply(state4, tRes)
-      let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
-      (tRecorded, state4)
+      let state5 = match (callee.kind) {
+        CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, tArg, state4),
+        _ => state4,
+      }
+      let tApplied = apply(state5, tRes)
+      let tRecorded = recordNodeType(expr.node.id, tApplied, state5)
+      (tRecorded, state5)
     },
     CoreAst.Let(binding, body) => {
       let (tValue, state1) = inferExpr(binding.value, state)
@@ -265,6 +487,39 @@ let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
   state1
 }
 
+let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
+  let typeName = decl.name.text
+  let typeParams = List.map((name: CoreAst.Name) => name.text, decl.typeParams)
+  let infection = match (decl.infection) {
+    Some(name) => Some(name.text),
+    None => None,
+  }
+  let constructors = match (decl.body) {
+    CoreAst.Alias(_) => [],
+    CoreAst.Variant(ctors) =>
+      List.map(
+        (
+          (ctorName, payload, annotation): (
+            CoreAst.Name,
+            Option<CoreAst.TypeExpr>,
+            Option<CoreAst.Annotation>
+          ),
+        ) => {
+          { name: ctorName.text, payload, annotation }: Env.ConstructorInfo
+        },
+        ctors
+      ),
+  }
+  let info: Env.TypeInfo = {
+    name: typeName,
+    typeParams,
+    constructors,
+    infection,
+  }
+  let env = Env.registerType(state.env, info)
+  { ...state, env }
+}
+
 let rec inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) => {
   match (items) {
     [] => state,
@@ -289,6 +544,7 @@ let rec inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) => {
                     }
                     inferBindings(ld.bindings, st)
                   },
+                  CoreAst.TypeDecl(td) => registerTypeDecl(td, st),
                   _ => st,
                 }
                 inferDecls(restDecls, st1)
