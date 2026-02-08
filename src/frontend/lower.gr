@@ -5,50 +5,43 @@ from "../core/core_ast.gr" include CoreAst
 from "list" include List
 from "../core/error.gr" include Error
 
-let lowerNode = (node: SurfaceAst.Node) => {
-  id: node.id,
-  span: node.span,
-}: CoreAst.Node
+let lowerNode = (node: SurfaceAst.Node) =>
+  { id: node.id, span: node.span }: CoreAst.Node
 
-let lowerName = (name: SurfaceAst.Name) => {
-  node: lowerNode(name.node),
-  text: name.text,
-}: CoreAst.Name
+let lowerName = (name: SurfaceAst.Name) =>
+  { node: lowerNode(name.node), text: name.text }: CoreAst.Name
 
-let lowerHole = (hole: SurfaceAst.Hole) => {
-  node: lowerNode(hole.node),
-  kind: match (hole.kind) {
-    SurfaceAst.ExprHole => CoreAst.ExprHole,
-    SurfaceAst.TypeHole => CoreAst.TypeHole,
-    SurfaceAst.PatternHole => CoreAst.PatternHole,
-    SurfaceAst.NameHole => CoreAst.NameHole,
-  },
-  origin: match (hole.origin) {
-    SurfaceAst.UserTyped => CoreAst.UserTyped,
-    SurfaceAst.Inferred => CoreAst.Inferred,
-  },
-}: CoreAst.Hole
+let lowerHole = (hole: SurfaceAst.Hole) =>
+  {
+    node: lowerNode(hole.node),
+    kind: match (hole.kind) {
+      SurfaceAst.ExprHole => CoreAst.ExprHole,
+      SurfaceAst.TypeHole => CoreAst.TypeHole,
+      SurfaceAst.PatternHole => CoreAst.PatternHole,
+      SurfaceAst.NameHole => CoreAst.NameHole,
+    },
+    origin: match (hole.origin) {
+      SurfaceAst.UserTyped => CoreAst.UserTyped,
+      SurfaceAst.Inferred => CoreAst.Inferred,
+    },
+  }: CoreAst.Hole
 
-let lowerAtomLiteral = (lit: SurfaceAst.AtomLiteral) =>
-  match (lit) {
-    SurfaceAst.Int(n) => CoreAst.Int(n),
-    SurfaceAst.Bool(b) => CoreAst.Bool(b),
-    SurfaceAst.Char(c) => CoreAst.Char(c),
-    SurfaceAst.Str(s) => CoreAst.Str(s),
-    SurfaceAst.Byte(n) => CoreAst.Byte(n),
-    SurfaceAst.Unit => CoreAst.Unit,
-  }
+let lowerAtomLiteral = (lit: SurfaceAst.AtomLiteral) => match (lit) {
+  SurfaceAst.Int(n) => CoreAst.Int(n),
+  SurfaceAst.Bool(b) => CoreAst.Bool(b),
+  SurfaceAst.Char(c) => CoreAst.Char(c),
+  SurfaceAst.Str(s) => CoreAst.Str(s),
+  SurfaceAst.Byte(n) => CoreAst.Byte(n),
+  SurfaceAst.Unit => CoreAst.Unit,
+}
 
-let mapOption = (opt, fn) =>
-  match (opt) {
-    None => None,
-    Some(value) => Some(fn(value)),
-  }
+let mapOption = (opt, fn) => match (opt) {
+  None => None,
+  Some(value) => Some(fn(value)),
+}
 
-let makeExpr = (node: SurfaceAst.Node, kind: CoreAst.ExprKind) => {
-  node: lowerNode(node),
-  kind,
-}: CoreAst.Expr
+let makeExpr = (node: SurfaceAst.Node, kind: CoreAst.ExprKind) =>
+  { node: lowerNode(node), kind }: CoreAst.Expr
 
 let makeIdentExpr = (node: SurfaceAst.Node, text: String) => {
   let name: CoreAst.Name = { node: lowerNode(node), text }
@@ -61,10 +54,8 @@ let makeUnitExpr = (node: SurfaceAst.Node) =>
 let makeTupleExpr = (node: SurfaceAst.Node, exprs: List<CoreAst.Expr>) =>
   makeExpr(node, CoreAst.Tuple(exprs))
 
-let makeWildcardPattern = (node: SurfaceAst.Node) => {
-  node: lowerNode(node),
-  kind: CoreAst.Wildcard,
-}: CoreAst.Pattern
+let makeWildcardPattern = (node: SurfaceAst.Node) =>
+  { node: lowerNode(node), kind: CoreAst.Wildcard }: CoreAst.Pattern
 
 let rec lowerPattern = (pattern: SurfaceAst.Pattern) => {
   let kind: CoreAst.PatternKind = match (pattern.kind) {
@@ -92,7 +83,7 @@ let rec lowerTypeExpr = (typeExpr: SurfaceAst.TypeExpr) => {
     SurfaceAst.Tuple(items) => CoreAst.Tuple(List.map(lowerTypeExpr, items)),
     SurfaceAst.Record(fields) =>
       CoreAst.Record(
-        List.map(((name, t)) => (lowerName(name), lowerTypeExpr(t)), fields)
+        List.map(((name, t)) => (lowerName(name), lowerTypeExpr(t)), fields),
       ),
     SurfaceAst.Arrow(params, result) =>
       CoreAst.Arrow(List.map(lowerTypeExpr, params), lowerTypeExpr(result)),
@@ -100,12 +91,16 @@ let rec lowerTypeExpr = (typeExpr: SurfaceAst.TypeExpr) => {
       CoreAst.Ptr(lowerTypeExpr(inner), mapOption(stateOpt, lowerName)),
     SurfaceAst.EffectRow(cases, hasTail) =>
       CoreAst.EffectRow(
-        List.map((effectCase: SurfaceAst.EffectCase) => {
-          node: lowerNode(effectCase.node),
-          name: lowerName(effectCase.name),
-          payload: mapOption(effectCase.payload, lowerTypeExpr),
-        }: CoreAst.EffectCase, cases),
-        hasTail
+        List.map(
+          (effectCase: SurfaceAst.EffectCase) =>
+            {
+              node: lowerNode(effectCase.node),
+              name: lowerName(effectCase.name),
+              payload: mapOption(effectCase.payload, lowerTypeExpr),
+            }: CoreAst.EffectCase,
+          cases
+        ),
+        hasTail,
       ),
     SurfaceAst.UnitType => CoreAst.UnitType,
   }
@@ -114,7 +109,7 @@ let rec lowerTypeExpr = (typeExpr: SurfaceAst.TypeExpr) => {
 
 let rec exprToPattern = (expr: SurfaceAst.Expr) => {
   match (expr.kind) {
-    SurfaceAst.Ident({ _, text }) when text == "_" => {
+    SurfaceAst.Ident({ text, _ }) when text == "_" => {
       {
         node: expr.node,
         kind: SurfaceAst.Wildcard,
@@ -154,25 +149,24 @@ let rec exprToPattern = (expr: SurfaceAst.Expr) => {
         Error.Lowering,
         expr.node.span,
         "Unsupported pattern in => clause",
-        []
+        [],
+        severity=Error.SError
       ),
   }
 }
 
-let rec lowerRecordItem = (item: SurfaceAst.RecordItem) =>
-  match (item) {
-    SurfaceAst.Field(name, value) =>
-      CoreAst.Field(lowerName(name), lowerExpr(value)),
-    SurfaceAst.Spread(value) => CoreAst.Spread(lowerExpr(value)),
-  }
-
-and lowerLetBinding = (binding: SurfaceAst.LetBinding) => {
-  node: lowerNode(binding.node),
-  name: lowerPattern(binding.name),
-  annotation: mapOption(binding.annotation, lowerTypeExpr),
-  value: lowerExpr(binding.value),
-}: CoreAst.LetBinding
-
+let rec lowerRecordItem = (item: SurfaceAst.RecordItem) => match (item) {
+  SurfaceAst.Field(name, value) =>
+    CoreAst.Field(lowerName(name), lowerExpr(value)),
+  SurfaceAst.Spread(value) => CoreAst.Spread(lowerExpr(value)),
+}
+and lowerLetBinding = (binding: SurfaceAst.LetBinding) =>
+  {
+    node: lowerNode(binding.node),
+    name: lowerPattern(binding.name),
+    annotation: mapOption(binding.annotation, lowerTypeExpr),
+    value: lowerExpr(binding.value),
+  }: CoreAst.LetBinding
 and lowerFnClause = (clause: SurfaceAst.FnClause) => {
   let guard = match (clause.guard) {
     None => None,
@@ -186,33 +180,32 @@ and lowerFnClause = (clause: SurfaceAst.FnClause) => {
     body: loweredBody,
   }: CoreAst.FnClause
 }
-
 and lowerFnExpr = (fnExpr: SurfaceAst.FnExpr) => {
   let items = List.filterMap(
-    (item: SurfaceAst.FnItem) =>
-      match (item.kind) {
-        SurfaceAst.Clause(clause) =>
-          Some({
+    (item: SurfaceAst.FnItem) => match (item.kind) {
+      SurfaceAst.Clause(clause) =>
+        Some(
+          {
             node: lowerNode(item.node),
             kind: CoreAst.Clause(lowerFnClause(clause)),
-          }: CoreAst.FnItem),
-        SurfaceAst.Include(name) =>
-          Some({
-            node: lowerNode(item.node),
-            kind: CoreAst.Include(lowerName(name)),
-          }: CoreAst.FnItem),
-        SurfaceAst.Hole(hole) =>
-          Some({
-            node: lowerNode(item.node),
-            kind: CoreAst.Hole(lowerHole(hole)),
-          }: CoreAst.FnItem),
-        SurfaceAst.Trivia(_) => None,
-      },
+          }: CoreAst.FnItem,
+        ),
+      SurfaceAst.Include(name) =>
+        Some(
+          { node: lowerNode(item.node), kind: CoreAst.Include(lowerName(name)) }:
+            CoreAst.FnItem,
+        ),
+      SurfaceAst.Hole(hole) =>
+        Some(
+          { node: lowerNode(item.node), kind: CoreAst.Hole(lowerHole(hole)) }:
+            CoreAst.FnItem,
+        ),
+      SurfaceAst.Trivia(_) => None,
+    },
     fnExpr.items
   )
   { node: lowerNode(fnExpr.node), items }: CoreAst.FnExpr
 }
-
 and normalizeCallArgs = (node: SurfaceAst.Node, args: List<CoreAst.Expr>) => {
   match (args) {
     [] => makeUnitExpr(node),
@@ -220,22 +213,31 @@ and normalizeCallArgs = (node: SurfaceAst.Node, args: List<CoreAst.Expr>) => {
     _ => makeTupleExpr(node, args),
   }
 }
-
-and prependArg = (node: SurfaceAst.Node, firstArg: CoreAst.Expr, argExpr: CoreAst.Expr) => {
+and prependArg = (
+  node: SurfaceAst.Node,
+  firstArg: CoreAst.Expr,
+  argExpr: CoreAst.Expr,
+) => {
   match (argExpr.kind) {
     CoreAst.Tuple(items) => makeTupleExpr(node, [firstArg, ...items]),
     _ => makeTupleExpr(node, [firstArg, argExpr]),
   }
 }
-
-and apply2 = (node: SurfaceAst.Node, callee: CoreAst.Expr, arg1: CoreAst.Expr, arg2: CoreAst.Expr) => {
+and apply2 = (
+  node: SurfaceAst.Node,
+  callee: CoreAst.Expr,
+  arg1: CoreAst.Expr,
+  arg2: CoreAst.Expr,
+) => {
   let applied1 = makeExpr(node, CoreAst.Apply(callee, arg1))
   makeExpr(node, CoreAst.Apply(applied1, arg2))
 }
-
 and lowerPostfix = (node: SurfaceAst.Node, pf: SurfaceAst.Postfix) => {
   let loweredTarget = lowerExpr(pf.target)
-  let rec fold = (currentExpr: CoreAst.Expr, segments: List<SurfaceAst.PostfixSegment>) => {
+  let rec fold = (
+    currentExpr: CoreAst.Expr,
+    segments: List<SurfaceAst.PostfixSegment>,
+  ) => {
     match (segments) {
       [] => currentExpr,
       [SurfaceAst.Call(args), ...rest] => {
@@ -260,8 +262,11 @@ and lowerPostfix = (node: SurfaceAst.Node, pf: SurfaceAst.Postfix) => {
   }
   fold(loweredTarget, pf.segments)
 }
-
-and lowerArrow = (exprNode: SurfaceAst.Node, lhs: SurfaceAst.Expr, rhs: SurfaceAst.Expr) => {
+and lowerArrow = (
+  exprNode: SurfaceAst.Node,
+  lhs: SurfaceAst.Expr,
+  rhs: SurfaceAst.Expr,
+) => {
   let paramPattern = exprToPattern(lhs)
   let loweredRhs = lowerExpr(rhs)
   let clause: CoreAst.FnClause = {
@@ -270,12 +275,18 @@ and lowerArrow = (exprNode: SurfaceAst.Node, lhs: SurfaceAst.Expr, rhs: SurfaceA
     guard: None,
     body: loweredRhs,
   }
-  let item: CoreAst.FnItem = { node: lowerNode(exprNode), kind: CoreAst.Clause(clause) }
+  let item: CoreAst.FnItem = {
+    node: lowerNode(exprNode),
+    kind: CoreAst.Clause(clause),
+  }
   let fnExpr: CoreAst.FnExpr = { node: lowerNode(exprNode), items: [item] }
   makeExpr(exprNode, CoreAst.Fn(fnExpr))
 }
-
-and lowerPipe = (exprNode: SurfaceAst.Node, lhs: SurfaceAst.Expr, rhs: SurfaceAst.Expr) => {
+and lowerPipe = (
+  exprNode: SurfaceAst.Node,
+  lhs: SurfaceAst.Expr,
+  rhs: SurfaceAst.Expr,
+) => {
   let loweredLhs = lowerExpr(lhs)
   let loweredRhs = lowerExpr(rhs)
   match (loweredRhs.kind) {
@@ -286,7 +297,6 @@ and lowerPipe = (exprNode: SurfaceAst.Node, lhs: SurfaceAst.Expr, rhs: SurfaceAs
     _ => makeExpr(exprNode, CoreAst.Apply(loweredRhs, loweredLhs)),
   }
 }
-
 and lowerMatchExpr = (exprNode: SurfaceAst.Node, m: SurfaceAst.MatchExpr) => {
   let loweredBundle = lowerFnExpr(m.bundle)
   let bundleExpr = makeExpr(m.bundle.node, CoreAst.Fn(loweredBundle))
@@ -299,14 +309,20 @@ and lowerMatchExpr = (exprNode: SurfaceAst.Node, m: SurfaceAst.MatchExpr) => {
     (Some(scrutinee), true) => {
       let loweredScrutinee = lowerExpr(scrutinee)
       let param = exprToPattern(scrutinee)
-      let innerApply = makeExpr(exprNode, CoreAst.Apply(bundleExpr, loweredScrutinee))
+      let innerApply = makeExpr(
+        exprNode,
+        CoreAst.Apply(bundleExpr, loweredScrutinee)
+      )
       let clause: CoreAst.FnClause = {
         node: lowerNode(exprNode),
         param: lowerPattern(param),
         guard: None,
         body: innerApply,
       }
-      let item: CoreAst.FnItem = { node: lowerNode(exprNode), kind: CoreAst.Clause(clause) }
+      let item: CoreAst.FnItem = {
+        node: lowerNode(exprNode),
+        kind: CoreAst.Clause(clause),
+      }
       let fnExpr: CoreAst.FnExpr = { node: lowerNode(exprNode), items: [item] }
       makeExpr(exprNode, CoreAst.Fn(fnExpr))
     },
@@ -315,11 +331,11 @@ and lowerMatchExpr = (exprNode: SurfaceAst.Node, m: SurfaceAst.MatchExpr) => {
         Error.Lowering,
         exprNode.span,
         "invalid match arrow shape",
-        []
+        [],
+        severity=Error.SError
       ),
   }
 }
-
 and lowerAssignExpr = (exprNode: SurfaceAst.Node, asg: SurfaceAst.AssignExpr) => {
   let assignFn = makeIdentExpr(exprNode, "assign")
   let target = lowerExpr(asg.target)
@@ -327,7 +343,6 @@ and lowerAssignExpr = (exprNode: SurfaceAst.Node, asg: SurfaceAst.AssignExpr) =>
   let arg = makeTupleExpr(exprNode, [target, value])
   makeExpr(exprNode, CoreAst.Apply(assignFn, arg))
 }
-
 and lowerSeqExpr = (exprNode: SurfaceAst.Node, items: List<SurfaceAst.Expr>) => {
   let rec fold = (rest: List<SurfaceAst.Expr>) => {
     match (rest) {
@@ -347,14 +362,16 @@ and lowerSeqExpr = (exprNode: SurfaceAst.Node, items: List<SurfaceAst.Expr>) => 
   }
   fold(items)
 }
-
 and lowerExpr = (expr: SurfaceAst.Expr) => {
   match (expr.kind: SurfaceAst.ExprKind) {
-    SurfaceAst.Lit(lit) => makeExpr(expr.node, CoreAst.Lit(lowerAtomLiteral(lit))),
-    SurfaceAst.Ident(name) => makeExpr(expr.node, CoreAst.Ident(lowerName(name))),
+    SurfaceAst.Lit(lit) =>
+      makeExpr(expr.node, CoreAst.Lit(lowerAtomLiteral(lit))),
+    SurfaceAst.Ident(name) =>
+      makeExpr(expr.node, CoreAst.Ident(lowerName(name))),
     SurfaceAst.Hole(hole) => makeExpr(expr.node, CoreAst.Hole(lowerHole(hole))),
     SurfaceAst.Paren(inner) => lowerExpr(inner),
-    SurfaceAst.Tuple(exprs) => makeExpr(expr.node, CoreAst.Tuple(List.map(lowerExpr, exprs))),
+    SurfaceAst.Tuple(exprs) =>
+      makeExpr(expr.node, CoreAst.Tuple(List.map(lowerExpr, exprs))),
     SurfaceAst.RecordLit(items) =>
       makeExpr(expr.node, CoreAst.RecordLit(List.map(lowerRecordItem, items))),
     SurfaceAst.Seq(items) => lowerSeqExpr(expr.node, items),
@@ -365,14 +382,18 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
         None => None,
         Some(e) => Some(lowerExpr(e)),
       }
-      makeExpr(expr.node, CoreAst.If(lowerExpr(cond), lowerExpr(thenExpr), loweredElse))
+      makeExpr(
+        expr.node,
+        CoreAst.If(lowerExpr(cond), lowerExpr(thenExpr), loweredElse)
+      )
     },
     SurfaceAst.Let(binding, body) => {
       let loweredBody = lowerExpr(body)
       let coreBinding = lowerLetBinding(binding)
       makeExpr(expr.node, CoreAst.Let(coreBinding, loweredBody))
     },
-    SurfaceAst.Fn(fnExpr) => makeExpr(expr.node, CoreAst.Fn(lowerFnExpr(fnExpr))),
+    SurfaceAst.Fn(fnExpr) =>
+      makeExpr(expr.node, CoreAst.Fn(lowerFnExpr(fnExpr))),
     SurfaceAst.Match(m) => lowerMatchExpr(expr.node, m),
     SurfaceAst.Block(block) => lowerExpr(block.body),
     SurfaceAst.Assign(asg) => lowerAssignExpr(expr.node, asg),
@@ -385,14 +406,20 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
           lowerPipe(expr.node, first, rhs),
         _ => {
           let loweredFirst = lowerExpr(chain.first)
-          let rec fold = (acc: CoreAst.Expr, rest: List<(SurfaceAst.Name, SurfaceAst.Expr)>) => {
+          let rec fold = (
+            acc: CoreAst.Expr,
+            rest: List<(SurfaceAst.Name, SurfaceAst.Expr)>,
+          ) => {
             match (rest) {
               [] => acc,
               [(op, rhs), ...tail] => {
                 let opExpr = makeExpr(op.node, CoreAst.Ident(lowerName(op)))
                 let rhsExpr = lowerExpr(rhs)
                 let argExpr = makeTupleExpr(expr.node, [acc, rhsExpr])
-                let applied = makeExpr(expr.node, CoreAst.Apply(opExpr, argExpr))
+                let applied = makeExpr(
+                  expr.node,
+                  CoreAst.Apply(opExpr, argExpr)
+                )
                 fold(applied, tail)
               },
             }
@@ -406,20 +433,23 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
         Error.Lowering,
         expr.node.span,
         "Unsupported surface expression in lowering",
-        []
+        [],
+        severity=Error.SError
       ),
   }
 }
 
-let lowerDecl = (d: SurfaceAst.Decl) =>
-  match (d) {
-    SurfaceAst.LetDecl(ld) =>
-      CoreAst.LetDecl({
+let lowerDecl = (d: SurfaceAst.Decl) => match (d) {
+  SurfaceAst.LetDecl(ld) =>
+    CoreAst.LetDecl(
+      {
         node: lowerNode(ld.node),
         bindings: List.map(lowerLetBinding, ld.bindings),
-      }),
-    SurfaceAst.TypeDecl(td) =>
-      CoreAst.TypeDecl({
+      },
+    ),
+  SurfaceAst.TypeDecl(td) =>
+    CoreAst.TypeDecl(
+      {
         node: lowerNode(td.node),
         name: lowerName(td.name),
         infection: mapOption(td.infection, lowerName),
@@ -428,22 +458,34 @@ let lowerDecl = (d: SurfaceAst.Decl) =>
           SurfaceAst.Alias(t) => CoreAst.Alias(lowerTypeExpr(t)),
           SurfaceAst.Variant(cases) =>
             CoreAst.Variant(
-              List.map(((name, payload, annotation)) =>
-                (lowerName(name), mapOption(payload, lowerTypeExpr), annotation),
+              List.map(
+                ((name, payload, annotation)) =>
+                  (
+                    lowerName(name),
+                    mapOption(payload, lowerTypeExpr),
+                    annotation,
+                  ),
                 cases
-              )
+              ),
             ),
         },
-      }),
-    SurfaceAst.RecordDecl(rd) =>
-      CoreAst.RecordDecl({
+      },
+    ),
+  SurfaceAst.RecordDecl(rd) =>
+    CoreAst.RecordDecl(
+      {
         node: lowerNode(rd.node),
         name: lowerName(rd.name),
         typeParams: List.map(lowerName, rd.typeParams),
-        fields: List.map(((name, t)) => (lowerName(name), lowerTypeExpr(t)), rd.fields),
-      }),
-    SurfaceAst.InfixDecl(id) =>
-      CoreAst.InfixDecl({
+        fields: List.map(
+          ((name, t)) => (lowerName(name), lowerTypeExpr(t)),
+          rd.fields
+        ),
+      },
+    ),
+  SurfaceAst.InfixDecl(id) =>
+    CoreAst.InfixDecl(
+      {
         node: lowerNode(id.node),
         name: lowerName(id.name),
         precedence: id.precedence,
@@ -452,68 +494,69 @@ let lowerDecl = (d: SurfaceAst.Decl) =>
           SurfaceAst.Right => CoreAst.Right,
           SurfaceAst.NonAssoc => CoreAst.NonAssoc,
         },
-      }),
-    SurfaceAst.PrefixDecl(pd) =>
-      CoreAst.PrefixDecl({ node: lowerNode(pd.node), name: lowerName(pd.name) }),
-  }
+      },
+    ),
+  SurfaceAst.PrefixDecl(pd) =>
+    CoreAst.PrefixDecl({ node: lowerNode(pd.node), name: lowerName(pd.name) }),
+}
 
-let lowerDeclGroup = (dg: SurfaceAst.DeclGroup) => {
-  node: lowerNode(dg.node),
-  exported: dg.exported,
-  kind: match (dg.kind) {
-    SurfaceAst.LetGroup(mods) =>
-      CoreAst.LetGroup(match (mods) {
+let lowerDeclGroup = (dg: SurfaceAst.DeclGroup) =>
+  {
+    node: lowerNode(dg.node),
+    exported: dg.exported,
+    kind: match (dg.kind) {
+      SurfaceAst.LetGroup(mods) => CoreAst.LetGroup(match (mods) {
         SurfaceAst.Plain => CoreAst.Plain,
         SurfaceAst.Rec => CoreAst.Rec,
         SurfaceAst.Mut => CoreAst.Mut,
       }),
-    SurfaceAst.TypeGroup(mods) =>
-      CoreAst.TypeGroup(match (mods) {
+      SurfaceAst.TypeGroup(mods) => CoreAst.TypeGroup(match (mods) {
         SurfaceAst.Plain => CoreAst.Plain,
         SurfaceAst.Rec => CoreAst.Rec,
       }),
-    SurfaceAst.RecordGroup(mods) =>
-      CoreAst.RecordGroup(match (mods) {
+      SurfaceAst.RecordGroup(mods) => CoreAst.RecordGroup(match (mods) {
         SurfaceAst.Plain => CoreAst.Plain,
         SurfaceAst.Rec => CoreAst.Rec,
       }),
-    SurfaceAst.OpGroup => CoreAst.OpGroup,
-    SurfaceAst.RuleGroup(kind) =>
-      CoreAst.RuleGroup(match (kind) {
+      SurfaceAst.OpGroup => CoreAst.OpGroup,
+      SurfaceAst.RuleGroup(kind) => CoreAst.RuleGroup(match (kind) {
         SurfaceAst.Domain => CoreAst.Domain,
         SurfaceAst.Policy => CoreAst.Policy,
         SurfaceAst.Op => CoreAst.Op,
         SurfaceAst.Annotate => CoreAst.Annotate,
       }),
-  },
-  decls: List.map(lowerDecl, dg.decls),
-}: CoreAst.DeclGroup
+    },
+    decls: List.map(lowerDecl, dg.decls),
+  }: CoreAst.DeclGroup
 
-let lowerTopItem = (ti: SurfaceAst.TopItem) =>
-  match (ti) {
-    SurfaceAst.DeclGroup(dg) => Some(CoreAst.DeclGroup(lowerDeclGroup(dg))),
-    SurfaceAst.Import(id) =>
-      Some(
-        CoreAst.Import({
+let lowerTopItem = (ti: SurfaceAst.TopItem) => match (ti) {
+  SurfaceAst.DeclGroup(dg) => Some(CoreAst.DeclGroup(lowerDeclGroup(dg))),
+  SurfaceAst.Import(id) =>
+    Some(
+      CoreAst.Import(
+        {
           node: lowerNode(id.node),
           modulePath: id.modulePath,
           alias: mapOption(id.alias, lowerName),
-        })
+        },
       ),
-    SurfaceAst.Reexport(rd) =>
-      Some(CoreAst.Reexport({ node: lowerNode(rd.node), modulePath: rd.modulePath })),
-    SurfaceAst.Export(exp) => Some(CoreAst.Export({ node: lowerNode(exp.node) })),
-    SurfaceAst.Directive(dir) =>
-      Some(
-        CoreAst.Directive({
-          name: lowerName(dir.name),
-          args: List.map(lowerExpr, dir.args),
-        })
+    ),
+  SurfaceAst.Reexport(rd) =>
+    Some(
+      CoreAst.Reexport({ node: lowerNode(rd.node), modulePath: rd.modulePath }),
+    ),
+  SurfaceAst.Export(exp) =>
+    Some(CoreAst.Export({ node: lowerNode(exp.node), })),
+  SurfaceAst.Directive(dir) =>
+    Some(
+      CoreAst.Directive(
+        { name: lowerName(dir.name), args: List.map(lowerExpr, dir.args) },
       ),
-    SurfaceAst.Mark(_) | SurfaceAst.Trivia(_) => None,
-  }
+    ),
+  SurfaceAst.Mark(_) | SurfaceAst.Trivia(_) => None,
+}
 
 provide let lowerProgram = (program: SurfaceAst.Program) => {
   let items = List.filterMap(lowerTopItem, program.items)
-  { items: items }: CoreAst.Program
+  { items, }: CoreAst.Program
 }

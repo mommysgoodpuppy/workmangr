@@ -8,6 +8,7 @@ from "number" include Number
 from "string" include String
 from "uint8" include Uint8
 from "wasi/file" include File
+from "wasi/process" include Process
 from "json" include Json
 
 from "../../core/source.gr" include Source
@@ -29,6 +30,28 @@ let logErr = (text: String) => {
   void
 }
 
+let hasArg = (flag: String) => {
+  match (Process.argv()) {
+    Err(_) => false,
+    Ok(args) => {
+      Array.reduce((found, arg) => {
+        if (found) {
+          true
+        } else {
+          arg == flag
+        }
+      }, false, args)
+    },
+  }
+}
+
+let isInlayWorker = hasArg("--inlay-worker")
+let _ = logErr("[LSP] isInlayWorker=" ++ (if (isInlayWorker) {
+  "true"
+} else {
+  "false"
+}))
+
 let mut debugEnabled = true
 let mut workspaceRootPath: Option<String> = None
 let v0StdRoot = "c:/GIT/workman/std"
@@ -38,12 +61,8 @@ let mut shouldExit = false
 let inlayMaxSourceChars = 120000
 let formatMaxSourceChars = 200000
 let docVersions = Map.make()
-let inlayCache = Map.make()
-let mut inlayCacheSize = 0
-let inlayCacheMaxEntries = 256
-let mut inlayCachedUri: Option<String> = None
-let mut pendingInlayWarmUri: Option<String> = None
-let mut pendingInlayWarmVersion = 0
+let inlayCache: Map.Map<String, String> = Map.make()
+let mut inlayCachedVersion: Map.Map<String, Number> = Map.make()
 let cachedGraphNodes: Map.Map<String, ModuleSystem.ModuleNode> = Map.make()
 
 let debug = (text: String) => {
@@ -70,188 +89,64 @@ let debugFormat = (text: String) => {
   }
 }
 
-let documentVersion = (uri: String) =>
-  match (Map.get(uri, docVersions)) {
-    Some(v) => v,
-    None => 0,
-  }
-
-let inlayCacheKey = (
-  uri: String,
-  version: Number,
-  rangeStart: Number,
-  rangeEnd: Number,
-) =>
-  uri
-    ++ "|v="
-    ++ toString(version)
-    ++ "|s="
-    ++ toString(rangeStart)
-    ++ "|e="
-    ++ toString(rangeEnd)
-
-let clearInlayCacheForUri = (uri: String) => {
-  let prefix = uri ++ "|"
-  let mut removed = 0
-  List.forEach(((key, _)) => {
-    if (String.startsWith(prefix, key)) {
-      Map.remove(key, inlayCache)
-      removed += 1
-    } else {
-      void
-    }
-  }, Map.toList(inlayCache))
-  if (removed > 0) {
-    inlayCacheSize -= removed
-    if (inlayCacheSize < 0) {
-      inlayCacheSize = 0
-    } else {
-      void
-    }
-    debug(
-      "[LSP inlay] cache invalidated uri="
-        ++ uri
-        ++ " removed="
-        ++ toString(removed)
-        ++ " remaining="
-        ++ toString(inlayCacheSize)
-    )
-  } else {
-    void
-  }
+let documentVersion = (uri: String) => match (Map.get(uri, docVersions)) {
+  Some(v) => v,
+  None => 0,
 }
 
-let clearAllInlayCache = () => {
-  List.forEach(((key, _)) => {
-    Map.remove(key, inlayCache)
-  }, Map.toList(inlayCache))
-  inlayCacheSize = 0
-  inlayCachedUri = None
-  debug("[LSP inlay] cache cleared")
-}
-
-let ensureSingleUriInlayCache = (uri: String) => {
-  match (inlayCachedUri) {
-    Some(cachedUri) => {
-      if (cachedUri == uri) {
-        void
-      } else {
-        clearAllInlayCache()
-        inlayCachedUri = Some(uri)
-      }
-    },
-    None => inlayCachedUri = Some(uri),
-  }
-}
-
-let warmInlayCacheOnOpen = (uri: String, source: String, version: Number) => {
+let computeInlayHints = (uri: String, source: String, version: Number) => {
   let sourceLen = String.length(source)
   if (sourceLen > inlayMaxSourceChars) {
-    debug(
-      "[LSP inlay] warm skipped uri="
+    logErr(
+      "[LSP inlay] skip uri="
         ++ uri
-        ++ " reason=source_too_large chars="
+        ++ " sourceLen="
         ++ toString(sourceLen)
-        ++ " limit="
-        ++ toString(inlayMaxSourceChars)
+        ++ " exceeds max"
     )
+    "[]"
   } else {
-    ensureSingleUriInlayCache(uri)
-    let fullStart = 0
-    let fullEnd = sourceLen
-    let fullKey = inlayCacheKey(uri, version, fullStart, fullEnd)
-    match (Map.get(fullKey, inlayCache)) {
-      Some(_) => void,
-      None => {
-        debug(
-          "[LSP inlay] warming cache on open uri="
-            ++ uri
-            ++ " version="
-            ++ toString(version)
-        )
-        let hintsJson = Inlay.inlayHintsForSource(
-          source,
-          fullStart,
-          fullEnd,
-          debugInlay,
-          escapeJson,
-          inlayDebugEnabled
-        )
-        if (inlayCacheSize >= inlayCacheMaxEntries) {
-          clearAllInlayCache()
-          ensureSingleUriInlayCache(uri)
-        } else {
-          void
-        }
-        Map.set(fullKey, hintsJson, inlayCache)
-        inlayCacheSize += 1
-        debug(
-          "[LSP inlay] warm complete uri="
-            ++ uri
-            ++ " hint_json_chars="
-            ++ toString(String.length(hintsJson))
-        )
-      },
-    }
-  }
-}
-
-let scheduleInlayWarmOnOpen = (uri: String, version: Number, sourceLen: Number) => {
-  if (sourceLen > inlayMaxSourceChars) {
-    debug(
-      "[LSP inlay] warm skipped uri="
+    logErr(
+      "[LSP inlay] compute start uri="
         ++ uri
-        ++ " reason=source_too_large chars="
-        ++ toString(sourceLen)
-        ++ " limit="
-        ++ toString(inlayMaxSourceChars)
-    )
-    pendingInlayWarmUri = None
-  } else {
-    pendingInlayWarmUri = Some(uri)
-    pendingInlayWarmVersion = version
-    debug(
-      "[LSP inlay] warm scheduled on open uri="
-        ++ uri
-        ++ " version="
+        ++ " v"
         ++ toString(version)
+        ++ " sourceLen="
+        ++ toString(sourceLen)
     )
+    let hintsJson = Inlay.inlayHintsForSource(
+      source,
+      0,
+      sourceLen,
+      debugInlay,
+      escapeJson,
+      inlayDebugEnabled
+    )
+    Map.set(uri, hintsJson, inlayCache)
+    Map.set(uri, version, inlayCachedVersion)
+    logErr("[LSP inlay] compute done uri=" ++ uri ++ " v" ++ toString(version))
+    hintsJson
   }
 }
 
-let clearPendingInlayWarmForUri = (uri: String) => {
-  match (pendingInlayWarmUri) {
-    Some(pendingUri) => {
-      if (pendingUri == uri) {
-        pendingInlayWarmUri = None
-      } else {
-        void
-      }
+let warmInlayCache = (uri: String, source: String, version: Number) => {
+  match (Map.get(uri, inlayCachedVersion)) {
+    Some(v) when v == version => {
+      logErr(
+        "[LSP inlay] warm cache hit uri=" ++ uri ++ " v" ++ toString(version)
+      )
     },
-    None => void,
+    _ => {
+      logErr("[LSP inlay] warm start uri=" ++ uri ++ " v" ++ toString(version))
+      let _ = computeInlayHints(uri, source, version)
+      logErr("[LSP inlay] warm done uri=" ++ uri ++ " v" ++ toString(version))
+    },
   }
 }
 
-let runPendingInlayWarm = (docs: Map.Map<String, String>) => {
-  match (pendingInlayWarmUri) {
-    None => false,
-    Some(uri) => {
-      let scheduledVersion = pendingInlayWarmVersion
-      pendingInlayWarmUri = None
-      match (Map.get(uri, docs)) {
-        None => false,
-        Some(source) => {
-          let currentVersion = documentVersion(uri)
-          if (currentVersion != scheduledVersion) {
-            false
-          } else {
-            warmInlayCacheOnOpen(uri, source, currentVersion)
-            true
-          }
-        },
-      }
-    },
-  }
+let invalidateInlayCache = (uri: String) => {
+  Map.remove(uri, inlayCache)
+  Map.remove(uri, inlayCachedVersion)
 }
 
 let writeStdout = (text: String) => {
@@ -266,7 +161,9 @@ let sendResponse = (idText: String, resultJson: String) => {
     ++ resultJson
     ++ "}"
   let bodyBytes = Bytes.fromString(body)
-  let header = "Content-Length: " ++ toString(Bytes.length(bodyBytes)) ++ "\r\n\r\n"
+  let header = "Content-Length: "
+    ++ toString(Bytes.length(bodyBytes))
+    ++ "\r\n\r\n"
   writeStdout(header ++ body)
 }
 
@@ -277,7 +174,9 @@ let sendNotification = (method: String, paramsJson: String) => {
     ++ paramsJson
     ++ "}"
   let bodyBytes = Bytes.fromString(body)
-  let header = "Content-Length: " ++ toString(Bytes.length(bodyBytes)) ++ "\r\n\r\n"
+  let header = "Content-Length: "
+    ++ toString(Bytes.length(bodyBytes))
+    ++ "\r\n\r\n"
   writeStdout(header ++ body)
 }
 
@@ -357,7 +256,10 @@ let uriToPath = (uri: String) => {
   if (String.startsWith("file:///", uri)) {
     let raw = String.slice(String.length("file:///"), uri)
     let decoded = decodeUriPath(raw)
-    let withDrive = if (String.length(decoded) > 1 && String.charAt(1, decoded) == ':') {
+    let withDrive = if (
+      String.length(decoded) > 1
+      && String.charAt(1, decoded) == ':'
+    ) {
       decoded
     } else if (String.length(decoded) > 2 && String.charAt(2, decoded) == ':') {
       String.slice(1, decoded)
@@ -375,7 +277,7 @@ let uriToPath = (uri: String) => {
 
 let isAbsolutePath = (path: String) => {
   String.startsWith("/", path)
-    || (String.length(path) > 1 && String.charAt(1, path) == ':')
+    || String.length(path) > 1 && String.charAt(1, path) == ':'
 }
 
 let dirname = (path: String) => {
@@ -433,8 +335,16 @@ let stageToString = (stage: Error.Stage) => match (stage) {
 }
 
 let diagnosticToJson = (diag: Error.CompilerError) => {
-  let line0 = if (diag.span.line > 0) { diag.span.line - 1 } else { 0 }
-  let col0 = if (diag.span.col > 0) { diag.span.col - 1 } else { 0 }
+  let line0 = if (diag.span.line > 0) {
+    diag.span.line - 1
+  } else {
+    0
+  }
+  let col0 = if (diag.span.col > 0) {
+    diag.span.col - 1
+  } else {
+    0
+  }
   let endCol0 = if (diag.span.end > diag.span.start) {
     col0 + (diag.span.end - diag.span.start)
   } else {
@@ -449,7 +359,9 @@ let diagnosticToJson = (diag: Error.CompilerError) => {
     ++ toString(line0)
     ++ ",\"character\":"
     ++ toString(endCol0)
-    ++ "}},\"severity\":1,\"source\":\""
+    ++ "}},\"severity\":"
+    ++ toString(Error.severityToNumber(diag.severity))
+    ++ ",\"source\":\""
     ++ escapeJson(sourceTag)
     ++ "\",\"message\":\""
     ++ escapeJson(diag.message)
@@ -460,12 +372,11 @@ let joinStrings = (sep: String, parts: List<String>) => {
   let rec loop = (remaining: List<String>, out: String) => {
     match (remaining) {
       [] => out,
-      [head, ...rest] =>
-        if (out == "") {
-          loop(rest, head)
-        } else {
-          loop(rest, out ++ sep ++ head)
-        },
+      [head, ...rest] => if (out == "") {
+        loop(rest, head)
+      } else {
+        loop(rest, out ++ sep ++ head)
+      },
     }
   }
   loop(parts, "")
@@ -482,7 +393,9 @@ let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) =
   } else {
     void
   }
-  let diagnosticsJson = "[" ++ joinStrings(",", List.map(diagnosticToJson, diagnostics)) ++ "]"
+  let diagnosticsJson = "["
+    ++ joinStrings(",", List.map(diagnosticToJson, diagnostics))
+    ++ "]"
   let params = "{\"uri\":\""
     ++ escapeJson(uri)
     ++ "\",\"diagnostics\":"
@@ -536,34 +449,38 @@ let publishGraphDiagnostics = (
     Map.set(moduleId, node, cachedGraphNodes)
   }, Map.toList(graph.nodes))
   debug(
-    "[LSP diag] entry=" ++ entryPath
-      ++ " topo=" ++ toString(List.length(graph.topo))
-      ++ " cached=" ++ toString(List.length(Map.toList(cachedGraphNodes)))
+    "[LSP diag] entry="
+      ++ entryPath
+      ++ " topo="
+      ++ toString(List.length(graph.topo))
+      ++ " cached="
+      ++ toString(List.length(Map.toList(cachedGraphNodes)))
   )
   let nextPublished = Map.make()
-  List.forEach(((modulePath, diagnostics)) => {
-    let uri = match (Map.get(modulePath, uriLookup)) {
-      Some(mappedUri) => mappedUri,
-      None => match (workspaceRootPath) {
-        Some(root) when !isAbsolutePath(modulePath) => pathToUri(root ++ "/" ++ modulePath),
-        _ => pathToUri(modulePath),
-      },
-    }
-    publishDiagnostics(uri, diagnostics)
-    if (List.length(diagnostics) > 0) {
-      List.forEach((diag: Error.CompilerError) => {
-        debug(
-          "[LSP diag] module="
-            ++ modulePath
-            ++ " message="
-            ++ diag.message
-        )
-      }, diagnostics)
-    } else {
-      void
-    }
-    Map.set(uri, true, nextPublished)
-  }, Map.toList(graph.diagnosticsById))
+  List.forEach(
+    ((modulePath, diagnostics)) => {
+      let uri = match (Map.get(modulePath, uriLookup)) {
+        Some(mappedUri) => mappedUri,
+        None => match (workspaceRootPath) {
+          Some(root) when !isAbsolutePath(modulePath) =>
+            pathToUri(root ++ "/" ++ modulePath),
+          _ => pathToUri(modulePath),
+        },
+      }
+      publishDiagnostics(uri, diagnostics)
+      if (List.length(diagnostics) > 0) {
+        List.forEach((diag: Error.CompilerError) => {
+          debug(
+            "[LSP diag] module=" ++ modulePath ++ " message=" ++ diag.message
+          )
+        }, diagnostics)
+      } else {
+        void
+      }
+      Map.set(uri, true, nextPublished)
+    },
+    Map.toList(graph.diagnosticsById)
+  )
 
   List.forEach(((uri, _)) => {
     if (Map.get(uri, nextPublished) == None) {
@@ -578,11 +495,21 @@ let publishGraphDiagnostics = (
 }
 
 let handleInitialize = (idText: String) => {
+  let caps = "\"textDocumentSync\":{\"openClose\":true,\"change\":1}"
+    ++ (if (isInlayWorker) {
+      ",\"inlayHintProvider\":true"
+    } else {
+      {
+        ""
+      } ++ (if (!isInlayWorker) {
+        ",\"documentFormattingProvider\":true"
+      } else {
+        ""
+      })
+    })
   let result = "{"
     ++ "\"capabilities\":{"
-    ++ "\"textDocumentSync\":{\"openClose\":true,\"change\":1},"
-    ++ "\"inlayHintProvider\":true,"
-    ++ "\"documentFormattingProvider\":true"
+    ++ caps
     ++ "},"
     ++ "\"serverInfo\":{\"name\":\"workman-lsp\",\"version\":\"0.0.1\"}"
     ++ "}"
@@ -599,103 +526,23 @@ let handleInlayHint = (
     None => None,
   }
   match (uriOpt) {
-    None => {
-      sendResponse(idText, "[]")
-    },
+    None => sendResponse(idText, "[]"),
     Some(uri) => {
-      match (Map.get(uri, docs)) {
-        None => {
-          sendResponse(idText, "[]")
+      let version = documentVersion(uri)
+      match (Map.get(uri, inlayCachedVersion)) {
+        Some(v) when v == version => {
+          match (Map.get(uri, inlayCache)) {
+            Some(cached) => sendResponse(idText, cached),
+            None => sendResponse(idText, "[]"),
+          }
         },
-        Some(source) => {
-          let sourceLen = String.length(source)
-          if (sourceLen > inlayMaxSourceChars) {
-            sendResponse(idText, "[]")
-          } else {
-          let rangeOpt = jsonGetObject("range", params)
-          let rangeStart = match (rangeOpt) {
-            Some(rangeObj) => {
-              let startObj = jsonGetObject("start", rangeObj)
-              match (startObj) {
-                Some(s) => {
-                  let line = match (jsonGetNumber("line", s)) {
-                    Some(n) => n,
-                    None => 0,
-                  }
-                  let ch = match (jsonGetNumber("character", s)) {
-                    Some(n) => n,
-                    None => 0,
-                  }
-                  positionToOffset(source, line, ch)
-                },
-                None => 0,
-              }
+        _ => {
+          match (Map.get(uri, docs)) {
+            None => sendResponse(idText, "[]"),
+            Some(source) => {
+              let hintsJson = computeInlayHints(uri, source, version)
+              sendResponse(idText, hintsJson)
             },
-            None => 0,
-          }
-          let rangeEnd = match (rangeOpt) {
-            Some(rangeObj) => {
-              let endObj = jsonGetObject("end", rangeObj)
-              match (endObj) {
-                Some(e) => {
-                  let line = match (jsonGetNumber("line", e)) {
-                    Some(n) => n,
-                    None => 0,
-                  }
-                  let ch = match (jsonGetNumber("character", e)) {
-                    Some(n) => n,
-                    None => 0,
-                  }
-                  positionToOffset(source, line, ch)
-                },
-                None => String.length(source),
-              }
-            },
-            None => String.length(source),
-          }
-          let version = documentVersion(uri)
-          let fullStart = 0
-          let fullEnd = String.length(source)
-          let cacheKey = inlayCacheKey(uri, version, rangeStart, rangeEnd)
-          let fullCacheKey = inlayCacheKey(uri, version, fullStart, fullEnd)
-          match (Map.get(cacheKey, inlayCache)) {
-            Some(cachedHints) => {
-              sendResponse(idText, cachedHints)
-            },
-            None => {
-              match (Map.get(fullCacheKey, inlayCache)) {
-                Some(fullCachedHints) => {
-                  sendResponse(idText, fullCachedHints)
-                },
-                None => {
-                  ensureSingleUriInlayCache(uri)
-                  debug("[LSP inlay] build uri=" ++ uri)
-                  let hintsJson = Inlay.inlayHintsForSource(
-                    source,
-                    fullStart,
-                    fullEnd,
-                    debugInlay,
-                    escapeJson,
-                    inlayDebugEnabled
-                  )
-                  if (inlayCacheSize >= inlayCacheMaxEntries) {
-                    debug(
-                      "[LSP inlay] cache full size="
-                        ++ toString(inlayCacheSize)
-                        ++ " max="
-                        ++ toString(inlayCacheMaxEntries)
-                    )
-                    clearAllInlayCache()
-                  } else {
-                    void
-                  }
-                  Map.set(fullCacheKey, hintsJson, inlayCache)
-                  inlayCacheSize += 1
-                  sendResponse(idText, hintsJson)
-                },
-              }
-            },
-          }
           }
         },
       }
@@ -746,20 +593,20 @@ let handleFormatting = (
                 ++ toString(sourceLen)
             )
           } else {
-          debug("[LSP format] building edits uri=" ++ uri)
-          let editsJson = Format.formattingEditsForSource(
-            source,
-            debugFormat,
-            escapeJson
-          )
-          debug("[LSP format] sending response uri=" ++ uri)
-          sendResponse(idText, editsJson)
-          debug(
-            "[LSP format] done uri="
-              ++ uri
-              ++ " status=ok edits_json_chars="
-              ++ toString(String.length(editsJson))
-          )
+            debug("[LSP format] building edits uri=" ++ uri)
+            let editsJson = Format.formattingEditsForSource(
+              source,
+              debugFormat,
+              escapeJson
+            )
+            debug("[LSP format] sending response uri=" ++ uri)
+            sendResponse(idText, editsJson)
+            debug(
+              "[LSP format] done uri="
+                ++ uri
+                ++ " status=ok edits_json_chars="
+                ++ toString(String.length(editsJson))
+            )
           }
         },
       }
@@ -785,13 +632,10 @@ let handleMessage = (
               Some(rootUri) => Some(uriToPath(rootUri)),
               None => workspaceRootPath,
             }
-            debug(
-              "[LSP init] workspaceRoot="
-                ++ match (workspaceRootPath) {
-                  Some(root) => root,
-                  None => "<none>",
-                }
-            )
+            debug("[LSP init] workspaceRoot=" ++ match (workspaceRootPath) {
+              Some(root) => root,
+              None => "<none>",
+            })
           },
           None => void,
         }
@@ -815,21 +659,21 @@ let handleMessage = (
                         None => 1,
                       }
                       Map.set(uri, version, docVersions)
-                      clearAllInlayCache()
-                      scheduleInlayWarmOnOpen(uri, version, String.length(text))
-                      if (workspaceRootPath == None) {
-                        workspaceRootPath = Some(dirname(uriToPath(uri)))
-                        debug(
-                          "[LSP didOpen] inferred workspaceRoot="
-                            ++ match (workspaceRootPath) {
-                              Some(root) => root,
-                              None => "<none>",
-                            }
-                        )
+                      if (isInlayWorker) {
+                        warmInlayCache(uri, text, version)
                       } else {
                         void
                       }
-                      publishGraphDiagnostics(uri, docs, publishedUris)
+                      if (workspaceRootPath == None) {
+                        workspaceRootPath = Some(dirname(uriToPath(uri)))
+                      } else {
+                        void
+                      }
+                      if (!isInlayWorker) {
+                        publishGraphDiagnostics(uri, docs, publishedUris)
+                      } else {
+                        publishedUris
+                      }
                     },
                     None => publishedUris,
                   },
@@ -870,31 +714,21 @@ let handleMessage = (
                             },
                           }
                           Map.set(uri, nextVersion, docVersions)
-                          clearInlayCacheForUri(uri)
-                          clearPendingInlayWarmForUri(uri)
-                          match (inlayCachedUri) {
-                            Some(cachedUri) => {
-                              if (cachedUri == uri) {
-                                inlayCachedUri = None
-                              } else {
-                                void
-                              }
-                            },
-                            None => void,
-                          }
-                          if (workspaceRootPath == None) {
-                            workspaceRootPath = Some(dirname(uriToPath(uri)))
-                            debug(
-                              "[LSP didChange] inferred workspaceRoot="
-                                ++ match (workspaceRootPath) {
-                                  Some(root) => root,
-                                  None => "<none>",
-                                }
-                            )
+                          if (isInlayWorker) {
+                            invalidateInlayCache(uri)
                           } else {
                             void
                           }
-                          publishGraphDiagnostics(uri, docs, publishedUris)
+                          if (workspaceRootPath == None) {
+                            workspaceRootPath = Some(dirname(uriToPath(uri)))
+                          } else {
+                            void
+                          }
+                          if (!isInlayWorker) {
+                            publishGraphDiagnostics(uri, docs, publishedUris)
+                          } else {
+                            publishedUris
+                          }
                         },
                         None => publishedUris,
                       }
@@ -919,17 +753,10 @@ let handleMessage = (
                   Some(uri) => {
                     Map.remove(uri, docs)
                     Map.remove(uri, docVersions)
-                    clearInlayCacheForUri(uri)
-                    clearPendingInlayWarmForUri(uri)
-                    match (inlayCachedUri) {
-                      Some(cachedUri) => {
-                        if (cachedUri == uri) {
-                          inlayCachedUri = None
-                        } else {
-                          void
-                        }
-                      },
-                      None => void,
+                    if (isInlayWorker) {
+                      invalidateInlayCache(uri)
+                    } else {
+                      void
                     }
                     publishDiagnostics(uri, [])
                     let next = Map.make()
@@ -951,19 +778,28 @@ let handleMessage = (
           None => publishedUris,
         }
       } else if (method == "textDocument/inlayHint") {
-        match (idOpt) {
-          Some(idJson) => match (jsonGetObject("params", msgJson)) {
-            Some(params) => handleInlayHint(jsonToIdText(idJson), params, docs),
+        if (isInlayWorker) {
+          match (idOpt) {
+            Some(idJson) => match (jsonGetObject("params", msgJson)) {
+              Some(params) =>
+                handleInlayHint(jsonToIdText(idJson), params, docs),
+              None => void,
+            },
             None => void,
-          },
-          None => void,
+          }
+        } else {
+          match (idOpt) {
+            Some(idJson) => sendResponse(jsonToIdText(idJson), "[]"),
+            None => void,
+          }
         }
         publishedUris
       } else if (method == "textDocument/formatting") {
         debug("[LSP msg] handling formatting")
         match (idOpt) {
           Some(idJson) => match (jsonGetObject("params", msgJson)) {
-            Some(params) => handleFormatting(jsonToIdText(idJson), params, docs),
+            Some(params) =>
+              handleFormatting(jsonToIdText(idJson), params, docs),
             None => void,
           },
           None => void,
@@ -1071,31 +907,27 @@ let rec loop = (
   if (shouldExit) {
     void
   } else {
-  let (msgOpt, rest) = tryExtractMessage(buffer)
-  match (msgOpt) {
-    Some(msgText) => {
-      match (Json.parse(msgText)) {
-        Ok(msgJson) => {
-          let nextPublished = handleMessage(msgJson, docs, publishedUris)
-          loop(rest, docs, nextPublished)
-        },
-        Err(err) => {
-          logErr("Failed to parse JSON: " ++ toString(err))
-          loop(rest, docs, publishedUris)
-        },
-      }
-    },
-    None => {
-      if (Bytes.length(rest) == 0 && runPendingInlayWarm(docs)) {
-        loop(rest, docs, publishedUris)
-      } else {
+    let (msgOpt, rest) = tryExtractMessage(buffer)
+    match (msgOpt) {
+      Some(msgText) => {
+        match (Json.parse(msgText)) {
+          Ok(msgJson) => {
+            let nextPublished = handleMessage(msgJson, docs, publishedUris)
+            loop(rest, docs, nextPublished)
+          },
+          Err(err) => {
+            logErr("Failed to parse JSON: " ++ toString(err))
+            loop(rest, docs, publishedUris)
+          },
+        }
+      },
+      None => {
         match (readChunk()) {
           None => void,
           Some(chunk) => loop(Bytes.concat(buffer, chunk), docs, publishedUris),
         }
-      }
-    },
-  }
+      },
+    }
   }
 }
 

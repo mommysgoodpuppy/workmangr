@@ -16,6 +16,14 @@ provide enum Stage {
   TypeInference,
 }
 
+// Diagnostic severity (matches LSP DiagnosticSeverity values)
+provide enum Severity {
+  SError,
+  Warning,
+  Info,
+  Hint,
+}
+
 // Error clues provide context about what went wrong
 provide enum ErrorClue {
   Expected(String),
@@ -28,6 +36,7 @@ provide enum ErrorClue {
 // Compiler error with location and context
 provide record CompilerError {
   stage: Stage,
+  severity: Severity,
   message: String,
   span: Source.Span,
   clues: List<ErrorClue>,
@@ -77,13 +86,21 @@ let stageToString = (stage: Stage) => {
 
 provide let stageName = (stage: Stage) => stageToString(stage)
 
+provide let severityToNumber = (sev: Severity) => match (sev) {
+  SError => 1,
+  Warning => 2,
+  Info => 3,
+  Hint => 4,
+}
+
 provide let compilerErrorFromMark = (
   stage: Stage,
   mark: SurfaceAst.Mark,
   message: String,
-  clues: List<ErrorClue> = [],
+  clues: List<ErrorClue> =[],
+  severity: Severity,
 ) => {
-  { stage, message, span: mark.node.span, clues }: CompilerError
+  { stage, severity, message, span: mark.node.span, clues }: CompilerError
 }
 
 provide let errorToString = (error: CompilerError) => {
@@ -93,12 +110,14 @@ provide let errorToString = (error: CompilerError) => {
       "\n" ++ joinStrings("\n", List.map(clueToString, clues))
     },
   }
-  
-  let location = "at line " ++ toString(error.span.line) ++ 
-                 ", col " ++ toString(error.span.col)
-  
+
+  let location = "at line "
+    ++ toString(error.span.line)
+    ++ ", col "
+    ++ toString(error.span.col)
+
   let stageInfo = "[" ++ stageToString(error.stage) ++ "] "
-  
+
   stageInfo ++ error.message ++ " " ++ location ++ cluesStr
 }
 
@@ -119,10 +138,11 @@ provide let createError = (
   span: Source.Span,
   message: String,
   recovery,
-  clues: List<ErrorClue> = [],
-  shouldPanic: Bool = false,
+  clues: List<ErrorClue> =[],
+  shouldPanic: Bool=false,
+  severity: Severity,
 ) => {
-  let error: CompilerError = { stage, message, span, clues }
+  let error: CompilerError = { stage, severity, message, span, clues }
   diagnostics = [error, ...diagnostics]
   if (shouldPanic || panicMode) {
     panic(errorToString(error))
@@ -136,10 +156,17 @@ provide let createMarkedError = (
   mark: SurfaceAst.Mark,
   message: String,
   recovery,
-  clues: List<ErrorClue> = [],
-  shouldPanic: Bool = false,
+  clues: List<ErrorClue> =[],
+  shouldPanic: Bool=false,
+  severity: Severity,
 ) => {
-  let error = compilerErrorFromMark(stage, mark, message, clues=clues)
+  let error = compilerErrorFromMark(
+    stage,
+    mark,
+    message,
+    clues=clues,
+    severity=severity
+  )
   let marked: MarkedError = { mark, error }
   diagnostics = [error, ...diagnostics]
   markedDiagnostics = [marked, ...markedDiagnostics]
@@ -155,8 +182,9 @@ provide let createPanicError = (
   span: Source.Span,
   message: String,
   clues: List<ErrorClue>,
+  severity: Severity,
 ) => {
-  let error: CompilerError = { stage, message, span, clues }
+  let error: CompilerError = { stage, severity, message, span, clues }
   diagnostics = [error, ...diagnostics]
   panic(errorToString(error))
 }

@@ -2149,7 +2149,8 @@ let alignRealIfNeededWithSourceTokens = (
       Error.Parsing,
       mark,
       "Formatter could not preserve all tokens; left opaque segment" ++ diff,
-      void
+      void,
+      severity=Error.SError
     )
     ({ ...rendered, text: aligned }, filterSemisTokens(alignedTokens))
   } else {
@@ -2224,7 +2225,8 @@ let alignRealAndBrokenSpansWithSourceTokens = (
       Error.Parsing,
       mark,
       "Formatter could not preserve all tokens; left opaque segment" ++ diff,
-      void
+      void,
+      severity=Error.SError
     )
     { ...rendered, text: aligned }
   } else {

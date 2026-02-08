@@ -156,18 +156,17 @@ let dropToken = (state: ParseState) => {
 let tokenCursor = (state: ParseState) => currentToken(state).span.start
 
 let parserLog = (text: String) => {
-  let _ = File.fdWrite(File.stderr, Bytes.fromString("[Parser] " ++ text ++ "\n"))
+  let _ = File.fdWrite(
+    File.stderr,
+    Bytes.fromString("[Parser] " ++ text ++ "\n")
+  )
   void
 }
 
-let ensureProgress = (
-  before: ParseState,
-  after: ParseState,
-  context: String,
-) => {
+let ensureProgress = (before: ParseState, after: ParseState, context: String) => {
   if (
     tokenCursor(after) <= tokenCursor(before)
-      && currentToken(after).kind != Lexer.EOF
+    && currentToken(after).kind != Lexer.EOF
   ) {
     let tok = currentToken(after)
     parserLog(
@@ -194,7 +193,8 @@ let ensureProgress = (
       clues=[
         Error.Received(Lexer.tokenKindToString(tok.kind)),
         Error.Note("recovery skipped one token to prevent an infinite loop"),
-      ]
+      ],
+      severity=Error.SError
     )
   } else {
     after
@@ -260,7 +260,8 @@ let recoverMissingTopLevelSemicolon = (
     clues=[
       Error.Expected(";"),
       Error.Received(Lexer.tokenKindToString(atTok.kind)),
-    ]
+    ],
+    severity=Error.Warning
   )
 }
 
@@ -303,7 +304,8 @@ let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) 
     clues=[
       Error.Expected(";"),
       Error.Received(Lexer.tokenKindToString(atTok.kind)),
-    ]
+    ],
+    severity=Error.Warning
   )
 }
 
@@ -415,7 +417,8 @@ let makeInferredExprHole = (
     mark,
     message,
     expr,
-    clues=clues
+    clues=clues,
+    severity=Error.SError
   )
   (recoveryExpr, state2)
 }
@@ -451,7 +454,8 @@ let expectSimple = (expected, state: ParseState) => {
       clues=[
         Error.Expected(Lexer.tokenKindToString(expected)),
         Error.Received(Lexer.tokenKindToString(tok.kind)),
-      ]
+      ],
+      severity=Error.SError
     )
     (recoveryTok, state1)
   }
@@ -486,14 +490,16 @@ let expectName = (state: ParseState) => {
         mark,
         "Expected identifier",
         syntheticName,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       let recoveryTok = Error.createMarkedError(
         Error.Parsing,
         mark,
         "Expected identifier",
         syntheticTok,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       (recoveryName, recoveryTok, state1)
     },
@@ -529,14 +535,16 @@ let expectTypeParamName = (state: ParseState) => {
         mark,
         "Expected type parameter name",
         syntheticName,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       let recoveryTok = Error.createMarkedError(
         Error.Parsing,
         mark,
         "Expected type parameter name",
         syntheticTok,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       (recoveryName, recoveryTok, state1)
     },
@@ -572,14 +580,16 @@ let expectConstructor = (state: ParseState) => {
         mark,
         "Expected constructor",
         syntheticName,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       let recoveryTok = Error.createMarkedError(
         Error.Parsing,
         mark,
         "Expected constructor",
         syntheticTok,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       (recoveryName, recoveryTok, state1)
     },
@@ -617,7 +627,8 @@ let expectKeyword = (keyword: String, state: ParseState) => {
         clues=[
           Error.Expected(keyword),
           Error.Received(Lexer.tokenKindToString(tok.kind)),
-        ]
+        ],
+        severity=Error.SError
       )
       (recoveryTok, state1)
     },
@@ -641,6 +652,7 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
             "Internal error",
             tok,
             clues=[Error.Note("matching delimiter not found")],
+            severity=Error.SError
           )
         },
         [h, ...t] => if (h.span.start == mateIndex) {
@@ -663,6 +675,7 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
         "Internal error",
         tok,
         clues=[Error.Note("token has no mate")],
+        severity=Error.SError
       )
     },
   }
@@ -734,7 +747,8 @@ let expectSimpleOrRecover = (expected, state: ParseState, context: String) => {
       clues=[
         Error.Expected(Lexer.tokenKindToString(expected)),
         Error.Received(Lexer.tokenKindToString(tok.kind)),
-      ]
+      ],
+      severity=Error.SError
     )
     (recoveryTok, state1)
   }
@@ -762,14 +776,10 @@ let blockItemsToBody = (
     let bindingsFromDeclGroup = (group: SurfaceAst.DeclGroup) => {
       match (group.kind) {
         SurfaceAst.LetGroup(_) =>
-          List.flatMap(
-            (decl: SurfaceAst.Decl) =>
-              match (decl) {
-                SurfaceAst.LetDecl(ld) => ld.bindings,
-                _ => [],
-              },
-            group.decls,
-          ),
+          List.flatMap((decl: SurfaceAst.Decl) => match (decl) {
+            SurfaceAst.LetDecl(ld) => ld.bindings,
+            _ => [],
+          }, group.decls),
         _ => [],
       }
     }
@@ -1137,8 +1147,7 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
     SurfaceAst.MarkItem(mark) => mark.node.span,
     SurfaceAst.TriviaItem(trivia) => trivia.node.span,
     SurfaceAst.Directive(directive) => directive.name.node.span,
-    SurfaceAst.Semicolon |
-    SurfaceAst.Comma => lbraceTok.span,
+    SurfaceAst.Semicolon | SurfaceAst.Comma => lbraceTok.span,
   }
   let anchorSpan = match (List.head(List.reverse(items))) {
     Some(item) => blockItemSpan(item),
@@ -1170,7 +1179,8 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
       clues=[
         Error.Expected("}"),
         Error.Received(Lexer.tokenKindToString(tokAfterItems.kind)),
-      ]
+      ],
+      severity=Error.SError
     )
     let syntheticSpan = Source.makeSpan(
       tokAfterItems.span.line,
@@ -1296,7 +1306,8 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
                 clues=[
                   Error.Expected("identifier"),
                   Error.Received(Lexer.tokenKindToString(tokAt.kind)),
-                ]
+                ],
+                severity=Error.SError
               )
             } else {
               let (fieldName, nameTok, state_temp) = expectName(currentState)
@@ -1519,7 +1530,8 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
               clues=[
                 Error.Expected("identifier"),
                 Error.Received(Lexer.tokenKindToString(tokAt.kind)),
-              ]
+              ],
+              severity=Error.SError
             )
           } else {
             let (fieldName, nameTok, state_temp) = expectName(currentState)
@@ -1680,14 +1692,16 @@ and expectStringLiteral = (state: ParseState) => {
         mark,
         "Expected string literal",
         "",
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       let recoveryTok = Error.createMarkedError(
         Error.Parsing,
         mark,
         "Expected string literal",
         syntheticTok,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       (recoveryText, recoveryTok, state1)
     },
@@ -1862,7 +1876,8 @@ and parseTopLevels = (state: ParseState) => {
               exportRecovery,
               "Expected declaration after export",
               SurfaceAst.Mark(exportRecovery),
-              clues=[Error.Note("export must be followed by a declaration")]
+              clues=[Error.Note("export must be followed by a declaration")],
+              severity=Error.SError
             )
             ([recoveryItem], state2)
           },
@@ -1877,7 +1892,8 @@ and parseTopLevels = (state: ParseState) => {
               exportRecovery,
               "Invalid export",
               SurfaceAst.Mark(exportRecovery),
-              clues=[Error.Note("export can only be applied to declarations")]
+              clues=[Error.Note("export can only be applied to declarations")],
+              severity=Error.SError
             )
             ([recoveryItem, first, ...rest], state2)
           },
@@ -1945,7 +1961,8 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
       clues=[
         Error.Expected("="),
         Error.Received(Lexer.tokenKindToString(currentToken(state3).kind)),
-      ]
+      ],
+      severity=Error.SError
     )
     (recoveryState, false)
   } else {
@@ -1960,7 +1977,8 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
       mark,
       "Expected '=' in let binding",
       state3,
-      clues=[Error.Received(Lexer.tokenKindToString(currentToken(state3).kind))]
+      clues=[Error.Received(Lexer.tokenKindToString(currentToken(state3).kind))],
+      severity=Error.SError
     )
     (recoveryState, false)
   }
@@ -2039,7 +2057,7 @@ and parseLetGroup: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
         stateP,
         letTok.span,
         "Expected let binding",
-        [Error.Expected("binding"), Error.Received("EOF")],
+        [Error.Expected("binding"), Error.Received("EOF")]
       )
       let (bindId, stateB) = freshId(stateE)
       let binding: SurfaceAst.LetBinding = {
@@ -2251,11 +2269,16 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
               let allArgs = [firstArg, ...restArgs]
               let lastArg = List.head(List.reverse(allArgs))
               let tupleSpan = match (lastArg) {
-                Some(lastTy) => spanFromTokens(firstArg.node.span, lastTy.node.span),
+                Some(lastTy) =>
+                  spanFromTokens(firstArg.node.span, lastTy.node.span),
                 None => firstArg.node.span,
               }
               let (tupleId, stateY) = freshId(stateX)
-              let tupleTy = makeTypeExpr(tupleId, tupleSpan, SurfaceAst.Tuple(allArgs))
+              let tupleTy = makeTypeExpr(
+                tupleId,
+                tupleSpan,
+                SurfaceAst.Tuple(allArgs)
+              )
               (Some(tupleTy), stateY)
             },
           }
@@ -2267,7 +2290,10 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
               stateAfterFirst
             )
             let firstCase = (name, firstPayload, firstAnnotOpt)
-            let (_, statePipe) = expectSimple(Lexer.Pipe, stateAfterFirstPayload)
+            let (_, statePipe) = expectSimple(
+              Lexer.Pipe,
+              stateAfterFirstPayload
+            )
             let rec parseRest = (items, stateX) => {
               // Parse optional @value or @effect annotation
               let (restAnnotOpt, stateBeforeType) = if (
@@ -2276,7 +2302,8 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
                 let stateAt = dropToken(stateX)
                 let annotTok = currentToken(stateAt)
                 match (annotTok.kind) {
-                  Lexer.LitName(aname) when aname == "value" || aname == "effect" => {
+                  Lexer.LitName(aname) when aname == "value"
+                    || aname == "effect" => {
                     let stateA = dropToken(stateAt)
                     (Some(aname), stateA)
                   },
@@ -2288,7 +2315,10 @@ and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
               let (caseTy, stateY) = parseTypeExpr(stateBeforeType)
               let (nextItems, stateY2) = match (caseTy.kind) {
                 SurfaceAst.Ref(ctorName, ctorArgs) => {
-                  let (payload, statePayload) = packCtorPayload(ctorArgs, stateY)
+                  let (payload, statePayload) = packCtorPayload(
+                    ctorArgs,
+                    stateY
+                  )
                   lastSpan = caseTy.node.span
                   ([(ctorName, payload, restAnnotOpt), ...items], statePayload)
                 },
@@ -2458,10 +2488,8 @@ and parseBlockItems = (state: ParseState) => {
             mark,
             "Unexpected ',' after statement; expected ';'",
             SurfaceAst.MarkItem(mark),
-            clues=[
-              Error.Expected(";"),
-              Error.Received(","),
-            ]
+            clues=[Error.Expected(";"), Error.Received(",")],
+            severity=Error.Warning
           )
           (item, state1)
         },
@@ -2479,7 +2507,8 @@ and parseBlockItems = (state: ParseState) => {
             clues=[
               Error.Expected(";"),
               Error.Received(Lexer.tokenKindToString(atTok.kind)),
-            ]
+            ],
+            severity=Error.Warning
           )
           (item, state1)
         },
@@ -2515,9 +2544,11 @@ and parseBlockItems = (state: ParseState) => {
       },
       Lexer.Directive => {
         let (directiveTop, state1) = parseDirectiveTopItem(state)
-        let (item, nextState): (SurfaceAst.BlockItem, ParseState) = match (directiveTop) {
+        let (item, nextState): (SurfaceAst.BlockItem, ParseState) = match (
+          directiveTop
+        ) {
           SurfaceAst.Directive(directive) =>
-            ((SurfaceAst.Directive(directive): SurfaceAst.BlockItem), state1),
+            (SurfaceAst.Directive(directive): SurfaceAst.BlockItem, state1),
           _ => {
             let mark: SurfaceAst.Mark = {
               node: { id: 0, span: tok.span },
@@ -2532,7 +2563,10 @@ and parseBlockItems = (state: ParseState) => {
                 mark,
                 "Expected directive item in block",
                 SurfaceAst.MarkItem(mark),
-                clues=[Error.Note("parser recovered from invalid directive shape")]
+                clues=[
+                  Error.Note("parser recovered from invalid directive shape"),
+                ],
+                severity=Error.SError
               ),
               recoverState,
             )
@@ -2570,7 +2604,10 @@ and parseBlockItems = (state: ParseState) => {
               mark,
               "Expected let declaration group in block",
               SurfaceAst.MarkItem(mark),
-              clues=[Error.Note("parser recovered from invalid let-group shape")]
+              clues=[
+                Error.Note("parser recovered from invalid let-group shape"),
+              ],
+              severity=Error.SError
             )
             // Guarantee progress even if let-group recovery returned without consuming input.
             let state1b = dropToken(state1)
@@ -2854,7 +2891,8 @@ and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
         mark,
         "Expected pattern",
         pat,
-        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))]
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
       )
       (recoveryPat, state2)
     },
@@ -3066,7 +3104,8 @@ and parseTypeAtom: Parser<SurfaceAst.TypeExpr> = state => {
         clues=[
           Error.Expected("type expression"),
           Error.Received(Lexer.tokenKindToString(tok.kind)),
-        ]
+        ],
+        severity=Error.SError
       )
       (recoveryExpr, state2)
     },
@@ -3122,7 +3161,7 @@ and parseMatch = (state: ParseState) => {
     let mut currentState = state4
     while (
       !kindIs(currentToken(currentState).kind, Lexer.RBrace)
-        && !kindIs(currentToken(currentState).kind, Lexer.EOF)
+      && !kindIs(currentToken(currentState).kind, Lexer.EOF)
     ) {
       let before = currentState
       let tok = currentToken(currentState)
@@ -3191,7 +3230,8 @@ and parseMatch = (state: ParseState) => {
                     items: [SurfaceAst.ExprItem(blockExpr)],
                     body: blockExpr,
                   },
-                  clues=[Error.Received("non-block expression")]
+                  clues=[Error.Received("non-block expression")],
+                  severity=Error.SError
                 )
                 (recoveryBlock, state_temp4)
               },
@@ -3288,7 +3328,8 @@ and parseMatch = (state: ParseState) => {
                 Error.Note(
                   "match(param) => currently supports identifier or tuple of identifiers",
                 ),
-              ]
+              ],
+              severity=Error.SError
             )
           },
         }
@@ -3318,7 +3359,8 @@ and parseMatch = (state: ParseState) => {
           mark,
           "Expected { ... } after match(...) =>",
           [],
-          clues=[Error.Note("match arrow form requires a clause block")]
+          clues=[Error.Note("match arrow form requires a clause block")],
+          severity=Error.SError
         )
         let span = spanFromTokens(matchTok.span, syntheticRbrace.span)
         mkMatchExpr(id, span, Some(scrutinee), recoveryItems, true, state5)
@@ -3349,7 +3391,8 @@ and parseMatch = (state: ParseState) => {
           Error.Note(
             "use match { ... }, match(expr) { ... }, or match(expr) => { ... }",
           ),
-        ]
+        ],
+        severity=Error.SError
       )
       (recoveryExpr, stateX)
     }
@@ -3361,11 +3404,10 @@ let parseWithRecovery = (source: String) => {
   let initial: ParseState = { tokens, nextId: 1, allTokens: tokens }
   let (topLevels, _finalState) = parseTopLevels(initial)
   let hasCoreDirective = List.some(
-    (item: SurfaceAst.TopItem) =>
-      match (item) {
-        SurfaceAst.Directive({ name, _ }) => name.text == "core",
-        _ => false,
-      },
+    (item: SurfaceAst.TopItem) => match (item) {
+      SurfaceAst.Directive({ name, _ }) => name.text == "core",
+      _ => false,
+    },
     topLevels
   )
   let program: SurfaceAst.Program = { items: topLevels, core: hasCoreDirective }

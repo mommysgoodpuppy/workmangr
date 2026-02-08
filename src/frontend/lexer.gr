@@ -237,9 +237,12 @@ let lexInternal = (source, profiling: Bool) => {
           ++ ")",
         [],
         clues=[
-          Error.Note("first non-ASCII byte value: " ++ toString(firstNonAsciiByte)),
+          Error.Note(
+            "first non-ASCII byte value: " ++ toString(firstNonAsciiByte),
+          ),
           Error.Hint("replace non-ASCII characters in source for now"),
-        ]
+        ],
+        severity=Error.SError
       )
     )
   }
@@ -405,7 +408,8 @@ let lexInternal = (source, profiling: Bool) => {
                 Error.Note(
                   "check for matching quotes and valid escape sequences",
                 ),
-              ]
+              ],
+              severity=Error.SError
             )
           )
         } else {
@@ -468,7 +472,8 @@ let lexInternal = (source, profiling: Bool) => {
         mark,
         "Unclosed string literal",
         { value: StringVal(""), position: startPosition },
-        clues=[Error.Expected("closing quote")]
+        clues=[Error.Expected("closing quote")],
+        severity=Error.SError
       )
     }
   }
@@ -496,7 +501,8 @@ let lexInternal = (source, profiling: Bool) => {
               Error.Note(
                 "character literals must contain exactly one character",
               ),
-            ]
+            ],
+            severity=Error.SError
           )
         } else if (ch == '\\') {
           let afterSlash = advancePosition(startPosition, '\\')
@@ -538,7 +544,8 @@ let lexInternal = (source, profiling: Bool) => {
                     mark,
                     "Unclosed character literal",
                     { value: CharVal(' '), position: afterEscaped },
-                    clues=[Error.Expected("closing single quote")]
+                    clues=[Error.Expected("closing single quote")],
+                    severity=Error.SError
                   )
                 },
               }
@@ -556,7 +563,8 @@ let lexInternal = (source, profiling: Bool) => {
                 mark,
                 "Unclosed character literal",
                 { value: CharVal(' '), position: afterSlash },
-                clues=[Error.Expected("escaped character and closing quote")]
+                clues=[Error.Expected("escaped character and closing quote")],
+                severity=Error.SError
               )
             },
           }
@@ -583,7 +591,8 @@ let lexInternal = (source, profiling: Bool) => {
                 mark,
                 "Unclosed character literal",
                 { value: CharVal(' '), position: afterChar },
-                clues=[Error.Expected("closing single quote")]
+                clues=[Error.Expected("closing single quote")],
+                severity=Error.SError
               )
             },
           }
@@ -602,7 +611,8 @@ let lexInternal = (source, profiling: Bool) => {
           mark,
           "Unclosed character literal",
           { value: CharVal(' '), position: startPosition },
-          clues=[Error.Expected("character and closing quote")]
+          clues=[Error.Expected("character and closing quote")],
+          severity=Error.SError
         )
       },
     }
@@ -803,7 +813,8 @@ let lexInternal = (source, profiling: Bool) => {
                 Error.Note(
                   "internal error: expected string value from string reader",
                 ),
-              ]
+              ],
+              severity=Error.SError
             )
           },
         }
@@ -851,7 +862,8 @@ let lexInternal = (source, profiling: Bool) => {
                 Error.Note(
                   "internal error: expected character value from char reader",
                 ),
-              ]
+              ],
+              severity=Error.SError
             )
           },
         }
