@@ -1,0 +1,302 @@
+module SymbolService
+
+from "list" include List
+from "map" include Map
+from "string" include String
+
+from "../../../core/source.gr" include Source
+from "../../../core/surface_ast.gr" include SurfaceAst
+from "../../../module/module_system.gr" include ModuleSystem
+from "../../../frontend/lexer.gr" include Lexer
+
+provide record Definition {
+  modulePath: String,
+  span: Source.Span,
+}
+
+provide record HoverDecl {
+  span: Source.Span,
+  label: String,
+}
+
+let tokenNameAtOffset = (source: String, offset: Number) => {
+  let tokens = Lexer.lex(source)
+  let rec loop = (remaining: List<Lexer.Token>) =>
+    match (remaining) {
+      [] => None,
+      [tok, ...rest] =>
+        if (offset >= tok.span.start && offset < tok.span.end) {
+          match (tok.kind) {
+            Lexer.LitName(name) => Some(name),
+            Lexer.ConstructorTok(name) => Some(name),
+            _ => None,
+          }
+        } else {
+          loop(rest)
+        },
+    }
+  loop(tokens)
+}
+
+let rec nth = (items: List<String>, index: Number) =>
+  match (items) {
+    [] => None,
+    [head, ...rest] =>
+      if (index <= 0) {
+        Some(head)
+      } else {
+        nth(rest, index - 1)
+      },
+  }
+
+let rec findInPattern = (
+  pattern: SurfaceAst.Pattern,
+  name: String,
+  modulePath: String,
+) => {
+  match (pattern.kind) {
+    SurfaceAst.Var(n) when n.text == name => Some({ modulePath, span: n.node.span }: Definition),
+    SurfaceAst.Pin(n) when n.text == name => Some({ modulePath, span: n.node.span }: Definition),
+    SurfaceAst.Tuple(items) => {
+      let rec loop = (remaining: List<SurfaceAst.Pattern>) =>
+        match (remaining) {
+          [] => None,
+          [head, ...rest] => match (findInPattern(head, name, modulePath)) {
+            Some(found) => Some(found),
+            None => loop(rest),
+          },
+        }
+      loop(items)
+    },
+    SurfaceAst.List(items, restOpt) => {
+      let rec loop = (remaining: List<SurfaceAst.Pattern>) =>
+        match (remaining) {
+          [] => None,
+          [head, ...rest] => match (findInPattern(head, name, modulePath)) {
+            Some(found) => Some(found),
+            None => loop(rest),
+          },
+        }
+      match (loop(items)) {
+        Some(found) => Some(found),
+        None => match (restOpt) {
+          Some(restPat) => findInPattern(restPat, name, modulePath),
+          None => None,
+        },
+      }
+    },
+    _ => None,
+  }
+}
+
+let findDefinitionInDecl = (
+  decl: SurfaceAst.Decl,
+  name: String,
+  modulePath: String,
+) => {
+  match (decl) {
+    SurfaceAst.LetDecl(ld) => {
+      let rec loop = (remaining: List<SurfaceAst.LetBinding>) =>
+        match (remaining) {
+          [] => None,
+          [binding, ...rest] => match (findInPattern(binding.name, name, modulePath)) {
+            Some(found) => Some(found),
+            None => loop(rest),
+          },
+        }
+      loop(ld.bindings)
+    },
+    SurfaceAst.TypeDecl(td) => {
+      if (td.name.text == name) {
+        Some({ modulePath, span: td.name.node.span }: Definition)
+      } else {
+        match (td.body) {
+          SurfaceAst.Alias(_) => None,
+          SurfaceAst.Variant(cases, _) => {
+            let rec loop = (remaining: List<(SurfaceAst.Name, Option<SurfaceAst.TypeExpr>, Option<SurfaceAst.Annotation>)>) =>
+              match (remaining) {
+                [] => None,
+                [(ctor, _payload, _annotation), ...rest] =>
+                  if (ctor.text == name) {
+                    Some({ modulePath, span: ctor.node.span }: Definition)
+                  } else {
+                    loop(rest)
+                  },
+              }
+            loop(cases)
+          },
+        }
+      }
+    },
+    SurfaceAst.RecordDecl(rd) =>
+      if (rd.name.text == name) {
+        Some({ modulePath, span: rd.name.node.span }: Definition)
+      } else {
+        None
+      },
+    _ => None,
+  }
+}
+
+let findDefinitionInProgram = (
+  modulePath: String,
+  program: SurfaceAst.Program,
+  name: String,
+) => {
+  let rec loopTop = (items: List<SurfaceAst.TopItem>) =>
+    match (items) {
+      [] => None,
+      [item, ...rest] =>
+        match (item) {
+          SurfaceAst.DeclGroup(group) => {
+            let rec loopDecls = (decls: List<SurfaceAst.Decl>) =>
+              match (decls) {
+                [] => None,
+                [decl, ...declRest] => match (findDefinitionInDecl(decl, name, modulePath)) {
+                  Some(found) => Some(found),
+                  None => loopDecls(declRest),
+                },
+              }
+            match (loopDecls(group.decls)) {
+              Some(found) => Some(found),
+              None => loopTop(rest),
+            }
+          },
+          _ => loopTop(rest),
+        },
+    }
+  loopTop(program.items)
+}
+
+let findImportAliasTarget = (
+  node: ModuleSystem.ModuleNode,
+  aliasName: String,
+) => {
+  let rec loopTop = (
+    items: List<SurfaceAst.TopItem>,
+    importIndex: Number,
+  ) =>
+    match (items) {
+      [] => None,
+      [item, ...rest] =>
+        match (item) {
+          SurfaceAst.Import(importDecl) => {
+            let next = importIndex + 1
+            match (importDecl.alias) {
+              Some(alias) when alias.text == aliasName =>
+                match (nth(node.imports, importIndex)) {
+                  Some(modulePath) => Some({ modulePath, span: alias.node.span }: Definition),
+                  None => None,
+                },
+              _ => loopTop(rest, next),
+            }
+          },
+          _ => loopTop(rest, importIndex),
+        },
+    }
+  loopTop(node.program.items, 0)
+}
+
+provide let findDefinitionAtOffset = (
+  graph: ModuleSystem.ModuleGraph,
+  currentModulePath: String,
+  source: String,
+  offset: Number,
+) => {
+  match (tokenNameAtOffset(source, offset)) {
+    None => None,
+    Some(name) => {
+      let currentNodeOpt = Map.get(currentModulePath, graph.nodes)
+      match (currentNodeOpt) {
+        Some(currentNode) => {
+          match (findImportAliasTarget(currentNode, name)) {
+            Some(found) => Some(found),
+            None =>
+              match (findDefinitionInProgram(currentNode.id, currentNode.program, name)) {
+                Some(found) => Some(found),
+                None => {
+                  let rec loop = (moduleIds: List<String>) =>
+                    match (moduleIds) {
+                      [] => None,
+                      [moduleId, ...rest] => {
+                        if (moduleId == currentNode.id) {
+                          loop(rest)
+                        } else {
+                          match (Map.get(moduleId, graph.nodes)) {
+                            Some(node) => match (findDefinitionInProgram(node.id, node.program, name)) {
+                              Some(found) => Some(found),
+                              None => loop(rest),
+                            },
+                            None => loop(rest),
+                          }
+                        }
+                      },
+                    }
+                  loop(graph.topo)
+                },
+              },
+          }
+        },
+        None => None,
+      }
+    },
+  }
+}
+
+let declHoverAtOffsetInDecl = (decl: SurfaceAst.Decl, offset: Number) =>
+  match (decl) {
+    SurfaceAst.TypeDecl(td) => {
+      if (offset >= td.name.node.span.start && offset < td.name.node.span.end) {
+        Some({ span: td.name.node.span, label: "type " ++ td.name.text }: HoverDecl)
+      } else {
+        match (td.body) {
+          SurfaceAst.Alias(_) => None,
+          SurfaceAst.Variant(cases, _) => {
+            let rec loop = (remaining: List<(SurfaceAst.Name, Option<SurfaceAst.TypeExpr>, Option<SurfaceAst.Annotation>)>) =>
+              match (remaining) {
+                [] => None,
+                [(ctor, payload, _annotation), ...rest] => {
+                  if (offset >= ctor.node.span.start && offset < ctor.node.span.end) {
+                    let label = match (payload) {
+                      Some(_) => "constructor " ++ ctor.text ++ " : payload -> " ++ td.name.text,
+                      None => "constructor " ++ ctor.text ++ " : " ++ td.name.text,
+                    }
+                    Some({ span: ctor.node.span, label }: HoverDecl)
+                  } else {
+                    loop(rest)
+                  }
+                },
+              }
+            loop(cases)
+          },
+        }
+      }
+    },
+    _ => None,
+  }
+
+provide let hoverDeclAtOffset = (program: SurfaceAst.Program, offset: Number) => {
+  let rec loopTop = (items: List<SurfaceAst.TopItem>) =>
+    match (items) {
+      [] => None,
+      [item, ...rest] =>
+        match (item) {
+          SurfaceAst.DeclGroup(group) => {
+            let rec loopDecls = (decls: List<SurfaceAst.Decl>) =>
+              match (decls) {
+                [] => None,
+                [decl, ...declRest] => match (declHoverAtOffsetInDecl(decl, offset)) {
+                  Some(found) => Some(found),
+                  None => loopDecls(declRest),
+                },
+              }
+            match (loopDecls(group.decls)) {
+              Some(found) => Some(found),
+              None => loopTop(rest),
+            }
+          },
+          _ => loopTop(rest),
+        },
+    }
+  loopTop(program.items)
+}

@@ -1,0 +1,96 @@
+module TypeDisplay
+
+from "array" include Array
+from "char" include Char
+from "list" include List
+from "map" include Map
+from "number" include Number
+from "string" include String
+
+from "../../../core/types.gr" include Types
+
+let varLabel = (id: Number) => {
+  let letterIdx = Number.trunc(id % 26)
+  let letter = Char.toString(String.charAt(letterIdx, "abcdefghijklmnopqrstuvwxyz"))
+  let suffix = Number.trunc(id / 26)
+  if (suffix == 0) {
+    "'" ++ letter
+  } else {
+    "'" ++ letter ++ toString(suffix)
+  }
+}
+
+let rec collectVars = (t: Types.Type, acc: List<Number>) =>
+  match (t) {
+    Types.TVar(id) =>
+      if (Types.containsVar(acc, id)) {
+        acc
+      } else {
+        List.append(acc, [id])
+      },
+    Types.TFun(a, b) => collectVars(b, collectVars(a, acc)),
+    Types.TTuple(items) =>
+      List.reduce((vars, item) => collectVars(item, vars), acc, items),
+    Types.TNominal(_, args) =>
+      List.reduce((vars, item) => collectVars(item, vars), acc, args),
+    _ => acc,
+  }
+
+let normalizeTypeVars = (t: Types.Type) => {
+  let ordered = collectVars(t, [])
+  let subst = Map.make()
+  let _ = List.reduce((next: Number, oldId: Number) => {
+    Map.set(oldId, Types.TVar(next), subst)
+    next + 1
+  }, 0, ordered)
+  Types.applySubstType(subst, t)
+}
+
+let rec collectCurried = (t: Types.Type, argsAcc: List<Types.Type>) =>
+  match (t) {
+    Types.TFun(a, b) => {
+      let nextArgs = match (a) {
+        Types.TTuple(items) => List.append(argsAcc, items),
+        _ => List.append(argsAcc, [a]),
+      }
+      collectCurried(b, nextArgs)
+    },
+    _ => (argsAcc, t),
+  }
+
+let rec prettyAtomic = (t: Types.Type) =>
+  match (t) {
+    Types.TNumber => "Int",
+    Types.TBool => "Bool",
+    Types.TString => "String",
+    Types.TByte => "Byte",
+    Types.TChar => "Char",
+    Types.TVoid => "Void",
+    Types.THole(_id) => "?",
+    Types.TVar(id) => varLabel(id),
+    Types.TTuple(items) =>
+      "(" ++ Array.join(", ", Array.fromList(List.map(prettyType, items))) ++ ")",
+    Types.TNominal(name, args) =>
+      if (args == []) {
+        name
+      } else {
+        name
+          ++ "<"
+          ++ Array.join(", ", Array.fromList(List.map(prettyType, args)))
+          ++ ">"
+      },
+    Types.TFun(_, _) => "(" ++ prettyType(t) ++ ")",
+  }
+
+and prettyType = (t: Types.Type) =>
+  match (t) {
+    Types.TFun(_, _) => {
+      let (args, result) = collectCurried(t, [])
+      let argStrings = List.map(prettyAtomic, args)
+      let resultString = prettyAtomic(result)
+      Array.join(" -> ", Array.fromList(List.append(argStrings, [resultString])))
+    },
+    _ => prettyAtomic(t),
+  }
+
+provide let render = (t: Types.Type) => prettyType(normalizeTypeVars(t))

@@ -52,6 +52,8 @@ record BuildContext {
   topoRev: List<String>,
 }
 
+let mut fsPrimed = false
+
 provide let defaultOptions = () => {
   let overrides = Map.make()
   {
@@ -110,7 +112,27 @@ let joinSegments = (segments: List<String>) =>
 
 let normalizePath = (rawPath: String) => {
   let normalized = String.replaceAll("\\", "/", rawPath)
-  let parts = String.split("/", normalized)
+  let isUnixAbs = String.startsWith("/", normalized)
+  let drivePrefix = if (
+    String.length(normalized) > 1 && String.charAt(1, normalized) == ':'
+  ) {
+    Some(String.slice(0, end=2, normalized))
+  } else {
+    None
+  }
+  let pathWithoutPrefix = match (drivePrefix) {
+    Some(_) when String.length(normalized) > 2 => String.slice(2, normalized),
+    Some(_) => "",
+    None =>
+      if (isUnixAbs && String.length(normalized) > 1) {
+        String.slice(1, normalized)
+      } else if (isUnixAbs) {
+        ""
+      } else {
+        normalized
+      },
+  }
+  let parts = String.split("/", pathWithoutPrefix)
   let folded = Array.reduce((acc: List<String>, part: String) => {
     if (part == "" || part == ".") {
       acc
@@ -123,7 +145,25 @@ let normalizePath = (rawPath: String) => {
       List.append(acc, [part])
     }
   }, [], parts)
-  joinSegments(folded)
+  let body = joinSegments(folded)
+  match (drivePrefix) {
+    Some(drive) =>
+      if (body == "") {
+        drive ++ "/"
+      } else {
+        drive ++ "/" ++ body
+      },
+    None =>
+      if (isUnixAbs) {
+        if (body == "") {
+          "/"
+        } else {
+          "/" ++ body
+        }
+      } else {
+        body
+      },
+  }
 }
 
 let isAbsolutePath = (path: String) => {
@@ -228,17 +268,44 @@ let resolveSpecifier = (
 }
 
 let readSource = (moduleId: String, options: BuildOptions) => {
+  let ensureFsPrimed = () => {
+    if (!fsPrimed) {
+      let _ = Fs.Utf8.readFile(Path.fromString("."))
+      fsPrimed = true
+    } else {
+      void
+    }
+  }
+  let wasiPath = (candidate: String) =>
+    if (
+      isAbsolutePath(candidate)
+      || String.startsWith("./", candidate)
+      || String.startsWith("../", candidate)
+    ) {
+      candidate
+    } else {
+      "./" ++ candidate
+    }
   let tryRead = (candidates: List<String>) => {
     let rec loop = (remaining: List<String>) => {
       match (remaining) {
-        [] =>
-          Fs.Utf8.readFile(Path.fromString("__workman_missing_module__.wm")),
-        [candidate] => Fs.Utf8.readFile(Path.fromString(candidate)),
-        [candidate, ...rest] =>
-          match (Fs.Utf8.readFile(Path.fromString(candidate))) {
+        [] => {
+          ensureFsPrimed()
+          Fs.Utf8.readFile(Path.fromString("__workman_missing_module__.wm"))
+        },
+        [candidate] => {
+          let path = wasiPath(candidate)
+          ensureFsPrimed()
+          Fs.Utf8.readFile(Path.fromString(path))
+        },
+        [candidate, ...rest] => {
+          let path = wasiPath(candidate)
+          ensureFsPrimed()
+          match (Fs.Utf8.readFile(Path.fromString(path))) {
             Ok(source) => Ok(source),
             Err(_) => loop(rest),
-          },
+          }
+        },
       }
     }
     loop(candidates)
@@ -330,6 +397,40 @@ let resolveEdges = (
     }
   }
   loop(rawSpecifiers, [], diagnosticsById)
+}
+
+let normalizeRootPrefix = (raw: String, rootDir: String) => {
+  let abs = normalizePath(absolutePathFor(raw, rootDir))
+  if (hasSuffix(abs, "/")) {
+    abs
+  } else {
+    abs ++ "/"
+  }
+}
+
+let isInStdRoot = (moduleId: String, options: BuildOptions) => {
+  let moduleAbs = normalizePath(absolutePathFor(moduleId, options.rootDir))
+  List.some((stdRoot: String) => {
+    let stdPrefix = normalizeRootPrefix(stdRoot, options.rootDir)
+    String.startsWith(stdPrefix, moduleAbs) || moduleAbs == normalizePath(
+      absolutePathFor(stdRoot, options.rootDir)
+    )
+  }, options.stdRoots)
+}
+
+let addImplicitPreludeImport = (
+  moduleId: String,
+  program: SurfaceAst.Program,
+  options: BuildOptions,
+  importSpecs: List<String>,
+) => {
+  let hasStd = List.length(options.stdRoots) > 0
+  let hasPrelude = List.some((spec: String) => spec == "std/prelude", importSpecs)
+  if (hasStd && !program.core && !isInStdRoot(moduleId, options) && !hasPrelude) {
+    ["std/prelude", ...importSpecs]
+  } else {
+    importSpecs
+  }
 }
 
 let rec visit = (moduleId: String, ctx: BuildContext) => {
@@ -465,7 +566,12 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
                 parseDiags,
                 ctx1.diagnosticsById
               )
-              let importSpecs = extractImportPaths(program)
+              let importSpecs = addImplicitPreludeImport(
+                moduleId,
+                program,
+                ctx1.options,
+                extractImportPaths(program)
+              )
               let reexportSpecs = extractReexportPaths(program)
               let (imports, diagnosticsById2) = resolveEdges(
                 moduleId,

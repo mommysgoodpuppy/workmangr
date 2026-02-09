@@ -150,31 +150,46 @@ let buildNodeSpanIndex = (program: CoreAst.Program) => {
   index
 }
 
-let emitTypeInferenceDiagnostics = (
+provide let typeInferenceDiagnostics = (
   marks: List<Infer.TypeMark>,
   nodeSpans: Map.Map<Number, Source.Span>,
 ) => {
-  List.forEach((entry: Infer.TypeMark) => {
+  List.map((entry: Infer.TypeMark) => {
     let span = match (Map.get(entry.origin.nodeId, nodeSpans)) {
       Some(found) => found,
       None => Source.makeSpan(1, 1, 0, 0),
     }
-    let _ = Error.createError(
-      Error.TypeInference,
+    {
+      stage: Error.TypeInference,
+      severity: Error.SError,
+      message: entry.message,
       span,
-      entry.message,
-      void,
-      clues=[Error.Note(Constraints.originToString(entry.origin))],
-      severity=Error.SError
-    )
-    void
+      clues: [Error.Note(Constraints.originToString(entry.origin))],
+    }: Error.CompilerError
   }, marks)
 }
+
+let emitTypeInferenceDiagnostics = (diagnostics: List<Error.CompilerError>) => {
+  List.forEach((diag: Error.CompilerError) => {
+    let _ = Error.createError(
+      diag.stage,
+      diag.span,
+      diag.message,
+      void,
+      clues=diag.clues,
+      severity=diag.severity
+    )
+    void
+  }, diagnostics)
+}
+
+provide let buildNodeSpans = buildNodeSpanIndex
 
 provide let analyze = (source: String) => {
   let loweredProgram = Frontend.parseAndLower(source)
   let infer = Infer.inferProgram(loweredProgram)
   let nodeSpans = buildNodeSpanIndex(loweredProgram)
-  emitTypeInferenceDiagnostics(infer.marks, nodeSpans)
+  let typeDiagnostics = typeInferenceDiagnostics(infer.marks, nodeSpans)
+  emitTypeInferenceDiagnostics(typeDiagnostics)
   { program: loweredProgram, infer }
 }

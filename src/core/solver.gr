@@ -54,7 +54,7 @@ let bindVar = (
   } else if (occurs(varId, applied, subst)) {
     Err(Occurs(origin))
   } else {
-    Map.set(varId, applied, subst)
+    Types.extendSubst(subst, varId, applied)
     Ok(subst)
   }
 }

@@ -301,10 +301,23 @@ and lowerPostfix = (node: SurfaceAst.Node, pf: SurfaceAst.Postfix) => {
         fold(applied, rest)
       },
       [SurfaceAst.Project(name), ...rest] => {
-        let projectFn = makeIdentExpr(node, "project")
-        let fieldExpr = makeExpr(name.node, CoreAst.Lit(CoreAst.Str(name.text)))
-        let applied = apply2(node, projectFn, currentExpr, fieldExpr)
-        fold(applied, rest)
+        match (currentExpr.kind) {
+          // Module-style qualification: List.at => Ident("List.at")
+          CoreAst.Ident(base) => {
+            let qualifiedName = {
+              node: lowerNode(name.node),
+              text: base.text ++ "." ++ name.text,
+            }: CoreAst.Name
+            let qualifiedExpr = makeExpr(node, CoreAst.Ident(qualifiedName))
+            fold(qualifiedExpr, rest)
+          },
+          _ => {
+            let projectFn = makeIdentExpr(node, "project")
+            let fieldExpr = makeExpr(name.node, CoreAst.Lit(CoreAst.Str(name.text)))
+            let applied = apply2(node, projectFn, currentExpr, fieldExpr)
+            fold(applied, rest)
+          },
+        }
       },
       [SurfaceAst.Index(ix), ...rest] => {
         let indexFn = makeIdentExpr(node, "index")

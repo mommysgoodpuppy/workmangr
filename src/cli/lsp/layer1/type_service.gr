@@ -1,0 +1,74 @@
+module TypeService
+
+from "list" include List
+from "map" include Map
+
+from "../../../core/analysis.gr" include Analysis
+from "../../../core/error.gr" include Error
+from "../../../core/infer.gr" include Infer
+from "../../../core/source.gr" include Source
+from "../../../core/types.gr" include Types
+from "../../../frontend/frontend.gr" include Frontend
+
+provide record Snapshot {
+  infer: Infer.InferState,
+  nodeSpans: Map.Map<Number, Source.Span>,
+  diagnostics: List<Error.CompilerError>,
+}
+
+provide record TypeAtOffset {
+  span: Source.Span,
+  ty: Types.Type,
+}
+
+let spanLength = (span: Source.Span) => span.end - span.start
+
+let spanContainsOffset = (span: Source.Span, offset: Number) => {
+  if (span.end <= span.start) {
+    offset == span.start
+  } else {
+    offset >= span.start && offset < span.end
+  }
+}
+
+provide let analyzeSource = (source: String) => {
+  // parse/lower can emit recoverable diagnostics globally; do not leak them across requests.
+  Error.clearErrors()
+  let program = Frontend.parseAndLower(source)
+  let infer = Infer.inferProgram(program)
+  let nodeSpans = Analysis.buildNodeSpans(program)
+  let diagnostics = Analysis.typeInferenceDiagnostics(infer.marks, nodeSpans)
+  Error.clearErrors()
+  { infer, nodeSpans, diagnostics }: Snapshot
+}
+
+provide let typeAtOffset = (snapshot: Snapshot, offset: Number) => {
+  let rec choose = (
+    entries: List<(Number, Types.Type)>,
+    best: Option<TypeAtOffset>,
+  ) =>
+    match (entries) {
+      [] => best,
+      [(nodeId, inferredType), ...rest] =>
+        match (Map.get(nodeId, snapshot.nodeSpans)) {
+          Some(span) when spanContainsOffset(span, offset) => {
+            let appliedType = Types.applySubstType(snapshot.infer.subst, inferredType)
+            let candidate: TypeAtOffset = { span, ty: appliedType }
+            let nextBest = match (best) {
+              None => Some(candidate),
+              Some(prev) =>
+                if (spanLength(candidate.span) <= spanLength(prev.span)) {
+                  Some(candidate)
+                } else {
+                  best
+                },
+            }
+            choose(rest, nextBest)
+          },
+          _ => choose(rest, best),
+        },
+    }
+
+  choose(Map.toList(snapshot.infer.nodeTypes), None)
+}
+

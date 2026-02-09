@@ -13,9 +13,12 @@ from "json" include Json
 
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
+from "../../core/module_infer.gr" include ModuleInfer
 from "../../module/module_system.gr" include ModuleSystem
 from "./format.gr" include Format
 from "./inlay.gr" include Inlay
+from "./layer1/type_display.gr" include TypeDisplay
+from "./layer1/symbol_service.gr" include SymbolService
 
 let escapeJson = (s: String) => {
   let step1 = String.replaceAll("\\", "\\\\", s)
@@ -45,6 +48,28 @@ let hasArg = (flag: String) => {
   }
 }
 
+let argValue = (flag: String) => {
+  match (Process.argv()) {
+    Err(_) => None,
+    Ok(args) => {
+      let rec loop = (idx: Number) => {
+        if (idx >= Array.length(args)) {
+          None
+        } else if (Array.get(idx, args) == flag) {
+          if (idx + 1 < Array.length(args)) {
+            Some(Array.get(idx + 1, args))
+          } else {
+            None
+          }
+        } else {
+          loop(idx + 1)
+        }
+      }
+      loop(0)
+    },
+  }
+}
+
 let isInlayWorker = hasArg("--inlay-worker")
 let _ = logErr("[LSP] isInlayWorker=" ++ (if (isInlayWorker) {
   "true"
@@ -52,9 +77,44 @@ let _ = logErr("[LSP] isInlayWorker=" ++ (if (isInlayWorker) {
   "false"
 }))
 
-let mut debugEnabled = true
+let envLookup = (name: String) => {
+  match (Process.env()) {
+    Err(_) => None,
+    Ok(vars) => {
+      let prefix = name ++ "="
+      let prefixLen = String.length(prefix)
+      Array.reduce((acc, entry) => {
+        match (acc) {
+          Some(_) => acc,
+          None => if (String.startsWith(prefix, entry)) {
+            Some(String.slice(prefixLen, entry))
+          } else {
+            None
+          },
+        }
+      }, None, vars)
+    },
+  }
+}
+
+let mut debugEnabled = match (envLookup("WORKMAN_LSP_DEBUG")) {
+  Some("0") => false,
+  Some("false") => false,
+  Some("False") => false,
+  Some("FALSE") => false,
+  Some(_) => true,
+  None => true,
+}
 let mut workspaceRootPath: Option<String> = None
-let v0StdRoot = "c:/GIT/workman/std"
+let defaultV0StdRoot = "c:/GIT/workman/std"
+let v0StdRoot = match (argValue("--std-root")) {
+  Some(path) => path,
+  None => match (envLookup("WORKMAN_STD_ROOT")) {
+    Some(path) => path,
+    None => defaultV0StdRoot,
+  },
+}
+let _ = logErr("[LSP] stdRoot=" ++ v0StdRoot)
 let mut inlayDebugEnabled = false
 let mut formatDebugEnabled = false
 let mut shouldExit = false
@@ -64,6 +124,16 @@ let docVersions = Map.make()
 let inlayCache: Map.Map<String, String> = Map.make()
 let mut inlayCachedVersion: Map.Map<String, Number> = Map.make()
 let cachedGraphNodes: Map.Map<String, ModuleSystem.ModuleNode> = Map.make()
+let mut graphEpoch = 0
+
+record InferenceSnapshot {
+  epoch: Number,
+  entryPath: String,
+  graph: ModuleSystem.ModuleGraph,
+  inferred: ModuleInfer.InferenceResult,
+}
+
+let inferenceCache: Map.Map<String, InferenceSnapshot> = Map.make()
 
 let debug = (text: String) => {
   if (debugEnabled) {
@@ -147,6 +217,13 @@ let warmInlayCache = (uri: String, source: String, version: Number) => {
 let invalidateInlayCache = (uri: String) => {
   Map.remove(uri, inlayCache)
   Map.remove(uri, inlayCachedVersion)
+}
+
+let invalidateInferenceCache = () => {
+  graphEpoch += 1
+  List.forEach(((key, _)) => {
+    Map.remove(key, inferenceCache)
+  }, Map.toList(inferenceCache))
 }
 
 let writeStdout = (text: String) => {
@@ -256,7 +333,7 @@ let uriToPath = (uri: String) => {
   if (String.startsWith("file:///", uri)) {
     let raw = String.slice(String.length("file:///"), uri)
     let decoded = decodeUriPath(raw)
-    let withDrive = if (
+    let restoredAbs = if (
       String.length(decoded) > 1
       && String.charAt(1, decoded) == ':'
     ) {
@@ -264,9 +341,9 @@ let uriToPath = (uri: String) => {
     } else if (String.length(decoded) > 2 && String.charAt(2, decoded) == ':') {
       String.slice(1, decoded)
     } else {
-      decoded
+      "/" ++ decoded
     }
-    String.replaceAll("\\", "/", withDrive)
+    String.replaceAll("\\", "/", restoredAbs)
   } else if (String.startsWith("file://", uri)) {
     let raw = String.slice(String.length("file://"), uri)
     String.replaceAll("\\", "/", decodeUriPath(raw))
@@ -319,6 +396,23 @@ let toWorkspacePath = (path: String) => {
   }
 }
 
+let toRootRelativePath = (path: String, root: String) => {
+  let normPath = String.replaceAll("\\", "/", path)
+  let normRoot = String.replaceAll("\\", "/", root)
+  let rootWithSlash = if (String.endsWith("/", normRoot)) {
+    normRoot
+  } else {
+    normRoot ++ "/"
+  }
+  if (String.startsWith(rootWithSlash, normPath)) {
+    String.slice(String.length(rootWithSlash), normPath)
+  } else if (normPath == normRoot) {
+    "."
+  } else {
+    normPath
+  }
+}
+
 let pathToUri = (path: String) => {
   let normalized = String.replaceAll("\\", "/", path)
   let step1 = String.replaceAll(" ", "%20", normalized)
@@ -328,6 +422,98 @@ let pathToUri = (path: String) => {
   } else {
     "file://" ++ encoded
   }
+}
+
+let hoverRangeJson = (source: String, span: Source.Span) => {
+  let startLine0 = if (span.line > 0) {
+    span.line - 1
+  } else {
+    0
+  }
+  let startCol0 = if (span.col > 0) {
+    span.col - 1
+  } else {
+    0
+  }
+  let endPos = Source.offsetToLineCol(source, span.end)
+  let endLine0 = if (endPos.line > 0) {
+    endPos.line - 1
+  } else {
+    0
+  }
+  "{\"start\":{\"line\":"
+    ++ toString(startLine0)
+    ++ ",\"character\":"
+    ++ toString(startCol0)
+    ++ "},\"end\":{\"line\":"
+    ++ toString(endLine0)
+    ++ ",\"character\":"
+    ++ toString(endPos.col)
+    ++ "}}"
+}
+
+let hoverJsonForType = (
+  source: String,
+  typeAtOffset: ModuleInfer.TypeAtOffset,
+) => {
+  let renderedType = TypeDisplay.render(typeAtOffset.ty)
+  "{\"contents\":{\"kind\":\"plaintext\",\"value\":\""
+    ++ escapeJson("Type: " ++ renderedType)
+    ++ "\"},\"range\":"
+    ++ hoverRangeJson(source, typeAtOffset.span)
+    ++ "}"
+}
+
+let hoverJsonNoType = (line0: Number, col0: Number, offset: Number) =>
+  "{\"contents\":{\"kind\":\"plaintext\",\"value\":\""
+    ++ escapeJson(
+      "No type info at line "
+        ++ toString(line0 + 1)
+        ++ ", col "
+        ++ toString(col0 + 1)
+        ++ " (offset "
+        ++ toString(offset)
+        ++ ")"
+    )
+    ++ "\"}}"
+
+let lspRangeJsonFromSpan = (span: Source.Span) => {
+  let startLine0 = if (span.line > 0) {
+    span.line - 1
+  } else {
+    0
+  }
+  let startCol0 = if (span.col > 0) {
+    span.col - 1
+  } else {
+    0
+  }
+  let endCol0 = if (span.end > span.start) {
+    startCol0 + (span.end - span.start)
+  } else {
+    startCol0 + 1
+  }
+  "{\"start\":{\"line\":"
+    ++ toString(startLine0)
+    ++ ",\"character\":"
+    ++ toString(startCol0)
+    ++ "},\"end\":{\"line\":"
+    ++ toString(startLine0)
+    ++ ",\"character\":"
+    ++ toString(endCol0)
+    ++ "}}"
+}
+
+let definitionJson = (modulePath: String, span: Source.Span) => {
+  let uri = match (workspaceRootPath) {
+    Some(root) when !isAbsolutePath(modulePath) => pathToUri(root ++ "/" ++ modulePath),
+    _ => pathToUri(modulePath),
+  }
+  "{\"uri\":\""
+    ++ escapeJson(uri)
+    ++ "\",\"range\":"
+    ++ lspRangeJsonFromSpan(span)
+    ++ "}"
 }
 
 let stageToString = (stage: Error.Stage) => match (stage) {
@@ -422,10 +608,9 @@ let pathUriLookup = (docs: Map.Map<String, String>) => {
   lookup
 }
 
-let publishGraphDiagnostics = (
+let buildGraphForEntry = (
   entryUri: String,
   docs: Map.Map<String, String>,
-  publishedUris: Map.Map<String, Bool>,
 ) => {
   let absEntryPath = uriToPath(entryUri)
   let rootDir = match (workspaceRootPath) {
@@ -433,18 +618,45 @@ let publishGraphDiagnostics = (
     None => dirname(absEntryPath),
   }
   let entryPath = toWorkspacePath(uriToPath(entryUri))
+  let stdRootForGraph = toRootRelativePath(v0StdRoot, rootDir)
   let overrides = docsToOverrides(docs)
-  let uriLookup = pathUriLookup(docs)
   let graph = ModuleSystem.buildGraph(
     entryPath,
     options={
       rootDir,
-      stdRoots: [v0StdRoot],
+      stdRoots: [stdRootForGraph],
       sourceOverrides: overrides,
       debugLog: Some(debug),
       cachedNodes: cachedGraphNodes,
     }
   )
+  (entryPath, graph)
+}
+
+let buildInferenceForEntry = (
+  entryUri: String,
+  docs: Map.Map<String, String>,
+) => {
+  match (Map.get(entryUri, inferenceCache)) {
+    Some(snapshot) when snapshot.epoch == graphEpoch =>
+      (snapshot.entryPath, snapshot.graph, snapshot.inferred),
+    _ => {
+      let (entryPath, graph) = buildGraphForEntry(entryUri, docs)
+      let inferred = ModuleInfer.inferGraph(graph)
+      let snapshot: InferenceSnapshot = { epoch: graphEpoch, entryPath, graph, inferred }
+      Map.set(entryUri, snapshot, inferenceCache)
+      (entryPath, graph, inferred)
+    },
+  }
+}
+
+let publishGraphDiagnostics = (
+  entryUri: String,
+  docs: Map.Map<String, String>,
+  publishedUris: Map.Map<String, Bool>,
+) => {
+  let (entryPath, graph, inferred) = buildInferenceForEntry(entryUri, docs)
+  let uriLookup = pathUriLookup(docs)
   List.forEach(((moduleId, node)) => {
     Map.set(moduleId, node, cachedGraphNodes)
   }, Map.toList(graph.nodes))
@@ -467,19 +679,20 @@ let publishGraphDiagnostics = (
           _ => pathToUri(modulePath),
         },
       }
-      publishDiagnostics(uri, diagnostics)
-      if (List.length(diagnostics) > 0) {
+      let mergedDiagnostics = diagnostics
+      publishDiagnostics(uri, mergedDiagnostics)
+      if (List.length(mergedDiagnostics) > 0) {
         List.forEach((diag: Error.CompilerError) => {
           debug(
             "[LSP diag] module=" ++ modulePath ++ " message=" ++ diag.message
           )
-        }, diagnostics)
+        }, mergedDiagnostics)
       } else {
         void
       }
       Map.set(uri, true, nextPublished)
     },
-    Map.toList(graph.diagnosticsById)
+    Map.toList(inferred.diagnosticsById)
   )
 
   List.forEach(((uri, _)) => {
@@ -499,13 +712,7 @@ let handleInitialize = (idText: String) => {
     ++ (if (isInlayWorker) {
       ",\"inlayHintProvider\":true"
     } else {
-      {
-        ""
-      } ++ (if (!isInlayWorker) {
-        ",\"documentFormattingProvider\":true"
-      } else {
-        ""
-      })
+      ",\"documentFormattingProvider\":true,\"hoverProvider\":true,\"definitionProvider\":true"
     })
   let result = "{"
     ++ "\"capabilities\":{"
@@ -565,6 +772,119 @@ let handleInlayHint = (
         },
       }
     },
+  }
+}
+
+let handleHover = (
+  idText: String,
+  params: Json.Json,
+  docs: Map.Map<String, String>,
+) => {
+  let uriOpt = match (jsonGetObject("textDocument", params)) {
+    Some(obj) => jsonGetString("uri", obj),
+    None => None,
+  }
+  let positionOpt = jsonGetObject("position", params)
+  let line0Opt = match (positionOpt) {
+    Some(pos) => jsonGetNumber("line", pos),
+    None => None,
+  }
+  let col0Opt = match (positionOpt) {
+    Some(pos) => jsonGetNumber("character", pos),
+    None => None,
+  }
+  match ((uriOpt, line0Opt, col0Opt)) {
+    (Some(uri), Some(line0), Some(col0)) => {
+      match (Map.get(uri, docs)) {
+        Some(source) => {
+          let offset = positionToOffset(source, line0, col0)
+          let modulePath = toWorkspacePath(uriToPath(uri))
+          let (_entryPath, graph, inferred) = buildInferenceForEntry(uri, docs)
+          match (Map.get(modulePath, inferred.modules)) {
+            Some(summary) =>
+              match (ModuleInfer.typeAtOffsetInSummary(summary, offset)) {
+                Some(found) => sendResponse(idText, hoverJsonForType(source, found)),
+                None => {
+                  let fallbackDecl = match (Map.get(modulePath, graph.nodes)) {
+                    Some(node) => SymbolService.hoverDeclAtOffset(node.program, offset),
+                    None => None,
+                  }
+                  match (fallbackDecl) {
+                    Some(decl) =>
+                      sendResponse(
+                        idText,
+                        "{\"contents\":{\"kind\":\"plaintext\",\"value\":\""
+                          ++ escapeJson(decl.label)
+                          ++ "\"},\"range\":"
+                          ++ lspRangeJsonFromSpan(decl.span)
+                          ++ "}"
+                      ),
+                    None =>
+                      if (debugEnabled) {
+                        sendResponse(idText, hoverJsonNoType(line0, col0, offset))
+                      } else {
+                        sendResponse(idText, "null")
+                      },
+                  }
+                },
+              },
+            None =>
+              if (debugEnabled) {
+                sendResponse(idText, hoverJsonNoType(line0, col0, offset))
+              } else {
+                sendResponse(idText, "null")
+              },
+          }
+        },
+        None =>
+          if (debugEnabled) {
+            sendResponse(idText, "{\"contents\":{\"kind\":\"plaintext\",\"value\":\"No open document for URI\"}}")
+          } else {
+            sendResponse(idText, "null")
+          },
+      }
+    },
+    _ =>
+      if (debugEnabled) {
+        sendResponse(idText, "{\"contents\":{\"kind\":\"plaintext\",\"value\":\"Malformed hover request\"}}")
+      } else {
+        sendResponse(idText, "null")
+      },
+  }
+}
+
+let handleDefinition = (
+  idText: String,
+  params: Json.Json,
+  docs: Map.Map<String, String>,
+) => {
+  let uriOpt = match (jsonGetObject("textDocument", params)) {
+    Some(obj) => jsonGetString("uri", obj),
+    None => None,
+  }
+  let positionOpt = jsonGetObject("position", params)
+  let line0Opt = match (positionOpt) {
+    Some(pos) => jsonGetNumber("line", pos),
+    None => None,
+  }
+  let col0Opt = match (positionOpt) {
+    Some(pos) => jsonGetNumber("character", pos),
+    None => None,
+  }
+  match ((uriOpt, line0Opt, col0Opt)) {
+    (Some(uri), Some(line0), Some(col0)) =>
+      match (Map.get(uri, docs)) {
+        Some(source) => {
+          let offset = positionToOffset(source, line0, col0)
+          let (entryPath, graph, _inferred) = buildInferenceForEntry(uri, docs)
+          match (SymbolService.findDefinitionAtOffset(graph, entryPath, source, offset)) {
+            Some(found) => sendResponse(idText, "[" ++ definitionJson(found.modulePath, found.span) ++ "]"),
+            None => sendResponse(idText, "[]"),
+          }
+        },
+        None => sendResponse(idText, "[]"),
+      },
+    _ => sendResponse(idText, "[]"),
   }
 }
 
@@ -677,6 +997,7 @@ let handleMessage = (
                         None => 1,
                       }
                       Map.set(uri, version, docVersions)
+                      invalidateInferenceCache()
                       if (isInlayWorker) {
                         warmInlayCache(uri, text, version)
                       } else {
@@ -732,6 +1053,7 @@ let handleMessage = (
                             },
                           }
                           Map.set(uri, nextVersion, docVersions)
+                          invalidateInferenceCache()
                           if (isInlayWorker) {
                             invalidateInlayCache(uri)
                           } else {
@@ -771,6 +1093,7 @@ let handleMessage = (
                   Some(uri) => {
                     Map.remove(uri, docs)
                     Map.remove(uri, docVersions)
+                    invalidateInferenceCache()
                     if (isInlayWorker) {
                       invalidateInlayCache(uri)
                     } else {
@@ -829,6 +1152,40 @@ let handleMessage = (
             None => void,
           },
           None => void,
+        }
+        publishedUris
+      } else if (method == "textDocument/hover") {
+        debug("[LSP msg] handling hover")
+        if (!isInlayWorker) {
+          match (idOpt) {
+            Some(idJson) => match (jsonGetObject("params", msgJson)) {
+              Some(params) => handleHover(jsonToIdText(idJson), params, docs),
+              None => sendResponse(jsonToIdText(idJson), "null"),
+            },
+            None => void,
+          }
+        } else {
+          match (idOpt) {
+            Some(idJson) => sendResponse(jsonToIdText(idJson), "null"),
+            None => void,
+          }
+        }
+        publishedUris
+      } else if (method == "textDocument/definition") {
+        debug("[LSP msg] handling definition")
+        if (!isInlayWorker) {
+          match (idOpt) {
+            Some(idJson) => match (jsonGetObject("params", msgJson)) {
+              Some(params) => handleDefinition(jsonToIdText(idJson), params, docs),
+              None => sendResponse(jsonToIdText(idJson), "[]"),
+            },
+            None => void,
+          }
+        } else {
+          match (idOpt) {
+            Some(idJson) => sendResponse(jsonToIdText(idJson), "[]"),
+            None => void,
+          }
         }
         publishedUris
       } else if (method == "shutdown") {

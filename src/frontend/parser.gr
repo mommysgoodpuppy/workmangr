@@ -527,6 +527,51 @@ let expectName = (state: ParseState) => {
   }
 }
 
+let expectAnyName = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (tok.kind) {
+    Lexer.LitName(name) => (name, tok, dropToken(state)),
+    Lexer.ConstructorTok(name) => (name, tok, dropToken(state)),
+    _ => {
+      let syntheticName = "_missing"
+      let syntheticSpan = Source.makeSpan(
+        tok.span.line,
+        tok.span.col,
+        tok.span.start,
+        tok.span.start
+      )
+      let syntheticTok: Lexer.Token = {
+        kind: Lexer.LitName(syntheticName),
+        span: syntheticSpan,
+        mate: None,
+      }
+      let (markId, state1) = freshId(state)
+      let mark: SurfaceAst.Mark = {
+        node: { id: markId, span: tok.span },
+        kind: SurfaceAst.MissingToken("identifier"),
+        expected: SurfaceAst.ExpectToken,
+      }
+      let recoveryName = Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Expected identifier",
+        syntheticName,
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
+      )
+      let recoveryTok = Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Expected identifier",
+        syntheticTok,
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
+      )
+      (recoveryName, recoveryTok, state1)
+    },
+  }
+}
+
 let expectTypeParamName = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
@@ -1088,7 +1133,7 @@ and parsePostfix = (
     },
     Lexer.Period => {
       let (_, state1) = expectSimple(Lexer.Period, state)
-      let (name, nameTok, state2) = expectName(state1)
+      let (name, nameTok, state2) = expectAnyName(state1)
       let segment = Project(
         { node: { id: target.node.id, span: nameTok.span }, text: name },
       )
@@ -1441,7 +1486,16 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
             let (_, state_temp) = expectSimple(Lexer.Comma, currentState)
             let (nextExpr, state_next) = parseExpr(state_temp)
             exprs = [nextExpr, ...exprs]
-            currentState = state_next
+            let state_with_annotation = if (
+              kindIs(currentToken(state_next).kind, Lexer.Colon)
+            ) {
+              let (_, state_colon) = expectSimple(Lexer.Colon, state_next)
+              let (_, state_after_ty) = parseTypeExpr(state_colon)
+              state_after_ty
+            } else {
+              state_next
+            }
+            currentState = state_with_annotation
             currentState = ensureProgress(before, currentState, "tuple expr")
           }
           let (rparenTok, state4) = expectSimpleOrRecover(
@@ -1747,17 +1801,22 @@ and parseDirectiveTopItem = (state: ParseState) => {
   let _ = directiveTok
   (topItem, state5)
 }
-and skipImportClause = (state: ParseState) => {
+and parseImportClause = (state: ParseState) => {
   let tok = currentToken(state)
   match (tok.kind) {
     Lexer.Star => {
       let state1 = dropToken(state)
       if (kindIs(currentToken(state1).kind, Lexer.LitName("as"))) {
         let (_, state2) = expectKeyword("as", state1)
-        let (_, _, state3) = expectName(state2)
-        state3
+        let (aliasText, aliasTok, state3) = expectAnyName(state2)
+        let (aliasId, state4) = freshId(state3)
+        let alias: SurfaceAst.Name = {
+          node: { id: aliasId, span: aliasTok.span },
+          text: aliasText,
+        }
+        (Some(alias), state4)
       } else {
-        state1
+        (None, state1)
       }
     },
     Lexer.LBrace => {
@@ -1776,16 +1835,16 @@ and skipImportClause = (state: ParseState) => {
           },
         }
       }
-      loop(state1)
+      (None, loop(state1))
     },
-    _ => state,
+    _ => (None, state),
   }
 }
 and parseImportTopItem = (state: ParseState) => {
   let (fromTok, state1) = expectKeyword("from", state)
   let (modulePath, _moduleTok, state2) = expectStringLiteral(state1)
   let (_, state3) = expectKeyword("import", state2)
-  let state4 = skipImportClause(state3)
+  let (alias, state4) = parseImportClause(state3)
   let (_, state5) = expectSimpleOrRecover(
     Lexer.SemiColon,
     state4,
@@ -1795,7 +1854,7 @@ and parseImportTopItem = (state: ParseState) => {
   let importDecl: SurfaceAst.ImportDecl = {
     node: { id, span: fromTok.span },
     modulePath,
-    alias: None,
+    alias,
   }
   (SurfaceAst.Import(importDecl), state6)
 }
@@ -1813,6 +1872,31 @@ and parseReexportTopItem = (state: ParseState) => {
     modulePath,
   }
   (SurfaceAst.Reexport(reexportDecl), state4)
+}
+and parseExportFromTopItem = (state: ParseState) => {
+  let (exportTok, state1) = expectKeyword("export", state)
+  let (_, state2) = expectKeyword("from", state1)
+  let (modulePath, _moduleTok, state3) = expectStringLiteral(state2)
+  let rec skipClause = (stateX: ParseState) => {
+    let tokX = currentToken(stateX)
+    match (tokX.kind) {
+      Lexer.SemiColon => stateX,
+      Lexer.EOF => stateX,
+      _ => skipClause(dropToken(stateX)),
+    }
+  }
+  let state4 = skipClause(state3)
+  let (_, state5) = expectSimpleOrRecover(
+    Lexer.SemiColon,
+    state4,
+    "after export-from declaration"
+  )
+  let (id, state6) = freshId(state5)
+  let reexportDecl: SurfaceAst.ReexportDecl = {
+    node: { id, span: exportTok.span },
+    modulePath,
+  }
+  (SurfaceAst.Reexport(reexportDecl), state6)
 }
 and parseTopLevels = (state: ParseState) => {
   let continueTopLevels = (nextState: ParseState) => {
@@ -1872,51 +1956,61 @@ and parseTopLevels = (state: ParseState) => {
         ([group, ...rest], state3)
       },
       Lexer.LitName(name) when name == "export" => {
-        let exportTok = tok
-        let state1 = dropToken(state)
-        let (exportId, state1b) = freshId(state1)
-        let (inner, state2) = parseTopLevels(state1b)
-        match (inner) {
-          [SurfaceAst.DeclGroup(dg), ...rest] => {
-            // Create Export node for the export keyword
-            let exportNode = Export(
-              { node: { id: exportId, span: exportTok.span }, },
-            )
-            // Mark DeclGroup as exported
-            let exportedDg = { ...dg, exported: true }
-            ([exportNode, SurfaceAst.DeclGroup(exportedDg), ...rest], state2)
+        let nextTok = tokenAt(state.tokens, 1)
+        match (nextTok) {
+          Some({ kind: Lexer.LitName("from"), _ }) => {
+            let (reexportItem, state1) = parseExportFromTopItem(state)
+            let (rest, state2) = continueTopLevels(state1)
+            ([reexportItem, ...rest], state2)
           },
-          [] => {
-            let exportRecovery: SurfaceAst.Mark = {
-              node: { id: exportId, span: exportTok.span },
-              kind: SurfaceAst.InvalidTopLevel("export"),
-              expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
+          _ => {
+            let exportTok = tok
+            let state1 = dropToken(state)
+            let (exportId, state1b) = freshId(state1)
+            let (inner, state2) = parseTopLevels(state1b)
+            match (inner) {
+              [SurfaceAst.DeclGroup(dg), ...rest] => {
+                // Create Export node for the export keyword
+                let exportNode = Export(
+                  { node: { id: exportId, span: exportTok.span }, },
+                )
+                // Mark DeclGroup as exported
+                let exportedDg = { ...dg, exported: true }
+                ([exportNode, SurfaceAst.DeclGroup(exportedDg), ...rest], state2)
+              },
+              [] => {
+                let exportRecovery: SurfaceAst.Mark = {
+                  node: { id: exportId, span: exportTok.span },
+                  kind: SurfaceAst.InvalidTopLevel("export"),
+                  expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
+                }
+                let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
+                  Error.Parsing,
+                  exportRecovery,
+                  "Expected declaration after export",
+                  SurfaceAst.Mark(exportRecovery),
+                  clues=[Error.Note("export must be followed by a declaration")],
+                  severity=Error.SError
+                )
+                ([recoveryItem], state2)
+              },
+              [first, ...rest] => {
+                let exportRecovery: SurfaceAst.Mark = {
+                  node: { id: exportId, span: exportTok.span },
+                  kind: SurfaceAst.InvalidTopLevel("export"),
+                  expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
+                }
+                let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
+                  Error.Parsing,
+                  exportRecovery,
+                  "Invalid export",
+                  SurfaceAst.Mark(exportRecovery),
+                  clues=[Error.Note("export can only be applied to declarations")],
+                  severity=Error.SError
+                )
+                ([recoveryItem, first, ...rest], state2)
+              },
             }
-            let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
-              Error.Parsing,
-              exportRecovery,
-              "Expected declaration after export",
-              SurfaceAst.Mark(exportRecovery),
-              clues=[Error.Note("export must be followed by a declaration")],
-              severity=Error.SError
-            )
-            ([recoveryItem], state2)
-          },
-          [first, ...rest] => {
-            let exportRecovery: SurfaceAst.Mark = {
-              node: { id: exportId, span: exportTok.span },
-              kind: SurfaceAst.InvalidTopLevel("export"),
-              expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
-            }
-            let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
-              Error.Parsing,
-              exportRecovery,
-              "Invalid export",
-              SurfaceAst.Mark(exportRecovery),
-              clues=[Error.Note("export can only be applied to declarations")],
-              severity=Error.SError
-            )
-            ([recoveryItem, first, ...rest], state2)
           },
         }
       },

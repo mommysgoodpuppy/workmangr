@@ -2,7 +2,11 @@ module Infer
 
 from "list" include List
 from "map" include Map
+from "array" include Array
 from "runtime/unsafe/panic" include Panic
+from "bytes" include Bytes
+from "wasi/file" include File
+from "wasi/process" include Process
 
 from "./core_ast.gr" include CoreAst
 from "./types.gr" include Types
@@ -49,13 +53,49 @@ provide record InferState {
   holeObservations: Map.Map<Number, List<HoleObservation>>,
 }
 
+let inferDebugEnabled = match (Process.env()) {
+  Ok(vars) => List.some((entry: String) => {
+    entry == "WORKMAN_INFER_DEBUG=1" || entry == "WORKMAN_INFER_DEBUG=true"
+  }, Array.toList(vars)),
+  Err(_) => false,
+}
+
+let inferDebug = (message: String) => {
+  if (inferDebugEnabled) {
+    let _ = File.fdWrite(File.stderr, Bytes.fromString("[Infer] " ++ message ++ "\n"))
+    void
+  } else {
+    void
+  }
+}
+
+let mapSize = (m) => List.length(Map.toList(m))
+
+let logState = (label: String, state: InferState, nodeId: Number=-1) => {
+  inferDebug(
+    label
+      ++ " node="
+      ++ toString(nodeId)
+      ++ " env="
+      ++ toString(mapSize(Env.snapshotValues(state.env)))
+      ++ " subst="
+      ++ toString(mapSize(state.subst))
+      ++ " constraints="
+      ++ toString(List.length(state.constraints))
+      ++ " marks="
+      ++ toString(List.length(state.marks))
+      ++ " nextVar="
+      ++ toString(state.nextVar)
+  )
+}
+
 let makeInitialState = () => {
   let subst = Types.emptySubst()
   let env = Env.empty()
   let nodeTypes = Map.make()
   let topBindings = Map.make()
   {
-    nextVar: 1,
+    nextVar: 0,
     subst,
     env,
     nodeTypes,
@@ -170,7 +210,7 @@ let bindVar = (
       "Type error: occurs check failed"
     )
   } else {
-    Map.set(varId, tApplied, state.subst)
+    Types.extendSubst(state.subst, varId, tApplied)
     state
   }
 }
@@ -188,6 +228,8 @@ let rec unify = (
 
   match ((l, r)) {
     (Types.TNumber, Types.TNumber) => state1,
+    (Types.TNumber, Types.TNominal("Int", [])) => state1,
+    (Types.TNominal("Int", []), Types.TNumber) => state1,
     (Types.TBool, Types.TBool) => state1,
     (Types.TString, Types.TString) => state1,
     (Types.TByte, Types.TByte) => state1,
@@ -366,8 +408,18 @@ let rec withPatternBindings = (
 ) => {
   let monoScheme: Types.Scheme = { quantifiers: [], ty: expectedType }
   match (pattern.kind) {
-    CoreAst.Var(name) => withBinding(name.text, monoScheme, state, fn),
-    CoreAst.Pin(name) => withBinding(name.text, monoScheme, state, fn),
+    CoreAst.Var(name) => {
+      let applied = apply(state, expectedType)
+      Map.set(pattern.node.id, applied, state.nodeTypes)
+      Map.set(name.node.id, applied, state.nodeTypes)
+      withBinding(name.text, monoScheme, state, fn)
+    },
+    CoreAst.Pin(name) => {
+      let applied = apply(state, expectedType)
+      Map.set(pattern.node.id, applied, state.nodeTypes)
+      Map.set(name.node.id, applied, state.nodeTypes)
+      withBinding(name.text, monoScheme, state, fn)
+    },
     CoreAst.Lit(_) => {
       let litType = match (pattern.kind) {
         CoreAst.Lit(CoreAst.Int(_)) => Types.TNumber,
@@ -439,7 +491,7 @@ let rec withPatternBindings = (
         state1
       )
 
-      let itemTypes = match ((ctorArgs, items)) {
+      let baseItemTypes = match ((ctorArgs, items)) {
         ([], []) => [],
         ([only], _) when List.length(items) > 1 => match (apply(state2, only)) {
           Types.TTuple(tupleItems) when List.length(tupleItems) == List.length(items) =>
@@ -449,16 +501,41 @@ let rec withPatternBindings = (
         _ => ctorArgs,
       }
 
-      if (List.length(itemTypes) != List.length(items)) {
-        Panic.panic(
-          "Constructor pattern arity mismatch for "
-            ++ name.text
-            ++ " (expected "
-            ++ toString(List.length(itemTypes))
-            ++ ", got "
-            ++ toString(List.length(items))
-            ++ ")"
+      let arityMessage =
+        "Constructor pattern arity mismatch for "
+          ++ name.text
+          ++ " (expected "
+          ++ toString(List.length(baseItemTypes))
+          ++ ", got "
+          ++ toString(List.length(items))
+          ++ ")"
+
+      let rec freshTypes = (
+        remaining: List<CoreAst.Pattern>,
+        st: InferState,
+        acc: List<Types.Type>,
+      ) =>
+        match (remaining) {
+          [] => (List.reverse(acc), st),
+          [_item, ...rest] => {
+            let (ty, st1) = freshVar(st)
+            freshTypes(rest, st1, [ty, ...acc])
+          },
+        }
+
+      let (itemTypes, state3) = if (
+        List.length(baseItemTypes) == List.length(items)
+      ) {
+        (baseItemTypes, state2)
+      } else {
+        let marked = addTypeMark(
+          state2,
+          TypeMismatch,
+          originForNode(pattern.node.id, "constructor pattern arity"),
+          CoreAst.PatternError,
+          arityMessage
         )
+        freshTypes(items, marked, [])
       }
 
       let rec zip = (
@@ -469,7 +546,7 @@ let rec withPatternBindings = (
         ([], []) => List.reverse(acc),
         ([pat, ...patRest], [ty, ...tyRest]) =>
           zip(patRest, tyRest, [(pat, ty), ...acc]),
-        _ => Panic.panic("internal pattern arity mismatch"),
+        _ => [],
       }
 
       let itemPairs = zip(items, itemTypes, [])
@@ -488,7 +565,7 @@ let rec withPatternBindings = (
           ),
       }
 
-      bindItems(itemPairs, state2)
+      bindItems(itemPairs, state3)
     },
     _ => fn(state),
   }
@@ -623,7 +700,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
         None => state1,
       }
       let tValue = apply(state2, tValueRaw)
-      Env.applySubst(state2.env, state2.subst)
+      logState("let.preGeneralize", state2, nodeId=binding.node.id)
       let scheme = Types.generalize(
         Env.snapshotValues(state2.env),
         state2.subst,
@@ -699,12 +776,26 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
       ),
     None => state1,
   }
-  (apply(state2, valueType), state2)
+  let appliedValueType = apply(state2, valueType)
+  let state3 = match (binding.name.kind) {
+    CoreAst.Var(name) => {
+      Map.set(binding.name.node.id, appliedValueType, state2.nodeTypes)
+      Map.set(name.node.id, appliedValueType, state2.nodeTypes)
+      state2
+    },
+    CoreAst.Pin(name) => {
+      Map.set(binding.name.node.id, appliedValueType, state2.nodeTypes)
+      Map.set(name.node.id, appliedValueType, state2.nodeTypes)
+      state2
+    },
+    _ => state2,
+  }
+  (appliedValueType, state3)
 }
 
 let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
   let (tValue, state1) = inferBindingValue(binding, state)
-  Env.applySubst(state1.env, state1.subst)
+  logState("letBinding.preGeneralize", state1, nodeId=binding.node.id)
   let scheme = Types.generalize(
     Env.snapshotValues(state1.env),
     state1.subst,
@@ -752,7 +843,7 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
     }
 
   let state2 = inferBodies(bindings, state1)
-  Env.applySubst(state2.env, state2.subst)
+  logState("rec.preFinalize", state2)
 
   let rec finalize = (remaining: List<(String, Types.Type)>, st: InferState) =>
     match (remaining) {

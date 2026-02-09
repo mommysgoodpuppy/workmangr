@@ -2,11 +2,31 @@ module Types
 
 from "list" include List
 from "map" include Map
+from "array" include Array
 from "string" include String
+from "bytes" include Bytes
+from "wasi/file" include File
+from "wasi/process" include Process
 
 let joinStrings = (sep: String, strs: List<String>) => match (strs) {
   [] => "",
   [x, ...xs] => List.reduce((acc, s) => acc ++ sep ++ s, x, xs),
+}
+
+let typeDebugEnabled = match (Process.env()) {
+  Ok(vars) => List.some((entry: String) => {
+    entry == "WORKMAN_INFER_DEBUG=1" || entry == "WORKMAN_INFER_DEBUG=true"
+  }, Array.toList(vars)),
+  Err(_) => false,
+}
+
+let typeDebug = (message: String) => {
+  if (typeDebugEnabled) {
+    let _ = File.fdWrite(File.stderr, Bytes.fromString("[Types] " ++ message ++ "\n"))
+    void
+  } else {
+    void
+  }
 }
 
 provide enum rec Type {
@@ -33,6 +53,7 @@ provide type Env = Map.Map<String, Scheme>
 
 let emptySubst = () => Map.make()
 let emptyEnv = () => Map.make()
+let mapSize = (m) => List.length(Map.toList(m))
 
 provide let rec typeToString = (t: Type) => match (t) {
   TNumber => "Number",
@@ -65,27 +86,32 @@ provide let rec typeToString = (t: Type) => match (t) {
 }
 
 let containsVar = (vars: List<Number>, target: Number) => {
-  let rec loop = (rest: List<Number>) => match (rest) {
-    [] => false,
-    [x, ...xs] => if (x == target) {
-      true
-    } else {
-      loop(xs)
-    },
+  let mut rest = vars
+  let mut found = false
+  while (!found && rest != []) {
+    match (rest) {
+      [x, ...xs] => {
+        found = x == target
+        rest = xs
+      },
+      [] => void,
+    }
   }
-  loop(vars)
+  found
 }
 
 let dedupeVars = (vars: List<Number>) => {
-  let rec loop = (input: List<Number>, acc: List<Number>) => match (input) {
-    [] => acc,
-    [x, ...xs] => if (containsVar(acc, x)) {
-      loop(xs, acc)
+  let seen = Map.make()
+  let mut outRev = []
+  List.forEach((x: Number) => {
+    if (Map.get(x, seen) == None) {
+      Map.set(x, true, seen)
+      outRev = [x, ...outRev]
     } else {
-      loop(xs, [x, ...acc])
-    },
-  }
-  List.reverse(loop(vars, []))
+      void
+    }
+  }, vars)
+  List.reverse(outRev)
 }
 
 let rec freeVars = (t: Type) => match (t) {
@@ -102,6 +128,55 @@ let rec freeVars = (t: Type) => match (t) {
   TNominal(_, args) => List.flatten(List.map(freeVars, args)),
 }
 
+let rec applySubstType = (subst: Subst, t: Type) => {
+  let resolveVar = (start: Number) => {
+    let mut current = start
+    let seen = Map.make()
+    let mut done = false
+    let mut resolved: Type = TVar(start)
+    while (!done) {
+      if (Map.get(current, seen) != None) {
+        resolved = TVar(current)
+        done = true
+      } else {
+        Map.set(current, true, seen)
+        match (Map.get(current, subst)) {
+          None => {
+            resolved = TVar(current)
+            done = true
+          },
+          Some(TVar(next)) =>
+            if (next == current) {
+              resolved = TVar(current)
+              done = true
+            } else {
+              current = next
+            },
+          Some(mapped) => {
+            resolved = applySubstType(subst, mapped)
+            done = true
+          },
+        }
+      }
+    }
+    resolved
+  }
+  match (t) {
+    TNumber => t,
+    TBool => t,
+    TString => t,
+    TByte => t,
+    TChar => t,
+    TVoid => t,
+    THole(_) => t,
+    TFun(a, b) => TFun(applySubstType(subst, a), applySubstType(subst, b)),
+    TVar(id) => resolveVar(id),
+    TTuple(items) => TTuple(List.map(item => applySubstType(subst, item), items)),
+    TNominal(name, args) =>
+      TNominal(name, List.map(arg => applySubstType(subst, arg), args)),
+  }
+}
+
 let freeVarsScheme = (scheme: Scheme) => {
   let fv = freeVars(scheme.ty)
   List.filter(id => !containsVar(scheme.quantifiers, id), fv)
@@ -116,46 +191,202 @@ let freeVarsEnv = (env: Env) => {
   dedupeVars(gathered)
 }
 
-let rec applySubstType = (subst: Subst, t: Type) => match (t) {
-  TNumber => t,
-  TBool => t,
-  TString => t,
-  TByte => t,
-  TChar => t,
-  TVoid => t,
-  THole(_) => t,
-  TFun(a, b) => TFun(applySubstType(subst, a), applySubstType(subst, b)),
-  TVar(id) => match (Map.get(id, subst)) {
-    Some(t2) => applySubstType(subst, t2),
-    None => t,
-  },
-  TTuple(items) => TTuple(List.map(item => applySubstType(subst, item), items)),
-  TNominal(name, args) =>
-    TNominal(name, List.map(arg => applySubstType(subst, arg), args)),
+let varsFromSet = (set: Map.Map<Number, Bool>) =>
+  List.map(((id, _)) => id, Map.toList(set))
+
+let addVarToSet = (id: Number, set: Map.Map<Number, Bool>) => {
+  Map.set(id, true, set)
+  set
+}
+
+let collectFreeVarsWithSubst = (
+  ty: Type,
+  subst: Subst,
+  quantified: Map.Map<Number, Bool>,
+  out: Map.Map<Number, Bool>,
+) => {
+  let mut stack: List<Type> = [ty]
+  while (stack != []) {
+    match (stack) {
+      [] => void,
+      [current, ...rest] => {
+        stack = rest
+        match (current) {
+          TNumber => void,
+          TBool => void,
+          TString => void,
+          TByte => void,
+          TChar => void,
+          TVoid => void,
+          THole(_) => void,
+          TFun(a, b) => {
+            stack = [a, ...stack]
+            stack = [b, ...stack]
+          },
+          TTuple(items) => List.forEach(item => {
+            stack = [item, ...stack]
+          }, items),
+          TNominal(_, args) => List.forEach(arg => {
+            stack = [arg, ...stack]
+          }, args),
+          TVar(id) => {
+            let seen = Map.make()
+            let mut varId = id
+            let mut done = false
+            while (!done) {
+              if (Map.get(varId, seen) != None) {
+                if (Map.get(varId, quantified) == None) {
+                  let _ = addVarToSet(varId, out)
+                  void
+                } else {
+                  void
+                }
+                done = true
+              } else {
+                Map.set(varId, true, seen)
+                match (Map.get(varId, subst)) {
+                  None => {
+                    if (Map.get(varId, quantified) == None) {
+                      let _ = addVarToSet(varId, out)
+                      void
+                    } else {
+                      void
+                    }
+                    done = true
+                  },
+                  Some(TVar(next)) =>
+                    if (next == varId) {
+                      if (Map.get(varId, quantified) == None) {
+                        let _ = addVarToSet(varId, out)
+                        void
+                      } else {
+                        void
+                      }
+                      done = true
+                    } else {
+                      varId = next
+                    },
+                  Some(mapped) => {
+                    stack = [mapped, ...stack]
+                    done = true
+                  },
+                }
+              }
+            }
+          },
+        }
+      },
+    }
+  }
+  out
 }
 
 let applySubstScheme = (subst: Subst, scheme: Scheme) => {
-  // Do not substitute quantified variables.
-  let filtered = Map.make()
-  Map.forEach((key, value) => {
-    if (!containsVar(scheme.quantifiers, key)) {
-      Map.set(key, value, filtered)
+  // Fast path: most schemes are monomorphic.
+  if (scheme.quantifiers == []) {
+    { ...scheme, ty: applySubstType(subst, scheme.ty) }
+  } else {
+    if (List.length(scheme.quantifiers) > 64) {
+      typeDebug(
+        "applySubstScheme quantifiers="
+          ++ toString(List.length(scheme.quantifiers))
+          ++ " subst="
+          ++ toString(mapSize(subst))
+      )
+    } else {
+      void
     }
-  }, subst)
-  { ...scheme, ty: applySubstType(filtered, scheme.ty) }
+    // Do not substitute quantified variables.
+    let quantified = Map.make()
+    List.forEach((id: Number) => {
+      Map.set(id, true, quantified)
+    }, scheme.quantifiers)
+    let filtered = Map.make()
+    Map.forEach((key, value) => {
+      if (Map.get(key, quantified) == None) {
+        Map.set(key, value, filtered)
+      }
+    }, subst)
+    { ...scheme, ty: applySubstType(filtered, scheme.ty) }
+  }
 }
 
-let applySubstEnv = (subst: Subst, env: Env) =>
-  Map.forEach(
-    (name, scheme) => Map.set(name, applySubstScheme(subst, scheme), env),
-    env
-  )
+let composeSubst = (a: Subst, b: Subst) => {
+  let result = Map.make()
+  Map.forEach((id, ty) => {
+    let applied = applySubstType(a, ty)
+    if (applied == TVar(id)) {
+      void
+    } else {
+      Map.set(id, applied, result)
+    }
+  }, b)
+  Map.forEach((id, ty) => {
+    if (ty == TVar(id)) {
+      void
+    } else {
+      Map.set(id, ty, result)
+    }
+  }, a)
+  result
+}
+
+let extendSubst = (subst: Subst, varId: Number, ty: Type) => {
+  let applied = applySubstType(subst, ty)
+  if (applied == TVar(varId)) {
+    subst
+  } else {
+    let pairs = Map.toList(subst)
+    List.forEach(((id, existing)) => {
+      match (existing) {
+        TVar(mapped) when mapped == varId && id != varId =>
+          Map.set(id, applied, subst),
+        _ => void,
+      }
+    }, pairs)
+    Map.set(varId, applied, subst)
+    subst
+  }
+}
+
+let applySubstEnv = (subst: Subst, env: Env) => {
+  let pairs = Map.toList(env)
+  List.forEach(((name, scheme)) => {
+    Map.set(name, applySubstScheme(subst, scheme), env)
+  }, pairs)
+  env
+}
+
+let freeVarsEnvWithSubst = (env: Env, subst: Subst) => {
+  let out = Map.make()
+  Map.forEach((_name, scheme) => {
+    let quantified = Map.make()
+    List.forEach((id: Number) => {
+      Map.set(id, true, quantified)
+    }, scheme.quantifiers)
+    let _ = collectFreeVarsWithSubst(scheme.ty, subst, quantified, out)
+    void
+  }, env)
+  varsFromSet(out)
+}
 
 let generalize = (env: Env, subst: Subst, t: Type) => {
   let tApplied = applySubstType(subst, t)
-  let envVars = freeVarsEnv(env)
+  let envVars = freeVarsEnvWithSubst(env, subst)
   let typeVars = dedupeVars(freeVars(tApplied))
   let quantifiers = List.filter(id => !containsVar(envVars, id), typeVars)
+  if (List.length(quantifiers) > 64) {
+    typeDebug(
+      "generalize produced quantifiers="
+        ++ toString(List.length(quantifiers))
+        ++ " env="
+        ++ toString(mapSize(env))
+        ++ " subst="
+        ++ toString(mapSize(subst))
+    )
+  } else {
+    void
+  }
   { quantifiers, ty: tApplied }
 }
 
@@ -192,6 +423,8 @@ provide {
   emptyEnv,
   freeVars,
   applySubstType,
+  composeSubst,
+  extendSubst,
   applySubstScheme,
   applySubstEnv,
   instantiate,
