@@ -4,8 +4,13 @@ from "../submodules/graintest/lib/test.gr" include Test
 use Test.*
 
 from "list" include List
+from "map" include Map
 from "../src/core/analysis.gr" include Analysis
+from "../src/core/constraints.gr" include Constraints
+from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/error.gr" include Error
+from "../src/core/infer.gr" include Infer
+from "../src/core/source.gr" include Source
 
 setSourceFile("./tests/analysis_test.gr")
 
@@ -25,6 +30,29 @@ let bad = (x) => { if (1) { x } else { x } };
     diagnostics
   )
   assertTrue(hasTypeInferenceDiagnostic)
+})
+
+test("typeInferenceDiagnostics uses mark span for unknown identifiers", () => {
+  let span = Source.makeSpan(12, 5, 120, 122)
+  let node: CoreAst.Node = { id: 777, span }
+  let name: CoreAst.Name = { node, text: "ys" }
+  let mark: Infer.TypeMark = {
+    reason: Infer.UnknownIdentifier,
+    origin: Constraints.makeOrigin(-1, "unknown identifier"),
+    related: [],
+    mark: CoreAst.FreeVar(name),
+    message: "Type error: unknown identifier ys",
+  }
+  let diagnostics = Analysis.typeInferenceDiagnostics([mark], Map.make())
+  match (diagnostics) {
+    [diag] => all([
+      assertEquals(12, diag.span.line),
+      assertEquals(5, diag.span.col),
+      assertEquals(120, diag.span.start),
+      assertEquals(122, diag.span.end),
+    ]),
+    _ => fail("expected exactly one diagnostic"),
+  }
 })
 
 let results = runTests()

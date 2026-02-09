@@ -11,6 +11,7 @@ from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/types.gr" include Types
 from "map" include Map
 from "list" include List
+from "string" include String
 
 setSourceFile("./tests/infer_test.gr")
 
@@ -144,6 +145,24 @@ let unwrapOr = (pair) => {
   assertEquals(0, List.length(state.constraints))
 })
 
+test("index:Int annotation accepts numeric literals in match params", () => {
+  let source =
+    "
+let classify = match(index:Int) => {
+  0 => { true }
+  _ => { false }
+};
+"
+  let state = inferSource(source)
+  let hasHardMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("cannot unify", entry.message),
+    state.marks
+  )
+  assertFalse(hasHardMismatch)
+})
+
 test("literal patterns use their literal type", () => {
   let source =
     "
@@ -174,6 +193,23 @@ test("inferProgramWithEnv seeds cross-module schemes", () => {
 
   let state = inferSourceWithEnv(source, importedEnv)
   let scheme = expectTopBinding(state, "make")
+  assertFunctionShape(scheme)
+})
+
+test("inferProgramWithEnv resolves qualified module symbol names", () => {
+  let source = "let first = (xs) => { List.at((xs, 0)) };"
+  let importedEnv = Map.make()
+  let tElem = Types.TVar(700)
+  let tList = Types.TNominal("List", [tElem])
+  let atScheme: Types.Scheme = {
+    quantifiers: [700],
+    ty: Types.TFun(Types.TTuple([tList, Types.TNumber]), tElem),
+  }
+  Map.set("List.at", atScheme, importedEnv)
+
+  let state = inferSourceWithEnv(source, importedEnv)
+  let scheme = expectTopBinding(state, "first")
+  assertTrue(List.length(state.marks) == 0)
   assertFunctionShape(scheme)
 })
 
@@ -293,6 +329,104 @@ let _b = h(1);
     state.marks
   )
   assertTrue(hasUnfillable)
+})
+
+test("constructor pattern arity mismatch records mark and does not crash", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let broken = (x) => {
+  match(x) {
+    None(v) => { v }
+    _ => { 0 }
+  }
+};
+let keep = 1;
+"
+  let state = inferSource(source)
+  let keepScheme = expectTopBinding(state, "keep")
+  assertEquals("Number", Types.typeToString(keepScheme.ty))
+  let hasPatternArityMark = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && match (entry.mark) {
+          CoreAst.PatternError => true,
+          _ => false,
+        },
+    state.marks
+  )
+  assertTrue(hasPatternArityMark)
+})
+
+test("unknown constructor pattern with payload does not crash", () => {
+  let source =
+    "
+let broken = (x) => {
+  match(x) {
+    Some(v) => { v }
+    _ => { 0 }
+  }
+};
+let keep = 1;
+"
+  let state = inferSource(source)
+  let keepScheme = expectTopBinding(state, "keep")
+  assertEquals("Number", Types.typeToString(keepScheme.ty))
+  let hasUnknownOrPatternMark = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnknownIdentifier
+        || match (entry.mark) {
+          CoreAst.PatternError => true,
+          _ => false,
+        },
+    state.marks
+  )
+  assertTrue(hasUnknownOrPatternMark)
+})
+
+test("let tuple pattern destructuring binds names in scope", () => {
+  let source =
+    "
+let first = (pair) => {
+  let (xs, ys) = pair;
+  xs
+};
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "first")
+  match (scheme.ty) {
+    Types.TFun(Types.TTuple([Types.TVar(a), Types.TVar(_b)]), Types.TVar(result)) =>
+      assertEquals(a, result),
+    _ => fail "expected first : ('a, 'b) -> 'a",
+  }
+  let hasUnknownIdentifier = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnknownIdentifier
+        && match (entry.mark) {
+          CoreAst.FreeVar(name) => name.text == "xs" || name.text == "ys",
+          _ => false,
+        },
+    state.marks
+  )
+  assertFalse(hasUnknownIdentifier)
+})
+
+test("length over List<T> remains polymorphic with constructor shorthand payload", () => {
+  let source =
+    "
+type List<T> = Empty | Link<T, List<T>>;
+let rec length = match(list) => {
+  Empty => { 0 },
+  Link(_, rest) => { length(rest) }
+};
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "length")
+  match (scheme.ty) {
+    Types.TFun(Types.TNominal("List", [Types.TVar(elem)]), Types.TNumber) =>
+      assertTrue(List.length(scheme.quantifiers) >= 1 && Types.containsVar(scheme.quantifiers, elem)),
+    _ => fail "expected length : List<'a> -> Number",
+  }
 })
 
 test("layered pipeline matches direct infer result", () => {

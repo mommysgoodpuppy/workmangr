@@ -1,0 +1,26 @@
+module LspTypeDisplayTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "../src/cli/lsp/layer1/type_display.gr" include TypeDisplay
+from "../src/core/types.gr" include Types
+
+setSourceFile("./tests/lsp_type_display_test.gr")
+
+test("display normalizes variable ids to readable names", () => {
+  let t = Types.TFun(Types.TVar(167), Types.TVar(166))
+  assertEquals("'a -> 'b", TypeDisplay.render(t))
+})
+
+test("display renders tuple-arg function as curried chain", () => {
+  let t = Types.TFun(
+    Types.TTuple([Types.TNominal("List", [Types.TVar(167)]), Types.TNumber]),
+    Types.TVar(166)
+  )
+  assertEquals("List<'a> -> Int -> 'b", TypeDisplay.render(t))
+})
+
+let results = runTests()
+printResultsAndExit(results)
+

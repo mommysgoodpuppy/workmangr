@@ -1,0 +1,78 @@
+module LspSymbolServiceTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "map" include Map
+from "string" include String
+
+from "../src/cli/lsp/layer1/symbol_service.gr" include SymbolService
+from "../src/module/module_system.gr" include ModuleSystem
+
+setSourceFile("./tests/lsp_symbol_service_test.gr")
+
+let graphFromOverrides = (entry: String, overrides: Map.Map<String, String>) =>
+  ModuleSystem.buildGraph(
+    entry,
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+
+test("definition resolves local let binding", () => {
+  let source = "let id = (x) => { x }; let v = id(1);"
+  let overrides = Map.make()
+  Map.set("entry.wm", source, overrides)
+  let graph = graphFromOverrides("entry", overrides)
+
+  match (String.indexOf("id(1)", source)) {
+    Some(offset) =>
+      match (SymbolService.findDefinitionAtOffset(graph, "entry.wm", source, offset)) {
+        Some(found) => {
+          assertEquals("entry.wm", found.modulePath)
+          assertTrue(found.modulePath == "entry.wm")
+        },
+        None => fail("expected definition for id"),
+      },
+    None => fail("expected id call"),
+  }
+})
+
+test("definition resolves constructor name", () => {
+  let source =
+    "type Direction = L | R; let turn = (d) => { match(d) { L => { R } R => { L } } };"
+  let overrides = Map.make()
+  Map.set("entry.wm", source, overrides)
+  let graph = graphFromOverrides("entry", overrides)
+
+  match (String.indexOf("L => { R", source)) {
+    Some(offset) =>
+      match (SymbolService.findDefinitionAtOffset(graph, "entry.wm", source, offset)) {
+        Some(found) => {
+          assertEquals("entry.wm", found.modulePath)
+          assertTrue(found.modulePath == "entry.wm")
+        },
+        None => fail("expected definition for L"),
+      },
+    None => fail("expected constructor use"),
+  }
+})
+
+test("definition resolves import alias to target module", () => {
+  let entrySource = "from \"./dep\" import * as List; let x = List;"
+  let depSource = "let at = 1;"
+  let overrides = Map.make()
+  Map.set("entry.wm", entrySource, overrides)
+  Map.set("dep.wm", depSource, overrides)
+  let graph = graphFromOverrides("entry", overrides)
+
+  match (String.indexOf("List;", entrySource)) {
+    Some(offset) =>
+      match (SymbolService.findDefinitionAtOffset(graph, "entry.wm", entrySource, offset)) {
+        Some(found) => assertEquals("dep.wm", found.modulePath),
+        None => fail("expected alias definition target"),
+      },
+    None => fail("expected alias use"),
+  }
+})
+
+let results = runTests()
+printResultsAndExit(results)

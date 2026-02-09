@@ -190,5 +190,35 @@ test("parser supports exported generic variant type aliases", () => {
   all([assertTrue(shapeOk), assertFalse(hasErrors)])
 })
 
+test("parser supports match arrow params with type annotations", () => {
+  clearErrors()
+  let source =
+    "let rec at = match(list, index:Int) => {\n"
+      ++ "  (Empty, _) => { IErr(OutOfBounds) },\n"
+      ++ "  (Link(x, _), 0) => { IOk(x) },\n"
+      ++ "  (Link(_, rest), index) => { at(rest, intSub(index, 1), OutOfBounds) }\n"
+      ++ "};"
+
+  let parsed = Parser.parse(source)
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Match(matchExpr) => match (matchExpr.scrutinee) {
+            Some({ kind: SurfaceAst.Tuple([_, _]), _ }) => true,
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
 let results = runTests()
 printResultsAndExit(results)

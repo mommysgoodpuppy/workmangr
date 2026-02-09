@@ -1,0 +1,70 @@
+module LspTypeServiceTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "string" include String
+
+from "../src/cli/lsp/layer1/type_service.gr" include TypeService
+from "../src/core/error.gr" include Error
+from "../src/core/types.gr" include Types
+
+setSourceFile("./tests/lsp_type_service_test.gr")
+
+test("type service resolves a concrete type at source offset", () => {
+  let source =
+    "
+let id = (x) => { x };
+let value = id(1);
+"
+  let snapshot = TypeService.analyzeSource(source)
+  match (String.indexOf("1", source)) {
+    Some(offset) =>
+      match (TypeService.typeAtOffset(snapshot, offset)) {
+        Some(found) => assertEquals("Number", Types.typeToString(found.ty)),
+        None => fail("expected type at literal offset"),
+      },
+    None => fail("expected literal in test source"),
+  }
+})
+
+test("type service resolves declaration name type at source offset", () => {
+  let source =
+    "
+let id = (x) => { x };
+let value = id(1);
+"
+  let snapshot = TypeService.analyzeSource(source)
+  match (String.indexOf("id", source)) {
+    Some(offset) =>
+      match (TypeService.typeAtOffset(snapshot, offset)) {
+        Some(found) => {
+          let rendered = Types.typeToString(found.ty)
+          assertTrue(String.contains("->", rendered))
+        },
+        None => fail("expected type at declaration name offset"),
+      },
+    None => fail("expected identifier in test source"),
+  }
+})
+
+test("type service emits type diagnostics from infer marks", () => {
+  let source =
+    "
+let bad = (x) => { if (1) { x } else { x } };
+"
+  Error.clearErrors()
+  let snapshot = TypeService.analyzeSource(source)
+  let hasTypeDiag = List.some(
+    (entry: Error.CompilerError) => match (entry.stage) {
+      Error.TypeInference => true,
+      _ => false,
+    },
+    snapshot.diagnostics
+  )
+  assertTrue(hasTypeDiag)
+})
+
+let results = runTests()
+printResultsAndExit(results)

@@ -234,34 +234,24 @@ let collectFreeVarsWithSubst = (
             let mut varId = id
             let mut done = false
             while (!done) {
-              if (Map.get(varId, seen) != None) {
-                if (Map.get(varId, quantified) == None) {
-                  let _ = addVarToSet(varId, out)
-                  void
-                } else {
-                  void
-                }
+              if (Map.get(varId, quantified) != None) {
+                done = true
+              } else if (Map.get(varId, seen) != None) {
+                let _ = addVarToSet(varId, out)
+                void
                 done = true
               } else {
                 Map.set(varId, true, seen)
                 match (Map.get(varId, subst)) {
                   None => {
-                    if (Map.get(varId, quantified) == None) {
-                      let _ = addVarToSet(varId, out)
-                      void
-                    } else {
-                      void
-                    }
+                    let _ = addVarToSet(varId, out)
+                    void
                     done = true
                   },
                   Some(TVar(next)) =>
                     if (next == varId) {
-                      if (Map.get(varId, quantified) == None) {
-                        let _ = addVarToSet(varId, out)
-                        void
-                      } else {
-                        void
-                      }
+                      let _ = addVarToSet(varId, out)
+                      void
                       done = true
                     } else {
                       varId = next

@@ -15,13 +15,18 @@ from "../src/module/module_system.gr" include ModuleSystem
 setSourceFile("./tests/module_system_test.gr")
 
 test("parser supports core/import/reexport module syntax", () => {
-  let source = "@core;\nfrom \"./dep\" import { foo, bar as baz };\nreexport \"./types\";\nlet x = 1;"
+  let source = "@core;\nfrom \"./dep\" import * as List;\nreexport \"./types\";\nlet x = 1;"
   let parsed = Parser.parse(source)
 
   let hasCore = parsed.core
   let hasImport = List.some(
     item => match (item) {
-      SurfaceAst.Import(importDecl) => importDecl.modulePath == "./dep",
+      SurfaceAst.Import(importDecl) =>
+        importDecl.modulePath == "./dep"
+          && match (importDecl.alias) {
+            Some(alias) => alias.text == "List",
+            None => false,
+          },
       _ => false,
     },
     parsed.items
@@ -39,6 +44,20 @@ test("parser supports core/import/reexport module syntax", () => {
     assertTrue(hasImport),
     assertTrue(hasReexport),
   ])
+})
+
+test("parser supports export-from type reexport syntax", () => {
+  let source =
+    "export from \"std/coretypes\" type Ordering(..);\n"
+      ++ "export from \"std/coretypes\" type List(..);\n"
+      ++ "let x = 1;"
+  let parsed = Parser.parse(source)
+  let reexports = List.filterMap((item: SurfaceAst.TopItem) =>
+    match (item) {
+      SurfaceAst.Reexport(reexportDecl) => Some(reexportDecl.modulePath),
+      _ => None,
+    }, parsed.items)
+  assertEquals(["std/coretypes", "std/coretypes"], reexports)
 })
 
 test("module graph resolves imports and reexports from overrides", () => {
@@ -66,6 +85,32 @@ test("module graph resolves imports and reexports from overrides", () => {
   all([
     assertTrue(edgesOk),
     assertTrue(List.length(graph.topo) == 3),
+  ])
+})
+
+test("module graph resolves export-from type reexports from overrides", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "export from \"./types\" type List(..);\nlet main = 1;",
+    overrides
+  )
+  Map.set("types.wm", "type List<T> = Empty | Link<T>;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+
+  let entryNodeOpt = Map.get("entry.wm", graph.nodes)
+  let edgesOk = match (entryNodeOpt) {
+    Some(node) => node.reexports == ["types.wm"],
+    None => false,
+  }
+
+  all([
+    assertTrue(edgesOk),
+    assertTrue(List.length(graph.topo) == 2),
   ])
 })
 
@@ -97,7 +142,7 @@ test("module graph resolves std imports via std roots", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "from \"std/list\" import * as list;\nlet main = 1;",
+    "from \"std/list\" import * as List;\nlet main = 1;",
     overrides
   )
   Map.set("stdroot/list.wm", "let map = 1;", overrides)
@@ -113,11 +158,34 @@ test("module graph resolves std imports via std roots", () => {
 
   let entryNodeOpt = Map.get("entry.wm", graph.nodes)
   let resolvesStd = match (entryNodeOpt) {
-    Some(node) => node.imports == ["stdroot/list.wm"],
+    Some(node) => List.some(path => path == "stdroot/list.wm", node.imports),
     None => false,
   }
 
   assertTrue(resolvesStd)
+})
+
+test("module graph implicitly imports std/prelude for non-core modules", () => {
+  let overrides = Map.make()
+  Map.set("entry.wm", "let main = Empty;", overrides)
+  Map.set("stdroot/prelude.wm", "let preludeMarker = 1;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    "entry",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      stdRoots: ["stdroot"],
+      sourceOverrides: overrides,
+    }
+  )
+
+  let entryNodeOpt = Map.get("entry.wm", graph.nodes)
+  let hasPreludeDep = match (entryNodeOpt) {
+    Some(node) => List.some(path => path == "stdroot/prelude.wm", node.imports),
+    None => false,
+  }
+
+  assertTrue(hasPreludeDep)
 })
 
 test("module graph survives lex errors in dependencies", () => {
@@ -145,6 +213,38 @@ test("module graph survives lex errors in dependencies", () => {
     assertTrue(Map.get("entry.wm", graph.nodes) != None),
     assertTrue(Map.get("bad.wm", graph.nodes) != None),
     assertTrue(hasLexError),
+  ])
+})
+
+test("module graph keeps absolute unix paths absolute", () => {
+  let overrides = Map.make()
+  Map.set(
+    "/abs/entry.wm",
+    "from \"./dep\" import { x };\nlet main = x;",
+    overrides
+  )
+  Map.set("/abs/dep.wm", "let x = 1;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    "/abs/entry",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: "/abs",
+      sourceOverrides: overrides,
+    }
+  )
+
+  let hasEntry = Map.get("/abs/entry.wm", graph.nodes) != None
+  let hasDep = Map.get("/abs/dep.wm", graph.nodes) != None
+  let entryImportsDep = match (Map.get("/abs/entry.wm", graph.nodes)) {
+    Some(node) => node.imports == ["/abs/dep.wm"],
+    None => false,
+  }
+
+  all([
+    assertTrue(hasEntry),
+    assertTrue(hasDep),
+    assertTrue(entryImportsDep),
   ])
 })
 

@@ -16,6 +16,59 @@ provide record Analysis {
   infer: Infer.InferState,
 }
 
+let spanFromNodeId = (
+  nodeId: Number,
+  nodeSpans: Map.Map<Number, Source.Span>,
+) => match (Map.get(nodeId, nodeSpans)) {
+  Some(span) => Some(span),
+  None => None,
+}
+
+let markNodeId = (mark: CoreAst.Mark) => match (mark) {
+  CoreAst.FreeVar(name) => Some(name.node.id),
+  CoreAst.Internal(_) => None,
+  _ => None,
+}
+
+let markSpan = (mark: CoreAst.Mark) => match (mark) {
+  CoreAst.FreeVar(name) => Some(name.node.span),
+  CoreAst.Internal(_) => None,
+  _ => None,
+}
+
+let resolveTypeMarkSpan = (
+  entry: Infer.TypeMark,
+  nodeSpans: Map.Map<Number, Source.Span>,
+) => {
+  let fromMark = markSpan(entry.mark)
+  match (fromMark) {
+    Some(_) => fromMark,
+    None => {
+  let fromOrigin = spanFromNodeId(entry.origin.nodeId, nodeSpans)
+  match (fromOrigin) {
+    Some(_) => fromOrigin,
+    None =>
+      match (markNodeId(entry.mark)) {
+        Some(nodeId) =>
+          spanFromNodeId(nodeId, nodeSpans),
+        None => {
+          let rec firstRelated = (origins: List<Constraints.Origin>) =>
+            match (origins) {
+              [] => None,
+              [head, ...tail] =>
+                match (spanFromNodeId(head.nodeId, nodeSpans)) {
+                  Some(span) => Some(span),
+                  None => firstRelated(tail),
+                },
+            }
+          firstRelated(entry.related)
+        },
+      },
+  }
+    },
+  }
+}
+
 let indexNodeSpan = (index: Map.Map<Number, Source.Span>, node: CoreAst.Node) =>
   Map.set(node.id, node.span, index)
 
@@ -155,9 +208,9 @@ provide let typeInferenceDiagnostics = (
   nodeSpans: Map.Map<Number, Source.Span>,
 ) => {
   List.map((entry: Infer.TypeMark) => {
-    let span = match (Map.get(entry.origin.nodeId, nodeSpans)) {
+    let span = match (resolveTypeMarkSpan(entry, nodeSpans)) {
       Some(found) => found,
-      None => Source.makeSpan(1, 1, 0, 0),
+      None => Source.makeSpan(1, 1, 0, 1),
     }
     {
       stage: Error.TypeInference,

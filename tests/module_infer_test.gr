@@ -1,0 +1,126 @@
+module ModuleInferTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "map" include Map
+
+from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/core/error.gr" include Error
+from "../src/core/types.gr" include Types
+from "../src/module/module_system.gr" include ModuleSystem
+
+setSourceFile("./tests/module_infer_test.gr")
+
+let expectModule = (result: ModuleInfer.InferenceResult, moduleId: String) =>
+  match (Map.get(moduleId, result.modules)) {
+    Some(summary) => summary,
+    None => fail("missing module summary: " ++ moduleId),
+  }
+
+test("module infer resolves alias imports from dependency exports", () => {
+  let overrides = Map.make()
+  Map.set(
+    "coretypes.wm",
+    "export type List<T> = Empty | Link<(T, List<T>)>;",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./coretypes\" import * as Core;\nlet mk = (x) => { Core.Link((x, Core.Empty)) };",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let mkScheme = match (Map.get("mk", entry.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing mk binding"),
+  }
+  let hasNoTypeErrors = !List.some(
+    (diag: Error.CompilerError) => diag.stage == Error.TypeInference,
+    entry.diagnostics
+  )
+  let shapeOk = match (mkScheme.ty) {
+    Types.TFun(Types.TVar(a), Types.TNominal("List", [Types.TVar(b)])) => a == b,
+    _ => false,
+  }
+
+  all([assertTrue(shapeOk), assertTrue(hasNoTypeErrors)])
+})
+
+test("module infer uses implicit std prelude reexports for constructors", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let mk = (x) => { Link((x, Empty)) };",
+    overrides
+  )
+  Map.set(
+    "stdroot/prelude.wm",
+    "export from \"std/coretypes\" type List(..);",
+    overrides
+  )
+  Map.set(
+    "stdroot/coretypes.wm",
+    "export type List<T> = Empty | Link<(T, List<T>)>;",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      stdRoots: ["stdroot"],
+      sourceOverrides: overrides,
+    }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let mkScheme = match (Map.get("mk", entry.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing mk binding"),
+  }
+  let shapeOk = match (mkScheme.ty) {
+    Types.TFun(Types.TVar(a), Types.TNominal("List", [Types.TVar(b)])) => a == b,
+    _ => false,
+  }
+
+  assertTrue(shapeOk)
+})
+
+test("imported constructor shorthand keeps recursive length polymorphic", () => {
+  let overrides = Map.make()
+  Map.set(
+    "coretypes.wm",
+    "export type List<T> = Empty | Link<T, List<T>>;",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./coretypes\" import { Empty, Link };\nexport let rec length = match(list) => {\n  Empty => { 0 },\n  Link(_, rest) => { length(rest) }\n};",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let lengthScheme = match (Map.get("length", entry.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing length binding"),
+  }
+  let shapeOk = match (lengthScheme.ty) {
+    Types.TFun(Types.TNominal("List", [Types.TVar(a)]), Types.TNumber) =>
+      Types.containsVar(lengthScheme.quantifiers, a),
+    _ => false,
+  }
+  assertTrue(shapeOk)
+})
+
+let results = runTests()
+printResultsAndExit(results)

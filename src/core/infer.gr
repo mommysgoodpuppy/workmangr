@@ -71,6 +71,9 @@ let inferDebug = (message: String) => {
 
 let mapSize = (m) => List.length(Map.toList(m))
 
+let renderType = (t: Types.Type, state: InferState) =>
+  Types.typeToString(Types.applySubstType(state.subst, t))
+
 let logState = (label: String, state: InferState, nodeId: Number=-1) => {
   inferDebug(
     label
@@ -300,7 +303,10 @@ let rec unify = (
         TypeMismatch,
         origin,
         CoreAst.Inconsistent,
-        "Type error: cannot unify types"
+        "Type error: cannot unify "
+          ++ renderType(l, state1)
+          ++ " with "
+          ++ renderType(r, state1)
       ),
   }
 }
@@ -706,15 +712,30 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
         state2.subst,
         tValue
       )
-      let name = Layer1Expr.bindingName(binding)
-      let (tBody, state3) = withBinding(
-        name,
-        scheme,
-        state2,
-        st => inferExpr(body, st)
-      )
-      let tRecorded = recordNodeType(expr.node.id, tBody, state3)
-      (tRecorded, state3)
+      match (binding.name.kind) {
+        CoreAst.Var(name) | CoreAst.Pin(name) => {
+          let (tBody, state3) = withBinding(
+            name.text,
+            scheme,
+            state2,
+            st => inferExpr(body, st)
+          )
+          let tRecorded = recordNodeType(expr.node.id, tBody, state3)
+          (tRecorded, state3)
+        },
+        _ => {
+          let (instType, nextVar) = Types.instantiate(scheme, state2.nextVar)
+          let state3 = { ...state2, nextVar }
+          let (tBody, state4) = withPatternBindings(
+            binding.name,
+            instType,
+            state3,
+            st => inferExpr(body, st)
+          )
+          let tRecorded = recordNodeType(expr.node.id, tBody, state4)
+          (tRecorded, state4)
+        },
+      }
     },
     CoreAst.If(cond, thenExpr, elseOpt) => {
       let (tCond, state1) = inferExpr(cond, state)

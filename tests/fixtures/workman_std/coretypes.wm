@@ -1,0 +1,54 @@
+@core;
+export type Option<T> = Some<T> | None;
+export type infectious effect  IOption<T> = @value ISome<T> | @effect INone;
+
+export type List<T> = Empty | Link<T, List<T>>;
+
+export type Ordering = LT | EQ | GT;
+
+export let lt = LT;
+export let eq = EQ;
+export let gt = GT;
+
+--weird--
+
+-- The 'async' domain tells the compiler this behaves like a Promise
+-- @value: The resolved value (T)
+-- @effect: The rejection reason (E)
+export type infectious async  Promise<T, E> = 
+    | @value Resolved<T>
+    | @effect Rejected<E>;
+
+-- Helper to create a resolved promise
+export let resolve = (val: T) => {Resolved(val)};
+
+-- Helper to create a rejected promise
+export let reject = (err: E) => {Rejected(err)};
+
+-- export infectious hole type Hole<T, H> = @value ?;
+
+--@raw;
+-- Define the IResult type with its constructors IOk and IErr
+-- @value marks the constructor that carries the value (extracts payload)
+-- @effect marks constructors that carry effects (short-circuit)
+--
+-- Domain sketch lives in `std/infection/domains.wm` (commented until the compiler supports it).
+export type infectious effect  IResult<T, E> = @value IOk<T> | @effect IErr<E>;
+
+
+-- Memory domain sketch (non-linear, constraint-driven)
+--
+-- This file is intentionally minimal: it defines the mem-domain carrier type so the typechecker
+-- can "see" a `mem` carrier in the same way it already sees `effect`, `hole`, and `async`.
+--
+-- The *semantics* (shape requirements, duplicates as bag, boundary cancellation, no_leak/pure)
+-- are std-declared via `domain` / `op` / `policy` metadata (see
+-- `std/infection/domains.wm`).
+
+-- Carrier type for the `mem` domain.
+-- `T` is the underlying value (e.g., a pointer-like handle).
+-- `S` is the domain state (intended to be a row/bag of tags like <Opened|Closed|...>).
+--
+-- NOTE: Today, carrier state union is implemented via `effectRowUnion` for *all* domains, so
+-- bag semantics will likely be encoded by unique tag keys (similar to the hole tag approach).
+export type infectious mem  Mem<T, S> = @value MemVal<T>;

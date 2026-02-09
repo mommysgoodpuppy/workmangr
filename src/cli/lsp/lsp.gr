@@ -636,11 +636,29 @@ let buildGraphForEntry = (
 let buildInferenceForEntry = (
   entryUri: String,
   docs: Map.Map<String, String>,
+  caller: String="unknown",
 ) => {
   match (Map.get(entryUri, inferenceCache)) {
-    Some(snapshot) when snapshot.epoch == graphEpoch =>
-      (snapshot.entryPath, snapshot.graph, snapshot.inferred),
+    Some(snapshot) when snapshot.epoch == graphEpoch => {
+      debug(
+        "[LSP infer] cache hit caller="
+          ++ caller
+          ++ " epoch="
+          ++ toString(graphEpoch)
+          ++ " uri="
+          ++ entryUri
+      )
+      (snapshot.entryPath, snapshot.graph, snapshot.inferred)
+    },
     _ => {
+      debug(
+        "[LSP infer] cache miss caller="
+          ++ caller
+          ++ " epoch="
+          ++ toString(graphEpoch)
+          ++ " uri="
+          ++ entryUri
+      )
       let (entryPath, graph) = buildGraphForEntry(entryUri, docs)
       let inferred = ModuleInfer.inferGraph(graph)
       let snapshot: InferenceSnapshot = { epoch: graphEpoch, entryPath, graph, inferred }
@@ -655,7 +673,7 @@ let publishGraphDiagnostics = (
   docs: Map.Map<String, String>,
   publishedUris: Map.Map<String, Bool>,
 ) => {
-  let (entryPath, graph, inferred) = buildInferenceForEntry(entryUri, docs)
+  let (entryPath, graph, inferred) = buildInferenceForEntry(entryUri, docs, caller="diag")
   let uriLookup = pathUriLookup(docs)
   List.forEach(((moduleId, node)) => {
     Map.set(moduleId, node, cachedGraphNodes)
@@ -799,7 +817,7 @@ let handleHover = (
         Some(source) => {
           let offset = positionToOffset(source, line0, col0)
           let modulePath = toWorkspacePath(uriToPath(uri))
-          let (_entryPath, graph, inferred) = buildInferenceForEntry(uri, docs)
+          let (_entryPath, graph, inferred) = buildInferenceForEntry(uri, docs, caller="hover")
           match (Map.get(modulePath, inferred.modules)) {
             Some(summary) =>
               match (ModuleInfer.typeAtOffsetInSummary(summary, offset)) {
@@ -876,7 +894,7 @@ let handleDefinition = (
       match (Map.get(uri, docs)) {
         Some(source) => {
           let offset = positionToOffset(source, line0, col0)
-          let (entryPath, graph, _inferred) = buildInferenceForEntry(uri, docs)
+          let (entryPath, graph, _inferred) = buildInferenceForEntry(uri, docs, caller="definition")
           match (SymbolService.findDefinitionAtOffset(graph, entryPath, source, offset)) {
             Some(found) => sendResponse(idText, "[" ++ definitionJson(found.modulePath, found.span) ++ "]"),
             None => sendResponse(idText, "[]"),

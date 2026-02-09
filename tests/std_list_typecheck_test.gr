@@ -1,0 +1,42 @@
+module StdListTypecheckTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "map" include Map
+
+from "../src/core/error.gr" include Error
+from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/module/module_system.gr" include ModuleSystem
+
+setSourceFile("./tests/std_list_typecheck_test.gr")
+
+test("module infer reports no type errors in std list fixture", () => {
+  let entryPath = "tests/fixtures/workman_std/list"
+  let result = ModuleInfer.inferEntry(
+    entryPath,
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: ".",
+      stdRoots: ["tests/fixtures/workman_std"],
+    }
+  )
+  let moduleId = result.graph.entry
+  let diagnostics = match (Map.get(moduleId, result.diagnosticsById)) {
+    Some(diags) => diags,
+    None => [],
+  }
+  let typeErrors = List.filter(
+    (diag: Error.CompilerError) => diag.stage == Error.TypeInference,
+    diagnostics
+  )
+
+  all([
+    assertTrue(Map.get(moduleId, result.modules) != None),
+    assertEquals(0, List.length(typeErrors)),
+  ])
+})
+
+let results = runTests()
+printResultsAndExit(results)

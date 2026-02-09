@@ -142,5 +142,42 @@ test("pipe prepends arg when rhs is apply", () => {
   )
 })
 
+test("qualified dot call lowers to qualified identifier apply", () => {
+  let source = "let x = List.at(xs, 0);"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(callee, arg) =>
+          match (callee.kind) {
+            CoreAst.Ident({ _, text }) =>
+              if (text == "List.at") {
+                match (arg.kind) {
+                  CoreAst.Tuple([_, second]) =>
+                    match (second.kind) {
+                      CoreAst.Lit(CoreAst.Int(0)) => Ok(void),
+                      _ => Err("expected second tuple arg to be 0"),
+                    },
+                  _ => Err("expected tuple args to List.at"),
+                }
+              } else {
+                Err("expected callee List.at")
+              },
+            _ => Err("expected ident callee"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
 let results = runTests()
 printResultsAndExit(results)
