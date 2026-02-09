@@ -4,3 +4,6 @@
 [submodule "submodules/graintest"]
 	path = submodules/graintest
 	url = https://github.com/mommysgoodpuppy/graintest.git
+[submodule "submodules/vscodewm"]
+	path = submodules/vscodewm
+	url = https://github.com/mommysgoodpuppy/vscodewm.git
