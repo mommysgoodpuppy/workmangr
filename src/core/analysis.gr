@@ -1,8 +1,14 @@
 module Analysis
 
+from "list" include List
+from "map" include Map
+
 from "./core_ast.gr" include CoreAst
 from "./infer.gr" include Infer
 from "./types.gr" include Types
+from "./source.gr" include Source
+from "./constraints.gr" include Constraints
+from "./error.gr" include Error
 from "../frontend/frontend.gr" include Frontend
 
 provide record Analysis {
@@ -10,8 +16,165 @@ provide record Analysis {
   infer: Infer.InferState,
 }
 
+let indexNodeSpan = (index: Map.Map<Number, Source.Span>, node: CoreAst.Node) =>
+  Map.set(node.id, node.span, index)
+
+let rec indexTypeExpr = (typeExpr: CoreAst.TypeExpr, index: Map.Map<Number, Source.Span>) => {
+  indexNodeSpan(index, typeExpr.node)
+  match (typeExpr.kind) {
+    CoreAst.Mark(_, inner) => indexTypeExpr(inner, index),
+    CoreAst.Ref(_, args) => List.forEach(arg => indexTypeExpr(arg, index), args),
+    CoreAst.Tuple(items) => List.forEach(item => indexTypeExpr(item, index), items),
+    CoreAst.Record(fields) =>
+      List.forEach(((_name, fieldType)) => indexTypeExpr(fieldType, index), fields),
+    CoreAst.Arrow(params, result) => {
+      List.forEach(param => indexTypeExpr(param, index), params)
+      indexTypeExpr(result, index)
+    },
+    CoreAst.Ptr(inner, _) => indexTypeExpr(inner, index),
+    CoreAst.EffectRow(cases, _) =>
+      List.forEach((effectCase: CoreAst.EffectCase) =>
+        match (effectCase.payload) {
+          Some(payloadType) => indexTypeExpr(payloadType, index),
+          None => void,
+        }, cases),
+    _ => void,
+  }
+}
+
+let rec indexPattern = (pattern: CoreAst.Pattern, index: Map.Map<Number, Source.Span>) => {
+  indexNodeSpan(index, pattern.node)
+  match (pattern.kind) {
+    CoreAst.Mark(_, inner) => indexPattern(inner, index),
+    CoreAst.Constructor(_, args) => List.forEach(arg => indexPattern(arg, index), args),
+    CoreAst.Tuple(items) => List.forEach(item => indexPattern(item, index), items),
+    CoreAst.List(items, rest) => {
+      List.forEach(item => indexPattern(item, index), items)
+      match (rest) {
+        Some(restPattern) => indexPattern(restPattern, index),
+        None => void,
+      }
+    },
+    _ => void,
+  }
+}
+
+let rec indexExpr = (expr: CoreAst.Expr, index: Map.Map<Number, Source.Span>) => {
+  indexNodeSpan(index, expr.node)
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => indexExpr(inner, index),
+    CoreAst.Apply(callee, arg) => {
+      indexExpr(callee, index)
+      indexExpr(arg, index)
+    },
+    CoreAst.Fn(fnExpr) =>
+      List.forEach((item: CoreAst.FnItem) => match (item.kind) {
+        CoreAst.Clause(clause) => {
+          indexNodeSpan(index, clause.node)
+          indexPattern(clause.param, index)
+          match (clause.guard) {
+            Some(guardExpr) => indexExpr(guardExpr, index),
+            None => void,
+          }
+          indexExpr(clause.body, index)
+        },
+        _ => void,
+      }, fnExpr.items),
+    CoreAst.Let(binding, body) => {
+      indexNodeSpan(index, binding.node)
+      indexPattern(binding.name, index)
+      match (binding.annotation) {
+        Some(annotation) => indexTypeExpr(annotation, index),
+        None => void,
+      }
+      indexExpr(binding.value, index)
+      indexExpr(body, index)
+    },
+    CoreAst.If(cond, thenExpr, elseOpt) => {
+      indexExpr(cond, index)
+      indexExpr(thenExpr, index)
+      match (elseOpt) {
+        Some(elseExpr) => indexExpr(elseExpr, index),
+        None => void,
+      }
+    },
+    CoreAst.Tuple(items) => List.forEach(item => indexExpr(item, index), items),
+    CoreAst.RecordLit(items) =>
+      List.forEach((recordItem: CoreAst.RecordItem) => match (recordItem) {
+        CoreAst.Field(_, valueExpr) => indexExpr(valueExpr, index),
+        CoreAst.Spread(valueExpr) => indexExpr(valueExpr, index),
+      }, items),
+    _ => void,
+  }
+}
+
+let buildNodeSpanIndex = (program: CoreAst.Program) => {
+  let index = Map.make()
+  List.forEach((item: CoreAst.TopItem) => match (item) {
+    CoreAst.DeclGroup(group) => {
+      indexNodeSpan(index, group.node)
+      List.forEach((decl: CoreAst.Decl) => match (decl) {
+        CoreAst.LetDecl(letDecl) => {
+          indexNodeSpan(index, letDecl.node)
+          List.forEach((binding: CoreAst.LetBinding) => {
+            indexNodeSpan(index, binding.node)
+            indexPattern(binding.name, index)
+            match (binding.annotation) {
+              Some(annotation) => indexTypeExpr(annotation, index),
+              None => void,
+            }
+            indexExpr(binding.value, index)
+          }, letDecl.bindings)
+        },
+        CoreAst.TypeDecl(typeDecl) => {
+          indexNodeSpan(index, typeDecl.node)
+          match (typeDecl.body) {
+            CoreAst.Alias(typeExpr) => indexTypeExpr(typeExpr, index),
+            CoreAst.Variant(constructors) =>
+              List.forEach(((_name, payload, _annotation)) => match (payload) {
+                Some(payloadType) => indexTypeExpr(payloadType, index),
+                None => void,
+              }, constructors),
+          }
+        },
+        CoreAst.RecordDecl(recordDecl) => {
+          indexNodeSpan(index, recordDecl.node)
+          List.forEach(((_name, fieldType)) => indexTypeExpr(fieldType, index), recordDecl.fields)
+        },
+        CoreAst.InfixDecl(infixDecl) => indexNodeSpan(index, infixDecl.node),
+        CoreAst.PrefixDecl(prefixDecl) => indexNodeSpan(index, prefixDecl.node),
+      }, group.decls)
+    },
+    _ => void,
+  }, program.items)
+  index
+}
+
+let emitTypeInferenceDiagnostics = (
+  marks: List<Infer.TypeMark>,
+  nodeSpans: Map.Map<Number, Source.Span>,
+) => {
+  List.forEach((entry: Infer.TypeMark) => {
+    let span = match (Map.get(entry.origin.nodeId, nodeSpans)) {
+      Some(found) => found,
+      None => Source.makeSpan(1, 1, 0, 0),
+    }
+    let _ = Error.createError(
+      Error.TypeInference,
+      span,
+      entry.message,
+      void,
+      clues=[Error.Note(Constraints.originToString(entry.origin))],
+      severity=Error.SError
+    )
+    void
+  }, marks)
+}
+
 provide let analyze = (source: String) => {
   let loweredProgram = Frontend.parseAndLower(source)
   let infer = Infer.inferProgram(loweredProgram)
+  let nodeSpans = buildNodeSpanIndex(loweredProgram)
+  emitTypeInferenceDiagnostics(infer.marks, nodeSpans)
   { program: loweredProgram, infer }
 }

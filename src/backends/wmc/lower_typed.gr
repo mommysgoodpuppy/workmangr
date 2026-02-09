@@ -14,9 +14,15 @@ from "./backend_ir.gr" include BackendIR
 let rec toBType = (t: Types.Type) =>
   match (t) {
     Types.TNumber => BackendIR.BInt,
+    Types.TBool => BackendIR.BBool,
+    Types.TString => BackendIR.BString,
+    Types.TByte => BackendIR.BInt,
+    Types.TChar => BackendIR.BInt,
     Types.TVoid => BackendIR.BVoid,
     Types.TVar(_) => BackendIR.BUnknown,
     Types.TFun(a, b) => BackendIR.BFun(toBType(a), toBType(b)),
+    Types.TTuple(_) => BackendIR.BUnknown,
+    Types.TNominal(_, _) => BackendIR.BUnknown,
   }
 
 // Resolve a node's type from the infer state

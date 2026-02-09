@@ -3227,7 +3227,8 @@ and parseMatch = (state: ParseState) => {
               kindIs(currentToken(state_temp).kind, Lexer.LitName("when"))
             ) {
               let (_, state_temp0) = expectKeyword("when", state_temp)
-              let (guard, state_temp00) = parseExpr(state_temp0)
+              // Parse guard without consuming the clause arrow token.
+              let (guard, state_temp00) = parseInfix(state_temp0)
               (Some(guard), state_temp00)
             } else {
               (None, state_temp)

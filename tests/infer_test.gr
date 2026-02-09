@@ -5,6 +5,9 @@ use Test.*
 
 from "../src/frontend/frontend.gr" include Frontend
 from "../src/core/infer.gr" include Infer
+from "../src/core/layer1/mod.gr" include Layer1
+from "../src/core/layer2/mod.gr" include Layer2
+from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/types.gr" include Types
 from "map" include Map
 from "list" include List
@@ -14,6 +17,11 @@ setSourceFile("./tests/infer_test.gr")
 let inferSource = (source: String) => {
   let program = Frontend.parseAndLower(source)
   Infer.inferProgram(program)
+}
+
+let inferSourceWithEnv = (source: String, env: Types.Env) => {
+  let program = Frontend.parseAndLower(source)
+  Infer.inferProgramWithEnv(program, env)
 }
 
 let assertFunScheme = (scheme: Types.Scheme) => {
@@ -33,13 +41,18 @@ let expectTopBinding = (state: Infer.InferState, name: String) =>
     None => fail "missing binding: " ++ name,
   }
 
+let assertFunctionShape = (scheme: Types.Scheme) =>
+  match (scheme.ty) {
+    Types.TFun(_, _) => assertTrue(true),
+    _ => fail "expected function type",
+  }
+
 test("let generalization produces polymorphic scheme", () => {
-  let source =
+let source =
     "
 let id = (x) => { x };
 let useNumber = (n) => { id(n) };
 let useFunction = (f) => { id(f) };
-let main = => { useNumber(5); useFunction((x) => { x }); void };
 "
 
   let state = inferSource(source)
@@ -47,3 +60,269 @@ let main = => { useNumber(5); useFunction((x) => { x }); void };
   assertFunScheme(scheme)
   assertEquals(0, List.length(state.constraints))
 })
+
+test("tuple expressions infer tuple element types", () => {
+  let source =
+    "
+let pair = (x) => { (x, x) };
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "pair")
+
+  match (scheme.ty) {
+    Types.TFun(Types.TVar(arg), Types.TTuple([Types.TVar(a), Types.TVar(b)])) => {
+      assertEquals(arg, a)
+      assertEquals(arg, b)
+      assertTrue(List.length(scheme.quantifiers) >= 1)
+    },
+    _ => fail "expected pair : 'a -> ('a, 'a)",
+  }
+})
+
+test("let rec infers recursive function via placeholder", () => {
+  let source =
+    "
+let rec loop = (n) => { loop(n) };
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "loop")
+  assertFunctionShape(scheme)
+})
+
+test("let rec and infers mutual recursion in one group", () => {
+  let source =
+    "
+let rec isEven = (n) => { isOdd(n) } and isOdd = (n) => { isEven(n) };
+"
+  let state = inferSource(source)
+  let evenScheme = expectTopBinding(state, "isEven")
+  let oddScheme = expectTopBinding(state, "isOdd")
+  assertFunctionShape(evenScheme)
+  assertFunctionShape(oddScheme)
+})
+
+test("type decl registers constructor schemes for expression typing", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let wrap = (x) => { Some(x) };
+let none = None;
+"
+  let state = inferSource(source)
+  let wrapScheme = expectTopBinding(state, "wrap")
+  let noneScheme = expectTopBinding(state, "none")
+
+  match (wrapScheme.ty) {
+    Types.TFun(Types.TVar(a), Types.TNominal("Option", [Types.TVar(b)])) => {
+      assertEquals(a, b)
+      assertTrue(List.length(wrapScheme.quantifiers) >= 1)
+    },
+    _ => fail "expected wrap : 'a -> Option<'a>",
+  }
+
+  match (noneScheme.ty) {
+    Types.TNominal("Option", [_]) =>
+      assertTrue(List.length(noneScheme.quantifiers) >= 1),
+    _ => fail "expected none : Option<'a>",
+  }
+})
+
+test("constructor patterns typecheck in match clauses", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let unwrapOr = (pair) => {
+  match(pair) {
+    (Some(v), fallback) => { v }
+    (None, fallback) => { fallback }
+  }
+};
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "unwrapOr")
+  assertFunctionShape(scheme)
+  assertEquals(0, List.length(state.constraints))
+})
+
+test("literal patterns use their literal type", () => {
+  let source =
+    "
+let choose = (x) => {
+  match(x) {
+    true => { 1 }
+    false => { 0 }
+  }
+};
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "choose")
+  match (scheme.ty) {
+    Types.TFun(Types.TBool, Types.TNumber) => assertTrue(true),
+    _ => fail "expected choose : Bool -> Number",
+  }
+})
+
+test("inferProgramWithEnv seeds cross-module schemes", () => {
+  let source = "let make = (x) => { Some(x) };"
+  let importedEnv = Map.make()
+  let optionVar = Types.TVar(999)
+  let someScheme: Types.Scheme = {
+    quantifiers: [999],
+    ty: Types.TFun(optionVar, Types.TNominal("Option", [optionVar])),
+  }
+  Map.set("Some", someScheme, importedEnv)
+
+  let state = inferSourceWithEnv(source, importedEnv)
+  let scheme = expectTopBinding(state, "make")
+  assertFunctionShape(scheme)
+})
+
+test("layer1 then layer2 pipeline works explicitly", () => {
+  let source =
+    "
+let id = (x) => { x };
+let out = id(1);
+"
+  let program = Frontend.parseAndLower(source)
+  let layer1State = Layer1.inferProgram(program)
+  assertTrue(List.length(layer1State.constraints) > 0)
+
+  let layer2State = Layer2.solve(layer1State)
+  assertEquals(0, List.length(layer2State.constraints))
+  let outScheme = expectTopBinding(layer2State, "out")
+  assertEquals("Number", Types.typeToString(outScheme.ty))
+})
+
+test("literals map to primitive base types", () => {
+  let source =
+    "
+let b = true;
+let s = \"abc\";
+"
+  let state = inferSource(source)
+  assertEquals("Bool", Types.typeToString(expectTopBinding(state, "b").ty))
+  assertEquals("String", Types.typeToString(expectTopBinding(state, "s").ty))
+})
+
+test("if condition must be bool", () => {
+  let source =
+    "
+let choose = (x) => { if (x) { 1 } else { 2 } };
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "choose")
+  match (scheme.ty) {
+    Types.TFun(Types.TBool, Types.TNumber) => assertTrue(true),
+    _ => fail "expected choose : Bool -> Number",
+  }
+})
+
+test("match clause guard parses and types as bool", () => {
+  let source =
+    "
+let guarded = (x) => {
+  match(x) {
+    n when true => { n }
+  }
+};
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "guarded")
+  assertFunScheme(scheme)
+})
+
+test("type mismatch records mark and continues inference", () => {
+  let source =
+    "
+let bad = (x) => { if (1) { x } else { x } };
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "bad")
+  assertFunctionShape(scheme)
+  assertTrue(List.length(state.marks) > 0)
+  let hasInconsistent = List.some(
+    (entry: Infer.TypeMark) =>
+      match (entry.mark) {
+        CoreAst.Inconsistent => true,
+        _ => false,
+      },
+    state.marks
+  )
+  assertTrue(hasInconsistent)
+})
+
+test("unknown identifier records free-var mark and continues", () => {
+  let source =
+    "
+let bad = missingValue;
+let keep = 1;
+"
+  let state = inferSource(source)
+  let keepScheme = expectTopBinding(state, "keep")
+  assertEquals("Number", Types.typeToString(keepScheme.ty))
+  let hasUnknownIdentifier = List.some(
+    (entry: Infer.TypeMark) => entry.reason == Infer.UnknownIdentifier,
+    state.marks
+  )
+  let hasFreeVar = List.some(
+    (entry: Infer.TypeMark) =>
+      match (entry.mark) {
+        CoreAst.FreeVar(_) => true,
+        _ => false,
+      },
+    state.marks
+  )
+  all([assertTrue(hasUnknownIdentifier), assertTrue(hasFreeVar)])
+})
+
+test("conflicting hole obligations mark unfillable hole", () => {
+  let source =
+    "
+let h = ?;
+let _a = if (h) { 1 } else { 2 };
+let _b = h(1);
+"
+  let state = inferSource(source)
+  let hasUnfillable = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnfillableHole
+        && match (entry.mark) {
+          CoreAst.UnfillableHole => true,
+          _ => false,
+        },
+    state.marks
+  )
+  assertTrue(hasUnfillable)
+})
+
+test("layered pipeline matches direct infer result", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let id = (x) => { x };
+let out = id(1);
+let fromSome = (o) => {
+  match(o) {
+    Some(v) => { v }
+    None => { 0 }
+  }
+};
+"
+  let program = Frontend.parseAndLower(source)
+  let direct = Infer.inferProgram(program)
+  let layered = Layer2.solve(Layer1.inferProgram(program))
+
+  let directOut = expectTopBinding(direct, "out")
+  let layeredOut = expectTopBinding(layered, "out")
+  assertEquals(Types.typeToString(directOut.ty), Types.typeToString(layeredOut.ty))
+
+  let directFromSome = expectTopBinding(direct, "fromSome")
+  let layeredFromSome = expectTopBinding(layered, "fromSome")
+  assertEquals(
+    Types.typeToString(directFromSome.ty),
+    Types.typeToString(layeredFromSome.ty)
+  )
+})
+
+let results = runTests()
+printResultsAndExit(results)

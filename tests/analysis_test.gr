@@ -1,0 +1,31 @@
+module AnalysisTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "../src/core/analysis.gr" include Analysis
+from "../src/core/error.gr" include Error
+
+setSourceFile("./tests/analysis_test.gr")
+
+test("analysis emits type inference diagnostics from infer marks", () => {
+  Error.clearErrors()
+  let source =
+    "
+let bad = (x) => { if (1) { x } else { x } };
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let hasTypeInferenceDiagnostic = List.some(
+    (entry: Error.CompilerError) => match (entry.stage) {
+      Error.TypeInference => true,
+      _ => false,
+    },
+    diagnostics
+  )
+  assertTrue(hasTypeInferenceDiagnostic)
+})
+
+let results = runTests()
+printResultsAndExit(results)

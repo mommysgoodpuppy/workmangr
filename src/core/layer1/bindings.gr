@@ -1,0 +1,57 @@
+module Layer1Bindings
+
+from "list" include List
+
+from "../core_ast.gr" include CoreAst
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+
+provide record RecursiveSeed {
+  placeholders: List<(String, Types.Type)>,
+  nextVar: Number,
+}
+
+// Seed one fresh monotype placeholder per binding name for recursive groups.
+provide let seedRecursivePlaceholders = (
+  bindings: List<CoreAst.LetBinding>,
+  nextVarStart: Number,
+) => {
+  let rec loop = (
+    remaining: List<CoreAst.LetBinding>,
+    nextVar: Number,
+    acc: List<(String, Types.Type)>,
+  ) => match (remaining) {
+    [] => { placeholders: List.reverse(acc), nextVar }: RecursiveSeed,
+    [binding, ...rest] => {
+      let name = Layer1Expr.bindingName(binding)
+      let placeholder = Types.TVar(nextVar)
+      loop(rest, nextVar + 1, [(name, placeholder), ...acc])
+    },
+  }
+  loop(bindings, nextVarStart, [])
+}
+
+provide let rec lookupPlaceholder = (
+  name: String,
+  placeholders: List<(String, Types.Type)>,
+) => match (placeholders) {
+  [] => None,
+  [(bindingName, placeholderType), ...rest] =>
+    if (bindingName == name) {
+      Some(placeholderType)
+    } else {
+      lookupPlaceholder(name, rest)
+    },
+}
+
+// Shared helper for sequentially typing non-rec let binding lists.
+provide let rec inferLetBindingsSequential = (
+  bindings: List<CoreAst.LetBinding>,
+  state,
+  inferBinding: (CoreAst.LetBinding, state) => state,
+) =>
+  match (bindings) {
+    [] => state,
+    [binding, ...rest] =>
+      inferLetBindingsSequential(rest, inferBinding(binding, state), inferBinding),
+  }

@@ -1,0 +1,77 @@
+module InlayTiming
+
+from "../src/util.gr" include Util
+from "../src/cli/lsp/inlay.gr" include Inlay
+from "string" include String
+
+let noDebug = (_: String) => void
+
+let escapeJson = (text: String) => {
+  let s1 = String.replaceAll("\\", "\\\\", text)
+  let s2 = String.replaceAll("\"", "\\\"", s1)
+  let s3 = String.replaceAll("\n", "\\n", s2)
+  let s4 = String.replaceAll("\r", "\\r", s3)
+  String.replaceAll("\t", "\\t", s4)
+}
+
+let countInlayHints = (json: String) => {
+  let marker = "\"position\""
+  let markerLen = String.length(marker)
+  let len = String.length(json)
+  let mut i = 0
+  let mut count = 0
+  while (i + markerLen <= len) {
+    let part = String.slice(i, end=i + markerLen, json)
+    if (part == marker) {
+      count += 1
+      i += markerLen
+    } else {
+      i += 1
+    }
+  }
+  count
+}
+
+let runCase = (name: String, source: String) => {
+  let len = String.length(source)
+  print("[InlayTiming] case=" ++ name ++ " input length=" ++ toString(len))
+  let hints = Inlay.inlayHintsForSourceProfile(
+    source,
+    0,
+    len,
+    noDebug,
+    escapeJson,
+    false,
+    name
+  )
+  print(
+    "[InlayTiming] case="
+      ++ name
+      ++ " hint count="
+      ++ toString(countInlayHints(hints))
+      ++ " json length="
+      ++ toString(String.length(hints))
+  )
+}
+
+let main = () => {
+  let testLen = String.length(Util.testStr)
+  let sample400End = if (testLen > 400) {
+    400
+  } else {
+    testLen
+  }
+  let sample800End = if (testLen > 800) {
+    800
+  } else {
+    testLen
+  }
+  let sample400 = String.slice(0, end=sample400End, Util.testStr)
+  let sample800 = String.slice(0, end=sample800End, Util.testStr)
+  runCase("testStrShort", Util.testStrShort)
+  runCase("testStr_400", sample400)
+  runCase("testStr_800", sample800)
+  runCase("testStr_2p4k", Util.testStr)
+}
+
+main()

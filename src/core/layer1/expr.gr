@@ -1,0 +1,67 @@
+module Layer1Expr
+
+from "list" include List
+from "map" include Map
+from "runtime/unsafe/panic" include Panic
+
+from "../core_ast.gr" include CoreAst
+from "../types.gr" include Types
+
+provide let instantiateTypeParams = (typeParams: List<String>, nextVarStart: Number) => {
+  let paramMap: Map.Map<String, Types.Type> = Map.make()
+  let rec loop = (
+    params: List<String>,
+    nextVar: Number,
+    acc: List<Types.Type>,
+  ) =>
+    match (params) {
+      [] => (List.reverse(acc), paramMap, nextVar),
+      [name, ...rest] => {
+        let tVar: Types.Type = Types.TVar(nextVar)
+        Map.set(name, tVar, paramMap)
+        loop(rest, nextVar + 1, [tVar, ...acc])
+      },
+    }
+  loop(typeParams, nextVarStart, [])
+}
+
+provide let rec typeVarIdsFromTypes = (items: List<Types.Type>) =>
+  match (items) {
+    [] => [],
+    [Types.TVar(id), ...rest] => [id, ...typeVarIdsFromTypes(rest)],
+    [_other, ...rest] => typeVarIdsFromTypes(rest),
+  }
+
+provide let rec typeExprToType = (
+  typeExpr: CoreAst.TypeExpr,
+  paramMap: Map.Map<String, Types.Type>,
+) => {
+  match (typeExpr.kind) {
+    CoreAst.Var(name) => match (Map.get(name.text, paramMap)) {
+      Some(t) => t,
+      None => Types.TNominal(name.text, []),
+    },
+    CoreAst.Ref(name, args) =>
+      if (args == []) {
+        match (Map.get(name.text, paramMap)) {
+          Some(t) => t,
+          None => Types.TNominal(name.text, []),
+        }
+      } else {
+        Types.TNominal(
+          name.text,
+          List.map(arg => typeExprToType(arg, paramMap), args),
+        )
+      },
+    CoreAst.Tuple(items) =>
+      Types.TTuple(List.map(item => typeExprToType(item, paramMap), items)),
+    CoreAst.UnitType => Types.TVoid,
+    _ => Panic.panic("Unsupported constructor type expression"),
+  }
+}
+
+provide let bindingName = (binding: CoreAst.LetBinding) =>
+  match (binding.name.kind) {
+    CoreAst.Var(name) => name.text,
+    _ => "_",
+  }

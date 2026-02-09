@@ -1,0 +1,67 @@
+module Layer1Decl
+
+from "list" include List
+
+from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+
+provide record PreparedTypeDecl {
+  info: Env.TypeInfo,
+  constructorSchemes: List<(String, Types.Scheme)>,
+  nextVar: Number,
+}
+
+provide let prepareTypeDecl = (
+  decl: CoreAst.TypeDecl,
+  nextVarStart: Number,
+) => {
+  let typeName = decl.name.text
+  let typeParams = List.map((name: CoreAst.Name) => name.text, decl.typeParams)
+  let infection = match (decl.infection) {
+    Some(name) => Some(name.text),
+    None => None,
+  }
+  let constructors = match (decl.body) {
+    CoreAst.Alias(_) => [],
+    CoreAst.Variant(ctors) =>
+      List.map(
+        (
+          (ctorName, payload, annotation): (
+            CoreAst.Name,
+            Option<CoreAst.TypeExpr>,
+            Option<CoreAst.Annotation>
+          ),
+        ) => {
+          { name: ctorName.text, payload, annotation }: Env.ConstructorInfo
+        },
+        ctors
+      ),
+  }
+  let info: Env.TypeInfo = {
+    name: typeName,
+    typeParams,
+    constructors,
+    infection,
+  }
+
+  let (paramTypes, paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
+    typeParams,
+    nextVarStart
+  )
+  let quantifiers = Layer1Expr.typeVarIdsFromTypes(paramTypes)
+  let resultType = Types.TNominal(typeName, paramTypes)
+
+  let constructorSchemes = List.map((ctor: Env.ConstructorInfo) => {
+    let ctorType = match (ctor.payload) {
+      Some(payloadType) =>
+        Types.TFun(Layer1Expr.typeExprToType(payloadType, paramMap), resultType),
+      None => resultType,
+    }
+    let scheme: Types.Scheme = { quantifiers, ty: ctorType }
+    (ctor.name, scheme)
+  }, constructors)
+
+  { info, constructorSchemes, nextVar }: PreparedTypeDecl
+}

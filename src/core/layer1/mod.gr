@@ -1,0 +1,12 @@
+module Layer1
+
+from "../core_ast.gr" include CoreAst
+from "../types.gr" include Types
+from "./generate.gr" include Layer1Generate
+
+// Layer 1: constraint generation + environment/type registration (no solve).
+provide let inferProgram = (program: CoreAst.Program) =>
+  Layer1Generate.program(program)
+
+provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) =>
+  Layer1Generate.programWithEnv(program, env)

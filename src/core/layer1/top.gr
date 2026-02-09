@@ -1,0 +1,48 @@
+module Layer1Top
+
+from "list" include List
+from "../core_ast.gr" include CoreAst
+
+// Layer 1 top-level traversal helper: keeps group/decl recursion out of infer.gr.
+provide let inferDeclGroup = (
+  group: CoreAst.DeclGroup,
+  state,
+  onLet: (CoreAst.LetDecl, CoreAst.DeclGroupKind, state) => state,
+  onType: (CoreAst.TypeDecl, state) => state,
+  onOther: (CoreAst.Decl, state) => state,
+) => {
+  let rec inferDecls = (decls: List<CoreAst.Decl>, st) =>
+    match (decls) {
+      [] => st,
+      [decl, ...restDecls] => {
+        let next = match (decl) {
+          CoreAst.LetDecl(letDecl) => onLet(letDecl, group.kind, st),
+          CoreAst.TypeDecl(typeDecl) => onType(typeDecl, st),
+          _ => onOther(decl, st),
+        }
+        inferDecls(restDecls, next)
+      },
+    }
+  inferDecls(group.decls, state)
+}
+
+// Traverse top items in order. Callers decide what to do for decl groups/other items.
+provide let inferTopItems = (
+  items: List<CoreAst.TopItem>,
+  state,
+  onDeclGroup: (CoreAst.DeclGroup, state) => state,
+  onOtherTopItem: (CoreAst.TopItem, state) => state,
+) => {
+  let rec loop = (remaining: List<CoreAst.TopItem>, st) =>
+    match (remaining) {
+      [] => st,
+      [item, ...rest] => {
+        let next = match (item) {
+          CoreAst.DeclGroup(group) => onDeclGroup(group, st),
+          _ => onOtherTopItem(item, st),
+        }
+        loop(rest, next)
+      },
+    }
+  loop(items, state)
+}

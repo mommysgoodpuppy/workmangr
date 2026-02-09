@@ -1,0 +1,98 @@
+module Layer1PatternsTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "../src/core/layer1/patterns.gr" include Layer1Patterns
+from "../src/core/core_ast.gr" include CoreAst
+from "../src/core/source.gr" include Source
+from "list" include List
+
+setSourceFile("./tests/layer1_patterns_test.gr")
+
+let span = Source.makeSpan(1, 1, 0, 0)
+let node = (id: Number) => ({ id, span }: CoreAst.Node)
+let name = (id: Number, text: String) =>
+  ({ node: node(id), text }: CoreAst.Name)
+
+let wildcardPattern = (id: Number) =>
+  ({ node: node(id), kind: CoreAst.Wildcard, resolvedConstructor: None }:
+    CoreAst.Pattern)
+
+let constructorPattern = (id: Number, ctor: CoreAst.Name) =>
+  ({
+    node: node(id),
+    kind: CoreAst.Constructor(ctor, []),
+    resolvedConstructor: Some(ctor),
+  }: CoreAst.Pattern)
+
+let trueGuard = (id: Number) =>
+  ({ node: node(id), kind: CoreAst.Lit(CoreAst.Bool(true)) }: CoreAst.Expr)
+
+let makeClause = (
+  id: Number,
+  param: CoreAst.Pattern,
+  guard: Option<CoreAst.Expr>,
+  matchConstructor: Option<CoreAst.Name>,
+) =>
+  ({
+    node: node(id),
+    param,
+    guard,
+    matchConstructor,
+    body: { node: node(id + 1), kind: CoreAst.Lit(CoreAst.Unit) }: CoreAst.Expr,
+  }: CoreAst.FnClause)
+
+let makeFnExpr = (clause: CoreAst.FnClause) =>
+  ({
+    node: node(900),
+    items: [{
+      node: node(901),
+      kind: CoreAst.Clause(clause),
+    }: CoreAst.FnItem],
+  }: CoreAst.FnExpr)
+
+test("guarded wildcard does not count as wildcard coverage", () => {
+  let clause = makeClause(
+    10,
+    wildcardPattern(11),
+    Some(trueGuard(12)),
+    None
+  )
+  let fnExpr = makeFnExpr(clause)
+  let (_seeds, hasWildcard) = Layer1Patterns.collectConstructorSeeds(
+    fnExpr.items,
+    _ctorName => None
+  )
+  assertFalse(hasWildcard)
+})
+
+test("unguarded wildcard counts as wildcard coverage", () => {
+  let clause = makeClause(20, wildcardPattern(21), None, None)
+  let fnExpr = makeFnExpr(clause)
+  let (_seeds, hasWildcard) = Layer1Patterns.collectConstructorSeeds(
+    fnExpr.items,
+    _ctorName => None
+  )
+  assertTrue(hasWildcard)
+})
+
+test("guarded constructor is seeded but not wildcard coverage", () => {
+  let some = name(30, "Some")
+  let clause = makeClause(
+    31,
+    constructorPattern(32, some),
+    Some(trueGuard(33)),
+    Some(some)
+  )
+  let fnExpr = makeFnExpr(clause)
+  let (seeds, hasWildcard) = Layer1Patterns.collectConstructorSeeds(
+    fnExpr.items,
+    ctorName => Some("Option")
+  )
+  assertEquals(1, List.length(seeds))
+  assertFalse(hasWildcard)
+})
+
+let results = runTests()
+printResultsAndExit(results)

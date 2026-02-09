@@ -5,6 +5,9 @@ from "list" include List
 from "map" include Map
 from "number" include Number
 from "string" include String
+from "wasi/time" include Time
+from "int64" include Int64
+from "float64" include Float64
 
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
@@ -160,6 +163,115 @@ let countNewlines = (text: String) => {
   }
   count
 }
+
+let containsSemicolonOrRBrace = (text: String) => {
+  let len = String.length(text)
+  let mut i = 0
+  let mut found = false
+  while (i < len && !found) {
+    let ch = String.charAt(i, text)
+    if (ch == ';' || ch == '}') {
+      found = true
+    } else {
+      i += 1
+    }
+  }
+  found
+}
+
+let splitInlineAndTrailing = (text: String) => {
+  match (String.indexOf("\n", text)) {
+    None => (text, ""),
+    Some(idx) => {
+      let inlinePart = String.slice(0, end=idx, text)
+      let len = String.length(text)
+      let lastNl = lastNewlineIndex(text)
+      let trailingPart = if (lastNl >= 0 && lastNl + 1 < len) {
+        String.slice(lastNl + 1, end=len, text)
+      } else {
+        ""
+      }
+      (inlinePart, trailingPart)
+    },
+  }
+}
+
+let splitChunkTexts = (texts: List<String>) => {
+  let rec loop = (
+    items: List<String>,
+    inlineAcc: List<String>,
+    trailingAcc: List<String>,
+  ) =>
+    match (items) {
+      [] => (List.reverse(inlineAcc), List.reverse(trailingAcc)),
+      [t, ...rest] => {
+        let (inlinePart, trailingPart) = splitInlineAndTrailing(t)
+        let nextInline = if (String.length(inlinePart) > 0) {
+          [inlinePart, ...inlineAcc]
+        } else {
+          inlineAcc
+        }
+        let nextTrailing = if (
+          String.length(trailingPart) > 0
+          && containsSemicolonOrRBrace(trailingPart)
+        ) {
+          [trailingPart, ...trailingAcc]
+        } else {
+          trailingAcc
+        }
+        loop(rest, nextInline, nextTrailing)
+      },
+    }
+  loop(texts, [], [])
+}
+
+let joinNonEmpty = (parts: List<String>) =>
+  Array.join(
+    "",
+    Array.fromList(List.filter(s => String.length(s) > 0, parts))
+  )
+
+let chunksHaveNonWhitespace = (chunks: List<InsertChunk>) => {
+  let rec loop = (items: List<InsertChunk>) =>
+    match (items) {
+      [] => false,
+      [chunk, ...rest] => if (!isWhitespaceOnly(chunk.text)) {
+        true
+      } else {
+        loop(rest)
+      },
+    }
+  loop(chunks)
+}
+
+let nowNs = () =>
+  match (Time.monotonicTime()) {
+    Ok(t) => t,
+    Err(_) => 0L,
+  }
+
+let nsToMs = (startNs: Int64, endNs: Int64) =>
+  Float64.fromNumber((Int64.toNumber(endNs) - Int64.toNumber(startNs)) / 1000000)
+
+let maybeLogTiming = (
+  timingPrefix: Option<String>,
+  phase: String,
+  startNs: Int64,
+  endNs: Int64,
+) =>
+  match (timingPrefix) {
+    Some(prefix) =>
+      print(
+        "[InlayTiming] "
+          ++ prefix
+          ++ "/"
+          ++ phase
+          ++ ": "
+          ++ toString(nsToMs(startNs, endNs))
+          ++ "ms"
+      ),
+    None => void,
+  }
 
 let offsetToPosition = (source: String, offset: Number) => {
   let lc = Source.offsetToLineCol(source, offset)
@@ -498,25 +610,52 @@ provide let formatTargetWithSemicolons = (
   )
 }
 
-provide let inlayHintsForSource = (
+let inlayHintsForSourceWithTiming = (
   source: String,
   rangeStart: Number,
   rangeEnd: Number,
   debug: (String) => Void,
   escapeJson: (String) => String,
   debugEnabled: Bool,
+  timingPrefix: Option<String>,
 ) => {
   let allowWhitespaceInlays = false
+  let totalStart = nowNs()
   debug("[LSP] inlayHintsForSource")
   debug("[LSP] source len=" ++ toString(String.length(source)))
+  let parseStart = nowNs()
   Error.clearErrors()
   Error.setPanicMode(false)
   let _ = Parser.parseResult(source)
+  let parseEnd = nowNs()
+  maybeLogTiming(timingPrefix, "parse", parseStart, parseEnd)
+
+  let formatStart = nowNs()
   let virtualResult = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let formatEnd = nowNs()
+  maybeLogTiming(timingPrefix, "format_virtual", formatStart, formatEnd)
   let virtText = virtualResult.text
   debug("[LSP] virtual text:")
   debug(virtText)
-  let diffInserts = virtualInsertionsFromDiff(source, virtText)
+
+  let diffStart = nowNs()
+  let useScanMatcher = String.length(source) > 1600
+  let diffInserts = if (useScanMatcher) {
+    virtualInsertionsFromScan(source, virtText)
+  } else {
+    virtualInsertionsFromDiff(source, virtText)
+  }
+  let diffEnd = nowNs()
+  maybeLogTiming(
+    timingPrefix,
+    if (useScanMatcher) {
+      "scan_match"
+    } else {
+      "diff_match"
+    },
+    diffStart,
+    diffEnd
+  )
   debug("[LSP] diff inserts:")
   let rec dumpInserts = (items: List<InsertChunk>) => match (items) {
     [] => void,
@@ -541,6 +680,9 @@ provide let inlayHintsForSource = (
 
   let grouped = Map.make()
   let groupedTrailing = Map.make()
+  let anchorSeen = Map.make()
+  let anchorSampleText = Map.make()
+  let mut anchorOrder: List<Number> = []
   let trailingAnchor = lastNonEmptyLineEndOffset(source)
   debug("[LSP] trailingAnchor=" ++ toString(trailingAnchor))
   let mut debugInlays: List<(Number, Number, String)> = []
@@ -658,6 +800,15 @@ provide let inlayHintsForSource = (
     [] => void,
     [chunk, ...rest] => {
       let offset = chunk.anchorOffset
+      let already = match (Map.get(offset, anchorSeen)) {
+        Some(_) => true,
+        None => false,
+      }
+      if (!already) {
+        Map.set(offset, true, anchorSeen)
+        anchorOrder = [offset, ...anchorOrder]
+        Map.set(offset, chunk.text, anchorSampleText)
+      }
       if (chunk.trailing) {
         let existing = match (Map.get(offset, groupedTrailing)) {
           Some(list) => list,
@@ -674,196 +825,193 @@ provide let inlayHintsForSource = (
       group(rest)
     },
   }
+  let filterCommentsStart = nowNs()
   let cSpans = commentSpans(source)
   let diffInserts = List.filter(
     (chunk: InsertChunk) => !insideComment(chunk.anchorOffset, cSpans),
     diffInserts
   )
-  group(diffInserts)
+  let filterCommentsEnd = nowNs()
+  maybeLogTiming(
+    timingPrefix,
+    "comment_spans_and_filter",
+    filterCommentsStart,
+    filterCommentsEnd
+  )
 
-  let seen = Map.make()
-  let rec render = (items: List<InsertChunk>, acc: List<String>) =>
-    match (items) {
+  let groupStart = nowNs()
+  group(diffInserts)
+  let groupEnd = nowNs()
+  maybeLogTiming(timingPrefix, "group", groupStart, groupEnd)
+
+  let orderedAnchors = List.reverse(anchorOrder)
+  let rec render = (anchors: List<Number>, acc: List<String>) =>
+    match (anchors) {
       [] => List.reverse(acc),
-      [chunk, ...rest] => {
-        let offset = chunk.anchorOffset
-        let already = match (Map.get(offset, seen)) {
-          Some(_) => true,
-          None => false,
+      [offset, ...rest] => {
+        let inlineChunks = match (Map.get(offset, grouped)) {
+          Some(list) => List.reverse(list),
+          None => [],
         }
-        if (already) {
+        let trailingChunks = match (Map.get(offset, groupedTrailing)) {
+          Some(list) => List.reverse(list),
+          None => [],
+        }
+        let hasSignal = allowWhitespaceInlays
+          || chunksHaveNonWhitespace(inlineChunks)
+          || chunksHaveNonWhitespace(trailingChunks)
+        if (!hasSignal) {
           render(rest, acc)
         } else {
-          Map.set(offset, true, seen)
-          let inlineChunks = match (Map.get(offset, grouped)) {
-            Some(list) => List.reverse(list),
-            None => [],
-          }
-          let trailingChunks = match (Map.get(offset, groupedTrailing)) {
-            Some(list) => List.reverse(list),
-            None => [],
-          }
-          debug("[LSP] anchor=" ++ toString(offset))
-          debug("  inlineChunks=" ++ toString(inlineChunks))
-          debug("  trailingChunks=" ++ toString(trailingChunks))
-          let rec normalizeText = (text: String) => {
-            match (String.indexOf("\n", text)) {
-              None => (text, ""),
-              Some(idx) => {
-                let inlinePart = String.slice(0, end=idx, text)
-                let rest = String.slice(idx + 1, end=String.length(text), text)
-                let restParts = String.split("\n", rest)
-                let trailingPart = if (Array.length(restParts) == 0) {
-                  ""
-                } else {
-                  Array.get(Array.length(restParts) - 1, restParts)
-                }
-                (inlinePart, trailingPart)
-              },
-            }
-          }
-
-          let hasSub = (sub: String, text: String) =>
-            match (String.indexOf(sub, text)) {
-              Some(_) => true,
-              None => false,
-            }
-
-          let rec splitTrailing = (items, inl, trail) => match (items) {
-            [] => (List.reverse(inl), List.reverse(trail)),
-            [t, ...rest] => {
-              let (inlinePart, trailingPart) = normalizeText(t)
-              let nextInl = if (String.length(inlinePart) > 0) {
-                [inlinePart, ...inl]
-              } else {
-                inl
-              }
-              let nextTrail = if (
-                String.length(trailingPart) > 0
-                && (hasSub("}", trailingPart) || hasSub(";", trailingPart))
-              ) {
-                [trailingPart, ...trail]
-              } else {
-                trail
-              }
-              splitTrailing(rest, nextInl, nextTrail)
-            },
-          }
-          let inlineTexts = List.map((c: InsertChunk) => c.text, inlineChunks)
-          let trailingTexts = List.map(
-            (c: InsertChunk) => c.text,
-            trailingChunks
-          )
-          let (inlineCore, trailingCore) = splitTrailing(inlineTexts, [], [])
-          let (inlineFromTrailing, trailingFromTrailing) = splitTrailing(
-            trailingTexts,
-            [],
-            []
-          )
-          let inlineText = Array.join(
-            "",
-            Array.fromList(
-              List.filter(
-                s => String.length(s) > 0,
-                List.append(inlineCore, inlineFromTrailing)
-              )
-            )
-          )
-          let trailingText = Array.join(
-            "",
-            Array.fromList(
-              List.filter(
-                s => String.length(s) > 0,
-                List.append(trailingCore, trailingFromTrailing)
-              )
-            )
-          )
-          debug("  inlineText=\"" ++ inlineText ++ "\"")
-          debug("  trailingText=\"" ++ trailingText ++ "\"")
-          let basePos = offsetToPosition(source, offset)
-          let acc1 = if (
-            offset >= rangeStart
-            && offset <= rangeEnd
-            && String.length(inlineText) > 0
-            && (allowWhitespaceInlays || !isWhitespaceOnly(inlineText))
-          ) {
-            let inlinePos = basePos
-            debug(
-              "[LSP] inline inlay at line "
-                ++ toString(inlinePos.line)
-                ++ " char "
-                ++ toString(inlinePos.character)
-                ++ " text=\""
-                ++ inlineText
-                ++ "\""
-            )
-            debugInlays = [
-              (inlinePos.line, inlinePos.character, inlineText),
-              ...debugInlays
-            ]
-            let hint = "{\"position\":{\"line\":"
+        debug("[LSP] anchor=" ++ toString(offset))
+        debug("  inlineChunks=" ++ toString(inlineChunks))
+        debug("  trailingChunks=" ++ toString(trailingChunks))
+        let inlineTexts = List.map((c: InsertChunk) => c.text, inlineChunks)
+        let trailingTexts = List.map((c: InsertChunk) => c.text, trailingChunks)
+        let (inlineCore, trailingCore) = splitChunkTexts(inlineTexts)
+        let (inlineFromTrailing, trailingFromTrailing) = splitChunkTexts(
+          trailingTexts
+        )
+        let inlineText = joinNonEmpty(List.append(inlineCore, inlineFromTrailing))
+        let trailingText = joinNonEmpty(
+          List.append(trailingCore, trailingFromTrailing)
+        )
+        debug("  inlineText=\"" ++ inlineText ++ "\"")
+        debug("  trailingText=\"" ++ trailingText ++ "\"")
+        let basePos = offsetToPosition(source, offset)
+        let acc1 = if (
+          offset >= rangeStart
+          && offset <= rangeEnd
+          && String.length(inlineText) > 0
+          && (allowWhitespaceInlays || !isWhitespaceOnly(inlineText))
+        ) {
+          let inlinePos = basePos
+          debug(
+            "[LSP] inline inlay at line "
               ++ toString(inlinePos.line)
-              ++ ",\"character\":"
+              ++ " char "
               ++ toString(inlinePos.character)
-              ++ "},\"label\":\""
-              ++ escapeJson(inlineText)
-              ++ "\",\"kind\":1"
-              ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
-            [hint, ...acc]
-          } else {
-            acc
-          }
-          let acc2 = if (
-            String.length(trailingText) > 0
-            && (allowWhitespaceInlays || !isWhitespaceOnly(trailingText))
-          ) {
-            let lastNl = lastNewlineIndex(chunk.text)
-            let pos = if (lastNl >= 0) {
-              let nlCount = countNewlines(
-                String.slice(0, end=lastNl + 1, chunk.text)
-              )
-              {
-                line: basePos.line + nlCount,
-                character: 0,
-              }
-            } else {
-              basePos
-            }
-            debug(
-              "[LSP] trailing inlay at line "
-                ++ toString(pos.line)
-                ++ " char "
-                ++ toString(pos.character)
-                ++ " text=\""
-                ++ trailingText
-                ++ "\""
+              ++ " text=\""
+              ++ inlineText
+              ++ "\""
+          )
+          debugInlays = [
+            (inlinePos.line, inlinePos.character, inlineText),
+            ...debugInlays
+          ]
+          let hint = "{\"position\":{\"line\":"
+            ++ toString(inlinePos.line)
+            ++ ",\"character\":"
+            ++ toString(inlinePos.character)
+            ++ "},\"label\":\""
+            ++ escapeJson(inlineText)
+            ++ "\",\"kind\":1"
+            ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
+          [hint, ...acc]
+        } else {
+          acc
+        }
+        let sampleText = match (Map.get(offset, anchorSampleText)) {
+          Some(text) => text,
+          None => "",
+        }
+        let acc2 = if (
+          String.length(trailingText) > 0
+          && (allowWhitespaceInlays || !isWhitespaceOnly(trailingText))
+        ) {
+          let lastNl = lastNewlineIndex(sampleText)
+          let pos = if (lastNl >= 0) {
+            let nlCount = countNewlines(
+              String.slice(0, end=lastNl + 1, sampleText)
             )
-            debugInlays = [
-              (pos.line, pos.character, trailingText),
-              ...debugInlays
-            ]
-            let hint = "{\"position\":{\"line\":"
-              ++ toString(pos.line)
-              ++ ",\"character\":"
-              ++ toString(pos.character)
-              ++ "},\"label\":\""
-              ++ escapeJson(trailingText)
-              ++ "\",\"kind\":1"
-              ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
-            [hint, ...acc1]
+            {
+              line: basePos.line + nlCount,
+              character: 0,
+            }
           } else {
-            acc1
+            basePos
           }
-          render(rest, acc2)
+          debug(
+            "[LSP] trailing inlay at line "
+              ++ toString(pos.line)
+              ++ " char "
+              ++ toString(pos.character)
+              ++ " text=\""
+              ++ trailingText
+              ++ "\""
+          )
+          debugInlays = [
+            (pos.line, pos.character, trailingText),
+            ...debugInlays
+          ]
+          let hint = "{\"position\":{\"line\":"
+            ++ toString(pos.line)
+            ++ ",\"character\":"
+            ++ toString(pos.character)
+            ++ "},\"label\":\""
+            ++ escapeJson(trailingText)
+            ++ "\",\"kind\":1"
+            ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
+          [hint, ...acc1]
+        } else {
+          acc1
+        }
+        render(rest, acc2)
         }
       },
     }
 
-  let hints = render(diffInserts, [])
+  let renderStart = nowNs()
+  let hints = render(orderedAnchors, [])
+  let renderEnd = nowNs()
+  maybeLogTiming(timingPrefix, "render_hints", renderStart, renderEnd)
   if (debugEnabled) {
+    let previewStart = nowNs()
     let preview = applyInlaysPreview(source, debugInlays)
+    let previewEnd = nowNs()
+    maybeLogTiming(timingPrefix, "debug_preview", previewStart, previewEnd)
     debug("[LSP] preview:")
     debug(preview)
   }
-  "[" ++ Array.join(",", Array.fromList(hints)) ++ "]"
+  let result = "[" ++ Array.join(",", Array.fromList(hints)) ++ "]"
+  let totalEnd = nowNs()
+  maybeLogTiming(timingPrefix, "total", totalStart, totalEnd)
+  result
 }
+
+provide let inlayHintsForSource = (
+  source: String,
+  rangeStart: Number,
+  rangeEnd: Number,
+  debug: (String) => Void,
+  escapeJson: (String) => String,
+  debugEnabled: Bool,
+) =>
+  inlayHintsForSourceWithTiming(
+    source,
+    rangeStart,
+    rangeEnd,
+    debug,
+    escapeJson,
+    debugEnabled,
+    None
+  )
+
+provide let inlayHintsForSourceProfile = (
+  source: String,
+  rangeStart: Number,
+  rangeEnd: Number,
+  debug: (String) => Void,
+  escapeJson: (String) => String,
+  debugEnabled: Bool,
+  timingPrefix: String,
+) =>
+  inlayHintsForSourceWithTiming(
+    source,
+    rangeStart,
+    rangeEnd,
+    debug,
+    escapeJson,
+    debugEnabled,
+    Some(timingPrefix)
+  )

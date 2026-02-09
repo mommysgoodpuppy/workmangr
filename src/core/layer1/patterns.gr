@@ -1,0 +1,172 @@
+module Layer1Patterns
+
+from "list" include List
+from "runtime/unsafe/panic" include Panic
+
+from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../types.gr" include Types
+
+provide let rec containsString = (values: List<String>, target: String) =>
+  match (values) {
+    [] => false,
+    [head, ...tail] => if (head == target) {
+      true
+    } else {
+      containsString(tail, target)
+    },
+  }
+
+provide let rec dedupeStrings = (values: List<String>, acc: List<String>) =>
+  match (values) {
+    [] => List.reverse(acc),
+    [head, ...tail] => if (containsString(acc, head)) {
+      dedupeStrings(tail, acc)
+    } else {
+      dedupeStrings(tail, [head, ...acc])
+    },
+  }
+
+provide let rec findConstructorInfo = (
+  constructors: List<Env.ConstructorInfo>,
+  target: String,
+) => match (constructors) {
+  [] => None,
+  [ctor, ...rest] => if (ctor.name == target) {
+    Some(ctor)
+  } else {
+    findConstructorInfo(rest, target)
+  },
+}
+
+provide let rec flattenFunctionType = (t: Types.Type) =>
+  match (t) {
+    Types.TFun(arg, rest) => {
+      let (args, result) = flattenFunctionType(rest)
+      ([arg, ...args], result)
+    },
+    _ => ([], t),
+  }
+
+provide let collectConstructorSeeds = (
+  items: List<CoreAst.FnItem>,
+  lookupOwner: String => Option<String>,
+) => {
+  let rec gather = (
+    remaining: List<CoreAst.FnItem>,
+    acc: List<(Number, String, Option<String>, Bool)>,
+    hasWildcard: Bool,
+  ) => match (remaining) {
+    [] => (acc, hasWildcard),
+    [item, ...rest] => match (item.kind) {
+      CoreAst.Clause(clause) => {
+        let guarded = clause.guard != None
+        match (clause.matchConstructor) {
+          Some(name) => {
+            let owner = lookupOwner(name.text)
+            let newWildcard = hasWildcard || (!guarded && owner == None)
+            gather(
+              rest,
+              [(clause.node.id, name.text, owner, guarded), ...acc],
+              newWildcard
+            )
+          },
+          None => gather(rest, acc, hasWildcard || !guarded),
+        }
+      },
+      _ => gather(rest, acc, hasWildcard),
+    },
+  }
+  gather(items, [], false)
+}
+
+provide record MatchArmInfo {
+  clauseId: Number,
+  typeName: String,
+  constructor: Env.ConstructorInfo,
+}
+
+provide let analyzeMatchArms = (fnExpr: CoreAst.FnExpr, env: Env.TypingEnv) => {
+  let (seeds, hasWildcard) = collectConstructorSeeds(
+    fnExpr.items,
+    ctorName => Env.lookupConstructorOwner(env, ctorName)
+  )
+  if (seeds == []) {
+    None
+  } else {
+    let owners = dedupeStrings(
+      List.filterMap((entry: (Number, String, Option<String>, Bool)) => {
+        let (_, _, owner, _) = entry
+        owner
+      }, seeds),
+      []
+    )
+    match (owners) {
+      [] => None,
+      [typeName] => match (Env.lookupConstructors(env, typeName)) {
+        None => None,
+        Some(expectedConstructors) => {
+          let typedSeeds = List.filter(
+            (entry: (Number, String, Option<String>, Bool)) => {
+              let (_, _, owner, guarded) = entry
+              let ownerMatches = match (owner) {
+                Some(name) => name == typeName,
+                None => false,
+              }
+              ownerMatches && !guarded
+            },
+            seeds
+          )
+          if (typedSeeds == []) {
+            if (hasWildcard) {
+              None
+            } else {
+              Panic.panic("Match missing constructors for type " ++ typeName)
+            }
+          } else {
+            let actualNames = dedupeStrings(
+              List.map((entry: (Number, String, Option<String>, Bool)) => {
+                let (_, ctorName, _, _) = entry
+                ctorName
+              }, typedSeeds),
+              []
+            )
+            let missing = if (hasWildcard) {
+              []
+            } else {
+              List.filter(
+                (ctor: Env.ConstructorInfo) =>
+                  !containsString(actualNames, ctor.name),
+                expectedConstructors
+              )
+            }
+            if (missing != []) {
+              Panic.panic("Match missing constructors for type " ++ typeName)
+            }
+            let armInfos = List.filterMap(
+              (entry: (Number, String, Option<String>, Bool)) => {
+                let (clauseId, ctorName, _, _) = entry
+                match (findConstructorInfo(expectedConstructors, ctorName)) {
+                  Some(info) =>
+                    Some({
+                      clauseId,
+                      typeName,
+                      constructor: info,
+                    }: MatchArmInfo),
+                  None => None,
+                }
+              },
+              typedSeeds
+            )
+            if (armInfos == []) {
+              None
+            } else {
+              Some(armInfos)
+            }
+          }
+        },
+      },
+      _ => Panic.panic("Match clauses reference multiple nominal types"),
+    }
+  }
+}

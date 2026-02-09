@@ -1,0 +1,6 @@
+module Layer2Solve
+
+from "../infer.gr" include Infer
+
+// Layer 2 solving API: solve constraints and zonk node types.
+provide let state = (state: Infer.InferState) => Infer.inferProgramLayer2(state)

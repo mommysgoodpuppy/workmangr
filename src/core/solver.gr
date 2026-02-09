@@ -65,17 +65,53 @@ let rec unify = (
   subst: Subst,
   origin: Constraints.Origin,
 ) => {
+  let rec unifyLists = (
+    leftItems: List<Types.Type>,
+    rightItems: List<Types.Type>,
+    currentSubst: Subst,
+  ) =>
+    match ((leftItems, rightItems)) {
+      ([], []) => Ok(currentSubst),
+      ([lHead, ...lTail], [rHead, ...rTail]) =>
+        match (unify(lHead, rHead, currentSubst, origin)) {
+          Err(err) => Err(err),
+          Ok(nextSubst) => unifyLists(lTail, rTail, nextSubst),
+        },
+      _ =>
+        Err(
+          CannotUnify(
+            Types.applySubstType(currentSubst, left),
+            Types.applySubstType(currentSubst, right),
+            origin,
+          )
+        ),
+    }
+
   let l = Types.applySubstType(subst, left)
   let r = Types.applySubstType(subst, right)
   match ((l, r)) {
     (Types.TNumber, Types.TNumber) => Ok(subst),
+    (Types.TBool, Types.TBool) => Ok(subst),
+    (Types.TString, Types.TString) => Ok(subst),
+    (Types.TByte, Types.TByte) => Ok(subst),
+    (Types.TChar, Types.TChar) => Ok(subst),
     (Types.TVoid, Types.TVoid) => Ok(subst),
+    (Types.THole(_), _) => Ok(subst),
+    (_, Types.THole(_)) => Ok(subst),
     (Types.TVar(id), ty) => bindVar(id, ty, subst, origin),
     (ty, Types.TVar(id)) => bindVar(id, ty, subst, origin),
     (Types.TFun(a1, b1), Types.TFun(a2, b2)) =>
       match (unify(a1, a2, subst, origin)) {
         Err(err) => Err(err),
         Ok(subst1) => unify(b1, b2, subst1, origin),
+      },
+    (Types.TTuple(leftItems), Types.TTuple(rightItems)) =>
+      unifyLists(leftItems, rightItems, subst),
+    (Types.TNominal(nameL, argsL), Types.TNominal(nameR, argsR)) =>
+      if (nameL == nameR) {
+        unifyLists(argsL, argsR, subst)
+      } else {
+        Err(CannotUnify(l, r, origin))
       },
     _ => Err(CannotUnify(l, r, origin)),
   }

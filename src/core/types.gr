@@ -11,7 +11,12 @@ let joinStrings = (sep: String, strs: List<String>) => match (strs) {
 
 provide enum rec Type {
   TNumber,
+  TBool,
+  TString,
+  TByte,
+  TChar,
   TVoid,
+  THole(Number),
   TVar(Number),
   TFun(Type, Type),
   TTuple(List<Type>),
@@ -31,7 +36,12 @@ let emptyEnv = () => Map.make()
 
 provide let rec typeToString = (t: Type) => match (t) {
   TNumber => "Number",
+  TBool => "Bool",
+  TString => "String",
+  TByte => "Byte",
+  TChar => "Char",
   TVoid => "Void",
+  THole(id) => "?[" ++ toString(id) ++ "]",
   TVar(id) => "'" ++ toString(id),
   TFun(a, b) => {
     let left = match (a) {
@@ -80,7 +90,12 @@ let dedupeVars = (vars: List<Number>) => {
 
 let rec freeVars = (t: Type) => match (t) {
   TNumber => [],
+  TBool => [],
+  TString => [],
+  TByte => [],
+  TChar => [],
   TVoid => [],
+  THole(_) => [],
   TVar(id) => [id],
   TFun(a, b) => List.append(freeVars(a), freeVars(b)),
   TTuple(items) => List.flatten(List.map(freeVars, items)),
@@ -103,7 +118,12 @@ let freeVarsEnv = (env: Env) => {
 
 let rec applySubstType = (subst: Subst, t: Type) => match (t) {
   TNumber => t,
+  TBool => t,
+  TString => t,
+  TByte => t,
+  TChar => t,
   TVoid => t,
+  THole(_) => t,
   TFun(a, b) => TFun(applySubstType(subst, a), applySubstType(subst, b)),
   TVar(id) => match (Map.get(id, subst)) {
     Some(t2) => applySubstType(subst, t2),
@@ -149,8 +169,15 @@ let instantiate = (scheme: Scheme, nextVarStart: Number) => {
 
   let rec replace = (t: Type) => match (t) {
     TNumber => t,
+    TBool => t,
+    TString => t,
+    TByte => t,
+    TChar => t,
     TVoid => t,
+    THole(_) => t,
     TFun(a, b) => TFun(replace(a), replace(b)),
+    TTuple(items) => TTuple(List.map(replace, items)),
+    TNominal(name, args) => TNominal(name, List.map(replace, args)),
     TVar(id) => match (Map.get(id, mapping)) {
       Some(t2) => t2,
       None => t,
