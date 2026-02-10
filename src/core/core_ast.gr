@@ -192,6 +192,11 @@ provide record rec ImportDecl {
   node: Node,
   modulePath: String,
   alias: Option<Name>,
+  names: List<ImportName>,
+}
+and provide record ImportName {
+  name: Name,
+  alias: Option<Name>,
 }
 
 provide record ReexportDecl {

@@ -122,5 +122,43 @@ test("imported constructor shorthand keeps recursive length polymorphic", () => 
   assertTrue(shapeOk)
 })
 
+test("named imports with alias resolve correct symbol", () => {
+  let overrides = Map.make()
+  Map.set(
+    "coretypes.wm",
+    "export type Ordering = LT | EQ | GT;\nexport let eq = EQ;",
+    overrides
+  )
+  Map.set(
+    "coreint.wm",
+    "export let intEq = (left, right) => { true };",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./coretypes\" import { EQ };\nfrom \"./coreint\" import { intEq as eq };\nlet ok = eq(1, 1);",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let okScheme = match (Map.get("ok", entry.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing ok binding"),
+  }
+  let hasTypeErrors = List.some(
+    (diag: Error.CompilerError) => diag.stage == Error.TypeInference,
+    entry.diagnostics
+  )
+  let typeOk = match (okScheme.ty) {
+    Types.TBool => true,
+    _ => false,
+  }
+  all([assertFalse(hasTypeErrors), assertTrue(typeOk)])
+})
+
 let results = runTests()
 printResultsAndExit(results)

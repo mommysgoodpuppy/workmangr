@@ -114,16 +114,30 @@ let collectImportedEnv = (
       ([importDecl, ...importRest], [providerPath, ...pathRest]) => {
         match (Map.get(providerPath, summaries)) {
           Some(summary) => {
-            match (importDecl.alias) {
-              Some(alias) =>
-                List.forEach(((name, scheme)) => {
-                  let qualified = alias.text ++ "." ++ name
-                  Map.set(qualified, scheme, env)
-                }, Map.toList(summary.valueExports)),
-              None =>
-                List.forEach(((name, scheme)) => {
-                  Map.set(name, scheme, env)
-                }, Map.toList(summary.valueExports)),
+            if (importDecl.names != []) {
+              List.forEach((item: CoreAst.ImportName) => {
+                let exportedName = item.name.text
+                let localName = match (item.alias) {
+                  Some(aliasName) => aliasName.text,
+                  None => exportedName,
+                }
+                match (Map.get(exportedName, summary.valueExports)) {
+                  Some(scheme) => Map.set(localName, scheme, env),
+                  None => void,
+                }
+              }, importDecl.names)
+            } else {
+              match (importDecl.alias) {
+                Some(alias) =>
+                  List.forEach(((name, scheme)) => {
+                    let qualified = alias.text ++ "." ++ name
+                    Map.set(qualified, scheme, env)
+                  }, Map.toList(summary.valueExports)),
+                None =>
+                  List.forEach(((name, scheme)) => {
+                    Map.set(name, scheme, env)
+                  }, Map.toList(summary.valueExports)),
+              }
             }
           },
           None => void,

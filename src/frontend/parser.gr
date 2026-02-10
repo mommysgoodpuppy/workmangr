@@ -1814,37 +1814,66 @@ and parseImportClause = (state: ParseState) => {
           node: { id: aliasId, span: aliasTok.span },
           text: aliasText,
         }
-        (Some(alias), state4)
+        (Some(alias), [], state4)
       } else {
-        (None, state1)
+        (None, [], state1)
       }
     },
     Lexer.LBrace => {
       let (_, state1) = expectSimple(Lexer.LBrace, state)
-      let rec loop = (stateX: ParseState) => {
+      let rec loop = (
+        namesRev: List<SurfaceAst.ImportName>,
+        stateX: ParseState,
+      ) => {
         let tokX = currentToken(stateX)
         match (tokX.kind) {
           Lexer.RBrace => {
             let (_, stateY) = expectSimple(Lexer.RBrace, stateX)
-            stateY
+            (None, List.reverse(namesRev), stateY)
           },
-          Lexer.EOF => stateX,
+          Lexer.EOF => (None, List.reverse(namesRev), stateX),
           _ => {
-            let stateY = dropToken(stateX)
-            loop(stateY)
+            let (nameText, nameTok, stateY) = expectAnyName(stateX)
+            let (nameId, stateY2) = freshId(stateY)
+            let name: SurfaceAst.Name = {
+              node: { id: nameId, span: nameTok.span },
+              text: nameText,
+            }
+            let (aliasOpt, stateY3) = if (
+              kindIs(currentToken(stateY2).kind, Lexer.LitName("as"))
+            ) {
+              let (_, stateAs) = expectKeyword("as", stateY2)
+              let (aliasText, aliasTok, stateAlias) = expectAnyName(stateAs)
+              let (aliasId, stateAlias2) = freshId(stateAlias)
+              let alias: SurfaceAst.Name = {
+                node: { id: aliasId, span: aliasTok.span },
+                text: aliasText,
+              }
+              (Some(alias), stateAlias2)
+            } else {
+              (None, stateY2)
+            }
+            let nextNames = [{ name, alias: aliasOpt }: SurfaceAst.ImportName, ...namesRev]
+            let stateY4 = if (kindIs(currentToken(stateY3).kind, Lexer.Comma)) {
+              let (_, stateComma) = expectSimple(Lexer.Comma, stateY3)
+              stateComma
+            } else {
+              stateY3
+            }
+            loop(nextNames, stateY4)
           },
         }
       }
-      (None, loop(state1))
+      loop([], state1)
     },
-    _ => (None, state),
+    _ => (None, [], state),
   }
 }
 and parseImportTopItem = (state: ParseState) => {
   let (fromTok, state1) = expectKeyword("from", state)
   let (modulePath, _moduleTok, state2) = expectStringLiteral(state1)
   let (_, state3) = expectKeyword("import", state2)
-  let (alias, state4) = parseImportClause(state3)
+  let (alias, names, state4) = parseImportClause(state3)
   let (_, state5) = expectSimpleOrRecover(
     Lexer.SemiColon,
     state4,
@@ -1855,6 +1884,7 @@ and parseImportTopItem = (state: ParseState) => {
     node: { id, span: fromTok.span },
     modulePath,
     alias,
+    names,
   }
   (SurfaceAst.Import(importDecl), state6)
 }

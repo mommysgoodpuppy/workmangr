@@ -100,6 +100,47 @@ let containsVar = (vars: List<Number>, target: Number) => {
   found
 }
 
+let rec collectVarIds = (t: Type, acc: List<Number>) => match (t) {
+  TVar(id) =>
+    if (containsVar(acc, id)) {
+      acc
+    } else {
+      List.append(acc, [id])
+    },
+  TFun(a, b) => collectVarIds(b, collectVarIds(a, acc)),
+  TTuple(items) =>
+    List.reduce((vars, item) => collectVarIds(item, vars), acc, items),
+  TNominal(_, args) =>
+    List.reduce((vars, item) => collectVarIds(item, vars), acc, args),
+  _ => acc,
+}
+
+let typeToReadableString = (t: Type) => {
+  let ordered = collectVarIds(t, [])
+  let subst = Map.make()
+  let _ = List.reduce((next: Number, oldId: Number) => {
+    Map.set(oldId, TVar(next), subst)
+    next + 1
+  }, 0, ordered)
+  let rec normalize = (ty: Type) => match (ty) {
+    TNumber => ty,
+    TBool => ty,
+    TString => ty,
+    TByte => ty,
+    TChar => ty,
+    TVoid => ty,
+    THole(_) => ty,
+    TFun(a, b) => TFun(normalize(a), normalize(b)),
+    TTuple(items) => TTuple(List.map(normalize, items)),
+    TNominal(name, args) => TNominal(name, List.map(normalize, args)),
+    TVar(id) => match (Map.get(id, subst)) {
+      Some(mapped) => mapped,
+      None => TVar(id),
+    },
+  }
+  typeToString(normalize(t))
+}
+
 let dedupeVars = (vars: List<Number>) => {
   let seen = Map.make()
   let mut outRev = []
@@ -420,4 +461,5 @@ provide {
   instantiate,
   generalize,
   containsVar,
+  typeToReadableString,
 }

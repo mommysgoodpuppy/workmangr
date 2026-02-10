@@ -288,6 +288,11 @@ and provide record ImportDecl {
   node: Node,
   modulePath: String,
   alias: Option<Name>,
+  names: List<ImportName>,
+}
+and provide record ImportName {
+  name: Name,
+  alias: Option<Name>,
 }
 and provide record ReexportDecl {
   node: Node,

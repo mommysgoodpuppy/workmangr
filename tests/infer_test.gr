@@ -429,6 +429,24 @@ let rec length = match(list) => {
   }
 })
 
+test("local let rec binding resolves self-reference in expression scope", () => {
+  let source =
+    "
+let outer = (x) => {
+  let rec helper = (n) => { helper(n) };
+  helper(x)
+};
+"
+  let state = inferSource(source)
+  let hasUnknownHelper = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnknownIdentifier
+        && entry.message == "Type error: unknown identifier helper",
+    state.marks
+  )
+  assertFalse(hasUnknownHelper)
+})
+
 test("layered pipeline matches direct infer result", () => {
   let source =
     "

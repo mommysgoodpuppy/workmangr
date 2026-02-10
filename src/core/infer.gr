@@ -72,7 +72,7 @@ let inferDebug = (message: String) => {
 let mapSize = (m) => List.length(Map.toList(m))
 
 let renderType = (t: Types.Type, state: InferState) =>
-  Types.typeToString(Types.applySubstType(state.subst, t))
+  Types.typeToReadableString(Types.applySubstType(state.subst, t))
 
 let logState = (label: String, state: InferState, nodeId: Number=-1) => {
   inferDebug(
@@ -303,7 +303,7 @@ let rec unify = (
         TypeMismatch,
         origin,
         CoreAst.Inconsistent,
-        "Type error: cannot unify "
+        "Type error (" ++ origin.description ++ "): cannot unify "
           ++ renderType(l, state1)
           ++ " with "
           ++ renderType(r, state1)
@@ -693,37 +693,70 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       (tRecorded, state5)
     },
     CoreAst.Let(binding, body) => {
-      let (tValueRaw, state1) = inferExpr(binding.value, state)
-      let state2 = match (binding.annotation) {
-        Some(annotation) =>
-          unifyForNode(
-            binding.node.id,
-            "binding annotation",
-            tValueRaw,
-            typeFromAnnotation(annotation),
-            state1
-          ),
-        None => state1,
-      }
-      let tValue = apply(state2, tValueRaw)
-      logState("let.preGeneralize", state2, nodeId=binding.node.id)
-      let scheme = Types.generalize(
-        Env.snapshotValues(state2.env),
-        state2.subst,
-        tValue
-      )
       match (binding.name.kind) {
         CoreAst.Var(name) | CoreAst.Pin(name) => {
+          let (placeholder, stateSeed) = freshVar(state)
+          let seedScheme: Types.Scheme = { quantifiers: [], ty: placeholder }
+          let (tValueRaw, state1) = withBinding(
+            name.text,
+            seedScheme,
+            stateSeed,
+            st => inferExpr(binding.value, st)
+          )
+          let state2 = unifyForNode(
+            binding.node.id,
+            "recursive/local binding",
+            placeholder,
+            tValueRaw,
+            state1
+          )
+          let state3 = match (binding.annotation) {
+            Some(annotation) =>
+              unifyForNode(
+                binding.node.id,
+                "binding annotation",
+                tValueRaw,
+                typeFromAnnotation(annotation),
+                state2
+              ),
+            None => state2,
+          }
+          let tValue = apply(state3, tValueRaw)
+          logState("let.preGeneralize", state3, nodeId=binding.node.id)
+          let scheme = Types.generalize(
+            Env.snapshotValues(state3.env),
+            state3.subst,
+            tValue
+          )
           let (tBody, state3) = withBinding(
             name.text,
             scheme,
-            state2,
+            state3,
             st => inferExpr(body, st)
           )
           let tRecorded = recordNodeType(expr.node.id, tBody, state3)
           (tRecorded, state3)
         },
         _ => {
+          let (tValueRaw, state1) = inferExpr(binding.value, state)
+          let state2 = match (binding.annotation) {
+            Some(annotation) =>
+              unifyForNode(
+                binding.node.id,
+                "binding annotation",
+                tValueRaw,
+                typeFromAnnotation(annotation),
+                state1
+              ),
+            None => state1,
+          }
+          let tValue = apply(state2, tValueRaw)
+          logState("let.preGeneralize", state2, nodeId=binding.node.id)
+          let scheme = Types.generalize(
+            Env.snapshotValues(state2.env),
+            state2.subst,
+            tValue
+          )
           let (instType, nextVar) = Types.instantiate(scheme, state2.nextVar)
           let state3 = { ...state2, nextVar }
           let (tBody, state4) = withPatternBindings(
@@ -1045,10 +1078,10 @@ let solveConstraints = (state: InferState) => {
         TypeMismatch,
         origin,
         CoreAst.Inconsistent,
-        "Type error: cannot unify "
-          ++ Types.typeToString(left)
+        "Type error (" ++ origin.description ++ "): cannot unify "
+          ++ Types.typeToReadableString(left)
           ++ " with "
-          ++ Types.typeToString(right)
+          ++ Types.typeToReadableString(right)
       ),
   }
 }

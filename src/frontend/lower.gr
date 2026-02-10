@@ -609,6 +609,12 @@ let lowerTopItem = (ti: SurfaceAst.TopItem) => match (ti) {
           node: lowerNode(id.node),
           modulePath: id.modulePath,
           alias: mapOption(id.alias, lowerName),
+          names: List.map((item: SurfaceAst.ImportName) => {
+            {
+              name: lowerName(item.name),
+              alias: mapOption(item.alias, lowerName),
+            }: CoreAst.ImportName
+          }, id.names),
         },
       ),
     ),
