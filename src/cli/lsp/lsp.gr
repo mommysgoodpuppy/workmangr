@@ -9,6 +9,8 @@ from "string" include String
 from "uint8" include Uint8
 from "wasi/file" include File
 from "wasi/process" include Process
+from "wasi/time" include Time
+from "int64" include Int64
 from "json" include Json
 
 from "../../core/source.gr" include Source
@@ -103,7 +105,7 @@ let mut debugEnabled = match (envLookup("WORKMAN_LSP_DEBUG")) {
   Some("False") => false,
   Some("FALSE") => false,
   Some(_) => true,
-  None => true,
+  None => false,
 }
 let mut workspaceRootPath: Option<String> = None
 let defaultV0StdRoot = "c:/GIT/workman/std"
@@ -117,6 +119,14 @@ let v0StdRoot = match (argValue("--std-root")) {
 let _ = logErr("[LSP] stdRoot=" ++ v0StdRoot)
 let mut inlayDebugEnabled = false
 let mut formatDebugEnabled = false
+let timingEnabled = match (envLookup("WORKMAN_LSP_TIMING")) {
+  Some("0") => false,
+  Some("false") => false,
+  Some("False") => false,
+  Some("FALSE") => false,
+  Some(_) => true,
+  None => false,
+}
 let mut shouldExit = false
 let inlayMaxSourceChars = 120000
 let formatMaxSourceChars = 200000
@@ -124,16 +134,35 @@ let docVersions = Map.make()
 let inlayCache: Map.Map<String, String> = Map.make()
 let mut inlayCachedVersion: Map.Map<String, Number> = Map.make()
 let cachedGraphNodes: Map.Map<String, ModuleSystem.ModuleNode> = Map.make()
+let moduleSummaryCache: ModuleInfer.SummaryCache = ModuleInfer.emptySummaryCache()
+let publishedDiagnosticsFingerprint: Map.Map<String, String> = Map.make()
+let lineStartsCache: Map.Map<String, List<Number>> = Map.make()
+let lineStartsCacheVersion: Map.Map<String, Number> = Map.make()
 let mut graphEpoch = 0
 
 record InferenceSnapshot {
-  epoch: Number,
+  cacheKey: String,
   entryPath: String,
   graph: ModuleSystem.ModuleGraph,
   inferred: ModuleInfer.InferenceResult,
 }
 
 let inferenceCache: Map.Map<String, InferenceSnapshot> = Map.make()
+
+let nowNs = () =>
+  match (Time.monotonicTime()) {
+    Ok(t) => t,
+    Err(_) => 0L,
+  }
+
+let timing = (label: String, startNs: Int64, endNs: Int64) => {
+  if (timingEnabled) {
+    let ms = (Int64.toNumber(endNs) - Int64.toNumber(startNs)) / 1000000
+    logErr("[LSP timing] " ++ label ++ " " ++ toString(ms) ++ "ms")
+  } else {
+    void
+  }
+}
 
 let debug = (text: String) => {
   if (debugEnabled) {
@@ -224,6 +253,10 @@ let invalidateInferenceCache = () => {
   List.forEach(((key, _)) => {
     Map.remove(key, inferenceCache)
   }, Map.toList(inferenceCache))
+}
+
+let docsStateKey = () => {
+  toString(graphEpoch)
 }
 
 let writeStdout = (text: String) => {
@@ -321,6 +354,99 @@ let positionToOffset = (source: String, line0: Number, col0: Number) => {
     }
   }
   loop(0, 1, 0)
+}
+
+let buildLineStarts = (source: String) => {
+  let len = String.length(source)
+  let mut idx = 0
+  let mut outRev: List<Number> = [0]
+  while (idx < len) {
+    if (String.charAt(idx, source) == '\n') {
+      outRev = [idx + 1, ...outRev]
+    } else {
+      void
+    }
+    idx += 1
+  }
+  List.reverse(outRev)
+}
+
+let lineBoundsFor = (
+  lineStarts: List<Number>,
+  targetLine1: Number,
+  source: String,
+) => {
+  let len = String.length(source)
+  let rec loop = (starts: List<Number>, lineNum: Number) =>
+    match (starts) {
+      [] => None,
+      [start] =>
+        if (lineNum == targetLine1) {
+          Some((start, len))
+        } else {
+          None
+        },
+      [start, nextStart, ...rest] =>
+        if (lineNum == targetLine1) {
+          let endExclusive = if (
+            nextStart > 0
+            && nextStart - 1 < len
+            && String.charAt(nextStart - 1, source) == '\n'
+          ) {
+            nextStart - 1
+          } else {
+            nextStart
+          }
+          Some((start, endExclusive))
+        } else {
+          loop([nextStart, ...rest], lineNum + 1)
+        },
+    }
+  loop(lineStarts, 1)
+}
+
+let lineStartsForDocument = (uri: String, source: String) => {
+  let version = documentVersion(uri)
+  match (Map.get(uri, lineStartsCacheVersion)) {
+    Some(cachedVersion) when cachedVersion == version =>
+      match (Map.get(uri, lineStartsCache)) {
+        Some(starts) => starts,
+        None => {
+          let starts = buildLineStarts(source)
+          Map.set(uri, starts, lineStartsCache)
+          Map.set(uri, version, lineStartsCacheVersion)
+          starts
+        },
+      },
+    _ => {
+      let starts = buildLineStarts(source)
+      Map.set(uri, starts, lineStartsCache)
+      Map.set(uri, version, lineStartsCacheVersion)
+      starts
+    },
+  }
+}
+
+let positionToOffsetForUri = (
+  uri: String,
+  source: String,
+  line0: Number,
+  col0: Number,
+) => {
+  let targetLine1 = line0 + 1
+  let targetCol = if (col0 < 0) { 0 } else { col0 }
+  let lineStarts = lineStartsForDocument(uri, source)
+  match (lineBoundsFor(lineStarts, targetLine1, source)) {
+    Some((startOffset, endOffset)) => {
+      let raw = startOffset + targetCol
+      if (raw > endOffset) {
+        endOffset
+      } else {
+        raw
+      }
+    },
+    None => positionToOffset(source, line0, col0),
+  }
 }
 
 let decodeUriPath = (uriPath: String) => {
@@ -554,6 +680,27 @@ let diagnosticToJson = (diag: Error.CompilerError) => {
     ++ "\"}"
 }
 
+let diagnosticFingerprint = (diagnostics: List<Error.CompilerError>) =>
+  Array.join(
+    "|",
+    Array.fromList(
+      List.map((diag: Error.CompilerError) =>
+        toString(diag.span.line)
+          ++ ":"
+          ++ toString(diag.span.col)
+          ++ ":"
+          ++ toString(diag.span.start)
+          ++ ":"
+          ++ toString(diag.span.end)
+          ++ ":"
+          ++ toString(Error.severityToNumber(diag.severity))
+          ++ ":"
+          ++ stageToString(diag.stage)
+          ++ ":"
+          ++ diag.message, diagnostics)
+    )
+  )
+
 let joinStrings = (sep: String, parts: List<String>) => {
   let rec loop = (remaining: List<String>, out: String) => {
     match (remaining) {
@@ -569,25 +716,37 @@ let joinStrings = (sep: String, parts: List<String>) => {
 }
 
 let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) => {
-  if (List.length(diagnostics) > 0) {
-    debug(
-      "[LSP diag] publish uri="
-        ++ uri
-        ++ " count="
-        ++ toString(List.length(diagnostics))
-    )
-  } else {
-    void
+  let nextFingerprint = diagnosticFingerprint(diagnostics)
+  let prevFingerprint = match (Map.get(uri, publishedDiagnosticsFingerprint)) {
+    Some(fp) => fp,
+    None => "",
   }
-  let diagnosticsJson = "["
-    ++ joinStrings(",", List.map(diagnosticToJson, diagnostics))
-    ++ "]"
-  let params = "{\"uri\":\""
-    ++ escapeJson(uri)
-    ++ "\",\"diagnostics\":"
-    ++ diagnosticsJson
-    ++ "}"
-  sendNotification("textDocument/publishDiagnostics", params)
+  if (nextFingerprint == prevFingerprint) {
+    debug("[LSP diag] skip unchanged uri=" ++ uri)
+    false
+  } else {
+    if (List.length(diagnostics) > 0) {
+      debug(
+        "[LSP diag] publish uri="
+          ++ uri
+          ++ " count="
+          ++ toString(List.length(diagnostics))
+      )
+    } else {
+      void
+    }
+    let diagnosticsJson = "["
+      ++ joinStrings(",", List.map(diagnosticToJson, diagnostics))
+      ++ "]"
+    let params = "{\"uri\":\""
+      ++ escapeJson(uri)
+      ++ "\",\"diagnostics\":"
+      ++ diagnosticsJson
+      ++ "}"
+    sendNotification("textDocument/publishDiagnostics", params)
+    Map.set(uri, nextFingerprint, publishedDiagnosticsFingerprint)
+    true
+  }
 }
 
 let docsToOverrides = (docs: Map.Map<String, String>) => {
@@ -638,31 +797,53 @@ let buildInferenceForEntry = (
   docs: Map.Map<String, String>,
   caller: String="unknown",
 ) => {
-  match (Map.get(entryUri, inferenceCache)) {
-    Some(snapshot) when snapshot.epoch == graphEpoch => {
+  let cacheKey = entryUri ++ "::" ++ docsStateKey()
+  match (Map.get(cacheKey, inferenceCache)) {
+    Some(snapshot) => {
       debug(
         "[LSP infer] cache hit caller="
           ++ caller
-          ++ " epoch="
-          ++ toString(graphEpoch)
+          ++ " key="
+          ++ snapshot.cacheKey
           ++ " uri="
           ++ entryUri
       )
       (snapshot.entryPath, snapshot.graph, snapshot.inferred)
     },
     _ => {
+      let missStart = nowNs()
       debug(
         "[LSP infer] cache miss caller="
           ++ caller
-          ++ " epoch="
-          ++ toString(graphEpoch)
+          ++ " key="
+          ++ cacheKey
           ++ " uri="
           ++ entryUri
       )
+      let buildStart = nowNs()
       let (entryPath, graph) = buildGraphForEntry(entryUri, docs)
-      let inferred = ModuleInfer.inferGraph(graph)
-      let snapshot: InferenceSnapshot = { epoch: graphEpoch, entryPath, graph, inferred }
-      Map.set(entryUri, snapshot, inferenceCache)
+      let buildEnd = nowNs()
+      timing("buildGraph caller=" ++ caller, buildStart, buildEnd)
+      let inferStart = nowNs()
+      let (inferred, nextSummaryCache, reusedModules, recomputedModules) =
+        ModuleInfer.inferGraphWithCache(graph, moduleSummaryCache)
+      List.forEach(((moduleId, entry)) => {
+        Map.set(moduleId, entry, moduleSummaryCache)
+      }, Map.toList(nextSummaryCache))
+      let inferEnd = nowNs()
+      timing("inferGraph caller=" ++ caller, inferStart, inferEnd)
+      debug(
+        "[LSP infer] modules reused="
+          ++ toString(reusedModules)
+          ++ " recomputed="
+          ++ toString(recomputedModules)
+          ++ " caller="
+          ++ caller
+      )
+      let snapshot: InferenceSnapshot = { cacheKey, entryPath, graph, inferred }
+      Map.set(cacheKey, snapshot, inferenceCache)
+      let missEnd = nowNs()
+      timing("cacheMissTotal caller=" ++ caller, missStart, missEnd)
       (entryPath, graph, inferred)
     },
   }
@@ -673,6 +854,7 @@ let publishGraphDiagnostics = (
   docs: Map.Map<String, String>,
   publishedUris: Map.Map<String, Bool>,
 ) => {
+  let publishStart = nowNs()
   let (entryPath, graph, inferred) = buildInferenceForEntry(entryUri, docs, caller="diag")
   let uriLookup = pathUriLookup(docs)
   List.forEach(((moduleId, node)) => {
@@ -698,8 +880,8 @@ let publishGraphDiagnostics = (
         },
       }
       let mergedDiagnostics = diagnostics
-      publishDiagnostics(uri, mergedDiagnostics)
-      if (List.length(mergedDiagnostics) > 0) {
+      let didPublish = publishDiagnostics(uri, mergedDiagnostics)
+      if (didPublish && List.length(mergedDiagnostics) > 0) {
         List.forEach((diag: Error.CompilerError) => {
           debug(
             "[LSP diag] module=" ++ modulePath ++ " message=" ++ diag.message
@@ -714,21 +896,24 @@ let publishGraphDiagnostics = (
   )
 
   List.forEach(((uri, _)) => {
-    if (Map.get(uri, nextPublished) == None) {
+    if (Map.get(uri, nextPublished) == None && Map.get(uri, docs) == None) {
       debug("[LSP diag] clearing stale diagnostics uri=" ++ uri)
-      publishDiagnostics(uri, [])
+      let _published = publishDiagnostics(uri, [])
+      void
     } else {
       void
     }
   }, Map.toList(publishedUris))
 
+  let publishEnd = nowNs()
+  timing("publishGraphDiagnostics", publishStart, publishEnd)
   nextPublished
 }
 
 let handleInitialize = (idText: String) => {
-  let caps = "\"textDocumentSync\":{\"openClose\":true,\"change\":1}"
+  let caps = "\"textDocumentSync\":{\"openClose\":true,\"change\":1},\"inlayHintProvider\":true"
     ++ (if (isInlayWorker) {
-      ",\"inlayHintProvider\":true"
+      ""
     } else {
       ",\"documentFormattingProvider\":true,\"hoverProvider\":true,\"definitionProvider\":true"
     })
@@ -815,18 +1000,31 @@ let handleHover = (
     (Some(uri), Some(line0), Some(col0)) => {
       match (Map.get(uri, docs)) {
         Some(source) => {
-          let offset = positionToOffset(source, line0, col0)
+          let hoverStart = nowNs()
+          let offset = positionToOffsetForUri(uri, source, line0, col0)
           let modulePath = toWorkspacePath(uriToPath(uri))
+          let buildStart = nowNs()
           let (_entryPath, graph, inferred) = buildInferenceForEntry(uri, docs, caller="hover")
+          let buildEnd = nowNs()
+          timing("hover.infer", buildStart, buildEnd)
           match (Map.get(modulePath, inferred.modules)) {
-            Some(summary) =>
+            Some(summary) => {
+              let lookupStart = nowNs()
               match (ModuleInfer.typeAtOffsetInSummary(summary, offset)) {
-                Some(found) => sendResponse(idText, hoverJsonForType(source, found)),
+                Some(found) => {
+                  let lookupEnd = nowNs()
+                  timing("hover.lookup", lookupStart, lookupEnd)
+                  timing("hover.total", hoverStart, lookupEnd)
+                  sendResponse(idText, hoverJsonForType(source, found))
+                },
                 None => {
                   let fallbackDecl = match (Map.get(modulePath, graph.nodes)) {
                     Some(node) => SymbolService.hoverDeclAtOffset(node.program, offset),
                     None => None,
                   }
+                  let lookupEnd = nowNs()
+                  timing("hover.lookup", lookupStart, lookupEnd)
+                  timing("hover.total", hoverStart, lookupEnd)
                   match (fallbackDecl) {
                     Some(decl) =>
                       sendResponse(
@@ -845,7 +1043,8 @@ let handleHover = (
                       },
                   }
                 },
-              },
+              }
+            },
             None =>
               if (debugEnabled) {
                 sendResponse(idText, hoverJsonNoType(line0, col0, offset))
@@ -893,7 +1092,7 @@ let handleDefinition = (
     (Some(uri), Some(line0), Some(col0)) =>
       match (Map.get(uri, docs)) {
         Some(source) => {
-          let offset = positionToOffset(source, line0, col0)
+          let offset = positionToOffsetForUri(uri, source, line0, col0)
           let (entryPath, graph, _inferred) = buildInferenceForEntry(uri, docs, caller="definition")
           match (SymbolService.findDefinitionAtOffset(graph, entryPath, source, offset)) {
             Some(found) => sendResponse(idText, "[" ++ definitionJson(found.modulePath, found.span) ++ "]"),
@@ -1015,6 +1214,9 @@ let handleMessage = (
                         None => 1,
                       }
                       Map.set(uri, version, docVersions)
+                      let starts = buildLineStarts(text)
+                      Map.set(uri, starts, lineStartsCache)
+                      Map.set(uri, version, lineStartsCacheVersion)
                       invalidateInferenceCache()
                       if (isInlayWorker) {
                         warmInlayCache(uri, text, version)
@@ -1071,6 +1273,9 @@ let handleMessage = (
                             },
                           }
                           Map.set(uri, nextVersion, docVersions)
+                          let starts = buildLineStarts(text)
+                          Map.set(uri, starts, lineStartsCache)
+                          Map.set(uri, nextVersion, lineStartsCacheVersion)
                           invalidateInferenceCache()
                           if (isInlayWorker) {
                             invalidateInlayCache(uri)
@@ -1111,13 +1316,17 @@ let handleMessage = (
                   Some(uri) => {
                     Map.remove(uri, docs)
                     Map.remove(uri, docVersions)
+                    Map.remove(uri, lineStartsCache)
+                    Map.remove(uri, lineStartsCacheVersion)
                     invalidateInferenceCache()
                     if (isInlayWorker) {
                       invalidateInlayCache(uri)
                     } else {
                       void
                     }
-                    publishDiagnostics(uri, [])
+                    let _published = publishDiagnostics(uri, [])
+                    void
+                    Map.remove(uri, publishedDiagnosticsFingerprint)
                     let next = Map.make()
                     List.forEach(((u, _)) => {
                       if (u == uri) {
@@ -1145,20 +1354,13 @@ let handleMessage = (
               "false"
             })
         )
-        if (isInlayWorker) {
-          match (idOpt) {
-            Some(idJson) => match (jsonGetObject("params", msgJson)) {
-              Some(params) =>
-                handleInlayHint(jsonToIdText(idJson), params, docs),
-              None => void,
-            },
+        match (idOpt) {
+          Some(idJson) => match (jsonGetObject("params", msgJson)) {
+            Some(params) =>
+              handleInlayHint(jsonToIdText(idJson), params, docs),
             None => void,
-          }
-        } else {
-          match (idOpt) {
-            Some(idJson) => sendResponse(jsonToIdText(idJson), "[]"),
-            None => void,
-          }
+          },
+          None => void,
         }
         publishedUris
       } else if (method == "textDocument/formatting") {

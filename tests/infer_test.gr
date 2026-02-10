@@ -253,6 +253,30 @@ let choose = (x) => { if (x) { 1 } else { 2 } };
   }
 })
 
+test("temporary builtin infix arithmetic operators typecheck", () => {
+  let source =
+    "
+let sum = 1 + 2;
+let diff = 3 - 1;
+let prod = 2 * 4;
+"
+  let state = inferSource(source)
+  assertEquals("Number", Types.typeToString(expectTopBinding(state, "sum").ty))
+  assertEquals("Number", Types.typeToString(expectTopBinding(state, "diff").ty))
+  assertEquals("Number", Types.typeToString(expectTopBinding(state, "prod").ty))
+})
+
+test("temporary builtin comparison operators typecheck", () => {
+  let source =
+    "
+let eq = 1 == 1;
+let gt = 2 > 1;
+"
+  let state = inferSource(source)
+  assertEquals("Bool", Types.typeToString(expectTopBinding(state, "eq").ty))
+  assertEquals("Bool", Types.typeToString(expectTopBinding(state, "gt").ty))
+})
+
 test("match clause guard parses and types as bool", () => {
   let source =
     "

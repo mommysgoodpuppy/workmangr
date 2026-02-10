@@ -1038,6 +1038,25 @@ and parseInfix: Parser<SurfaceAst.Expr> = state => {
       )
       (node, state3)
     },
+    Lexer.BangEq => {
+      let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
+      let (_, state2) = expectSimple(Lexer.BangEq, stateAfterId)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3) = parseInfix(state2b)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
+          {
+            first: expr,
+            rest: [({ node: { id: opId, span: opTok.span }, text: "!=" }, rhs)],
+          },
+        )
+      )
+      (node, state3)
+    },
     Lexer.Plus => {
       let (id, stateAfterId) = freshId(state1)
       let opTok = currentToken(stateAfterId)
@@ -1154,6 +1173,48 @@ and parsePostfix = (
 and parseTerm: Parser<SurfaceAst.Expr> = state => {
   let tok = currentToken(state)
   match (tok.kind) {
+    Lexer.Bang => {
+      let (id, state1) = freshId(state)
+      let (_, state2) = expectSimple(Lexer.Bang, state1)
+      let (rhs, state3) = parseTerm(state2)
+      let span = spanFromTokens(tok.span, rhs.node.span)
+      let (calleeId, state4) = freshId(state3)
+      let (nameId, state5) = freshId(state4)
+      let callee: SurfaceAst.Expr = makeExpr(
+        calleeId,
+        tok.span,
+        Ident({ node: { id: nameId, span: tok.span }, text: "!" })
+      )
+      let expr: SurfaceAst.Expr = makeExpr(id, span, Apply(callee, rhs))
+      (expr, state5)
+    },
+    Lexer.Dash => {
+      let (id, state1) = freshId(state)
+      let (_, state2) = expectSimple(Lexer.Dash, state1)
+      let (rhs, state3) = parseTerm(state2)
+      let span = spanFromTokens(tok.span, rhs.node.span)
+      let (zeroId, state4) = freshId(state3)
+      let zeroExpr: SurfaceAst.Expr = makeExpr(
+        zeroId,
+        tok.span,
+        Lit(SurfaceAst.Int(0))
+      )
+      let tupleExpr: SurfaceAst.Expr = makeExpr(
+        id,
+        span,
+        Tuple([zeroExpr, rhs])
+      )
+      let (calleeId, state5) = freshId(state4)
+      let (nameId, state6) = freshId(state5)
+      let callee: SurfaceAst.Expr = makeExpr(
+        calleeId,
+        tok.span,
+        Ident({ node: { id: nameId, span: tok.span }, text: "-" })
+      )
+      let (applyId, state7) = freshId(state6)
+      let expr: SurfaceAst.Expr = makeExpr(applyId, span, Apply(callee, tupleExpr))
+      (expr, state7)
+    },
     Lexer.LBrace => parseBlock(state),
     Lexer.FatArrow => {
       // Thunk syntax: => body

@@ -12,9 +12,14 @@ from "float64" include Float64
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
 from "../../core/surface_ast.gr" include SurfaceAst
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/infer.gr" include Infer
+from "../../core/types.gr" include Types
 from "../../frontend/parser.gr" include Parser
+from "../../frontend/lower.gr" include Lower
 from "../../frontend/formatter.gr" include Formatter
 from "../../frontend/lexer.gr" include Lexer
+from "./layer1/type_display.gr" include TypeDisplay
 
 record Position {
   line: Number,
@@ -276,6 +281,179 @@ let maybeLogTiming = (
 let offsetToPosition = (source: String, offset: Number) => {
   let lc = Source.offsetToLineCol(source, offset)
   { line: lc.line - 1, character: lc.col }
+}
+
+let escapeJsonText = (s: String) => {
+  let step1 = String.replaceAll("\\", "\\\\", s)
+  let step2 = String.replaceAll("\"", "\\\"", step1)
+  let step3 = String.replaceAll("\n", "\\n", step2)
+  let step4 = String.replaceAll("\r", "\\r", step3)
+  String.replaceAll("\t", "\\t", step4)
+}
+
+let spanToEndPosition = (span: Source.Span) => {
+  let line0 = if (span.line > 0) {
+    span.line - 1
+  } else {
+    0
+  }
+  let startCol0 = if (span.col > 0) {
+    span.col - 1
+  } else {
+    0
+  }
+  let width = if (span.end > span.start) {
+    span.end - span.start
+  } else {
+    0
+  }
+  { line: line0, character: startCol0 + width }
+}
+
+let inRangeByOffset = (
+  span: Source.Span,
+  rangeStart: Number,
+  rangeEnd: Number,
+) => {
+  let pos = if (span.end > span.start) {
+    span.end
+  } else {
+    span.start
+  }
+  pos >= rangeStart && pos <= rangeEnd
+}
+
+let lookupNameTypeHint = (
+  infer: Infer.InferState,
+  name: CoreAst.Name,
+) => match (Map.get(name.node.id, infer.nodeTypes)) {
+  Some(ty) => {
+    let rendered = TypeDisplay.render(Types.applySubstType(infer.subst, ty))
+    Some((name.node.span, ": " ++ rendered))
+  },
+  None => None,
+}
+
+let rec typeInlaysFromExpr = (
+  expr: CoreAst.Expr,
+  infer: Infer.InferState,
+  rangeStart: Number,
+  rangeEnd: Number,
+) => match (expr.kind) {
+  CoreAst.Let(binding, body) => {
+    let fromBinding = if (binding.annotation == None) {
+      match (binding.name.kind) {
+        CoreAst.Var(name) | CoreAst.Pin(name) =>
+          match (lookupNameTypeHint(infer, name)) {
+            Some((span, label)) when inRangeByOffset(span, rangeStart, rangeEnd) =>
+              [
+                "{\"position\":{\"line\":"
+                  ++ toString(spanToEndPosition(span).line)
+                  ++ ",\"character\":"
+                  ++ toString(spanToEndPosition(span).character)
+                  ++ "},\"label\":\""
+                  ++ escapeJsonText(label)
+                  ++ "\",\"kind\":1,\"paddingLeft\":true,\"paddingRight\":false}",
+              ],
+            _ => [],
+          },
+        _ => [],
+      }
+    } else {
+      []
+    }
+    List.append(
+      fromBinding,
+      List.append(
+        typeInlaysFromExpr(binding.value, infer, rangeStart, rangeEnd),
+        typeInlaysFromExpr(body, infer, rangeStart, rangeEnd)
+      )
+    )
+  },
+  CoreAst.Apply(callee, arg) =>
+    List.append(
+      typeInlaysFromExpr(callee, infer, rangeStart, rangeEnd),
+      typeInlaysFromExpr(arg, infer, rangeStart, rangeEnd)
+    ),
+  CoreAst.Fn(fnExpr) =>
+    List.flatten(
+      List.map((item: CoreAst.FnItem) => match (item.kind) {
+        CoreAst.Clause(clause) =>
+          List.append(
+            typeInlaysFromExpr(clause.body, infer, rangeStart, rangeEnd),
+            match (clause.guard) {
+              Some(guardExpr) => typeInlaysFromExpr(guardExpr, infer, rangeStart, rangeEnd),
+              None => [],
+            }
+          ),
+        _ => [],
+      }, fnExpr.items)
+    ),
+  CoreAst.If(cond, thenExpr, elseOpt) =>
+    List.append(
+      typeInlaysFromExpr(cond, infer, rangeStart, rangeEnd),
+      List.append(
+        typeInlaysFromExpr(thenExpr, infer, rangeStart, rangeEnd),
+        match (elseOpt) {
+          Some(elseExpr) => typeInlaysFromExpr(elseExpr, infer, rangeStart, rangeEnd),
+          None => [],
+        }
+      )
+    ),
+  CoreAst.Tuple(items) =>
+    List.flatten(List.map(item => typeInlaysFromExpr(item, infer, rangeStart, rangeEnd), items)),
+  CoreAst.RecordLit(items) =>
+    List.flatten(
+      List.map((item: CoreAst.RecordItem) => match (item) {
+        CoreAst.Field(_, valueExpr) => typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
+        CoreAst.Spread(valueExpr) => typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
+      }, items)
+    ),
+  CoreAst.Mark(_, inner) => typeInlaysFromExpr(inner, infer, rangeStart, rangeEnd),
+  _ => []
+}
+
+let typeInlaysFromLoweredProgram = (
+  program: CoreAst.Program,
+  rangeStart: Number,
+  rangeEnd: Number,
+) => {
+  let infer = Infer.inferProgram(program)
+  List.flatten(List.map((item: CoreAst.TopItem) => match (item) {
+    CoreAst.DeclGroup(group) =>
+      List.flatten(List.map((decl: CoreAst.Decl) => match (decl) {
+        CoreAst.LetDecl(letDecl) =>
+          List.flatten(List.map((binding: CoreAst.LetBinding) => {
+            let bindingHint = if (binding.annotation == None) {
+              match (binding.name.kind) {
+                CoreAst.Var(name) | CoreAst.Pin(name) =>
+                  match (lookupNameTypeHint(infer, name)) {
+                    Some((span, label)) when inRangeByOffset(span, rangeStart, rangeEnd) =>
+                      [
+                        "{\"position\":{\"line\":"
+                          ++ toString(spanToEndPosition(span).line)
+                          ++ ",\"character\":"
+                          ++ toString(spanToEndPosition(span).character)
+                          ++ "},\"label\":\""
+                          ++ escapeJsonText(label)
+                          ++ "\",\"kind\":1,\"paddingLeft\":true,\"paddingRight\":false}",
+                      ],
+                    _ => [],
+                  },
+                _ => [],
+              }
+            } else {
+              []
+            }
+            List.append(
+              bindingHint,
+              typeInlaysFromExpr(binding.value, infer, rangeStart, rangeEnd)
+            )
+          }, letDecl.bindings)),
+        _ => [],
+      }, group.decls)),
+    _ => [],
+  }, program.items))
 }
 
 let applyInsertionsToSource = (source: String, inserts: List<InsertChunk>) => {
@@ -626,7 +804,7 @@ let inlayHintsForSourceWithTiming = (
   let parseStart = nowNs()
   Error.clearErrors()
   Error.setPanicMode(false)
-  let _ = Parser.parseResult(source)
+  let parsed = Parser.parseResult(source)
   let parseEnd = nowNs()
   maybeLogTiming(timingPrefix, "parse", parseStart, parseEnd)
 
@@ -973,7 +1151,11 @@ let inlayHintsForSourceWithTiming = (
     debug("[LSP] preview:")
     debug(preview)
   }
-  let result = "[" ++ Array.join(",", Array.fromList(hints)) ++ "]"
+  // Keep type inlays available under recoverable parser diagnostics.
+  let lowered = Lower.lowerProgram(parsed.program)
+  let typeHints = typeInlaysFromLoweredProgram(lowered, rangeStart, rangeEnd)
+  let allHints = List.append(hints, typeHints)
+  let result = "[" ++ Array.join(",", Array.fromList(allHints)) ++ "]"
   let totalEnd = nowNs()
   maybeLogTiming(timingPrefix, "total", totalStart, totalEnd)
   result

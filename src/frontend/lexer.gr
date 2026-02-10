@@ -56,6 +56,8 @@ provide enum TokenKind {
   //operators
   Eq, // =
   EqEq, // ==
+  Bang, // !
+  BangEq, // !=
   Plus, // +
   DPlus, // ++
   Dash, // -
@@ -110,6 +112,8 @@ provide let tokenKindToString = kind => match (kind) {
   DPeriod => "..",
   Eq => "=",
   EqEq => "==",
+  Bang => "!",
+  BangEq => "!=",
   Plus => "+",
   DPlus => "++",
   Dash => "-",
@@ -1270,6 +1274,38 @@ let lexInternal = (source, profiling: Bool) => {
                 tokens = [
                   makeToken(
                     Eq,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 1,
+                    None
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(pos, ch)
+              },
+            }
+          },
+          '!' => {
+            match (peek(pos.index + 1)) {
+              Some('=') => {
+                tokens = [
+                  makeToken(
+                    BangEq,
+                    pos.line,
+                    pos.col,
+                    pos.index,
+                    pos.index + 2,
+                    None
+                  ),
+                  ...tokens
+                ]
+                pos = advancePosition(advancePosition(pos, ch), '=')
+              },
+              _ => {
+                tokens = [
+                  makeToken(
+                    Bang,
                     pos.line,
                     pos.col,
                     pos.index,

@@ -1,0 +1,35 @@
+module LspInlayTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "string" include String
+from "../src/cli/lsp/inlay.gr" include Inlay
+
+setSourceFile("./tests/lsp_inlay_test.gr")
+
+let noop = (_: String) => void
+
+let escapeJson = (s: String) => {
+  let step1 = String.replaceAll("\\", "\\\\", s)
+  let step2 = String.replaceAll("\"", "\\\"", step1)
+  let step3 = String.replaceAll("\n", "\\n", step2)
+  let step4 = String.replaceAll("\r", "\\r", step3)
+  String.replaceAll("\t", "\\t", step4)
+}
+
+test("type inlays still render under missing semicolon recovery", () => {
+  let source = "let x = 1\nlet y = x;"
+  let hints = Inlay.inlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  assertTrue(String.contains(": Int", hints))
+})
+
+let results = runTests()
+printResultsAndExit(results)

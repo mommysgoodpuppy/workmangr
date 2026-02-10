@@ -74,6 +74,65 @@ let mapSize = (m) => List.length(Map.toList(m))
 let renderType = (t: Types.Type, state: InferState) =>
   Types.typeToReadableString(Types.applySubstType(state.subst, t))
 
+let seedBuiltinValues = (env: Env.TypingEnv) => {
+  let intType = Types.TNominal("Int", [])
+  let numberType = Types.TNumber
+  let boolType = Types.TBool
+  let orderingType = Types.TNominal("Ordering", [])
+  let binaryInt: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([intType, intType]), intType),
+  }
+  let binaryNumber: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([numberType, numberType]), numberType),
+  }
+  let cmpNumber: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([numberType, numberType]), boolType),
+  }
+  let unaryBool: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(boolType, boolType),
+  }
+  let cmpInt: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([intType, intType]), orderingType),
+  }
+  let define = (name: String, scheme: Types.Scheme) => {
+    Env.defineValue(env, name, scheme)
+    void
+  }
+  Env.defineValue(env, "nativeAdd", binaryInt)
+  Env.defineValue(env, "nativeSub", binaryInt)
+  Env.defineValue(env, "nativeMul", binaryInt)
+  Env.defineValue(env, "nativeDiv", binaryInt)
+  Env.defineValue(env, "nativeCmpInt", cmpInt)
+  // Temporary builtin operator support until std-based operator resolution lands.
+  define("+", binaryNumber)
+  define("-", binaryNumber)
+  define("*", binaryNumber)
+  define("/", binaryNumber)
+  define("%", binaryNumber)
+  define("==", cmpNumber)
+  define("!=", cmpNumber)
+  define(">", cmpNumber)
+  define("<", cmpNumber)
+  define(">=", cmpNumber)
+  define("<=", cmpNumber)
+  define("!", unaryBool)
+  define("not", unaryBool)
+  define("&&", {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([boolType, boolType]), boolType),
+  })
+  define("||", {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([boolType, boolType]), boolType),
+  })
+  env
+}
+
 let logState = (label: String, state: InferState, nodeId: Number=-1) => {
   inferDebug(
     label
@@ -94,7 +153,7 @@ let logState = (label: String, state: InferState, nodeId: Number=-1) => {
 
 let makeInitialState = () => {
   let subst = Types.emptySubst()
-  let env = Env.empty()
+  let env = seedBuiltinValues(Env.empty())
   let nodeTypes = Map.make()
   let topBindings = Map.make()
   {
@@ -1093,7 +1152,7 @@ provide let inferProgram = (program: CoreAst.Program) => {
 }
 
 provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) => {
-  let baseEnv = Env.empty()
+  let baseEnv = seedBuiltinValues(Env.empty())
   Map.forEach((name, scheme) => {
     Env.defineValue(baseEnv, name, scheme)
     void
@@ -1109,7 +1168,7 @@ provide let inferProgramLayer1 = (program: CoreAst.Program) => {
 }
 
 provide let inferProgramLayer1WithEnv = (program: CoreAst.Program, env: Types.Env) => {
-  let baseEnv = Env.empty()
+  let baseEnv = seedBuiltinValues(Env.empty())
   Map.forEach((name, scheme) => {
     Env.defineValue(baseEnv, name, scheme)
     void

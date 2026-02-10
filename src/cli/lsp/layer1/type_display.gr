@@ -1,22 +1,29 @@
 module TypeDisplay
 
 from "array" include Array
-from "char" include Char
 from "list" include List
 from "map" include Map
-from "number" include Number
 from "string" include String
 
 from "../../../core/types.gr" include Types
 
 let varLabel = (id: Number) => {
-  let letterIdx = Number.trunc(id % 26)
-  let letter = Char.toString(String.charAt(letterIdx, "abcdefghijklmnopqrstuvwxyz"))
-  let suffix = Number.trunc(id / 26)
-  if (suffix == 0) {
-    "'" ++ letter
+  if (id == 0) {
+    "T"
+  } else if (id == 1) {
+    "U"
+  } else if (id == 2) {
+    "V"
+  } else if (id == 3) {
+    "W"
+  } else if (id == 4) {
+    "X"
+  } else if (id == 5) {
+    "Y"
+  } else if (id == 6) {
+    "Z"
   } else {
-    "'" ++ letter ++ toString(suffix)
+    "T" ++ toString(id)
   }
 }
 

@@ -5,6 +5,7 @@ use Test.*
 
 from "list" include List
 from "map" include Map
+from "string" include String
 
 from "../src/core/module_infer.gr" include ModuleInfer
 from "../src/core/error.gr" include Error
@@ -158,6 +159,31 @@ test("named imports with alias resolve correct symbol", () => {
     _ => false,
   }
   all([assertFalse(hasTypeErrors), assertTrue(typeOk)])
+})
+
+test("std core int module typechecks native arithmetic builtins", () => {
+  let result = ModuleInfer.inferEntry(
+    "tests/fixtures/workman_std/core/int",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: ".",
+      stdRoots: ["tests/fixtures/workman_std"],
+    }
+  )
+  let entry = expectModule(result, "tests/fixtures/workman_std/core/int.wm")
+  let hasNativeUnknown = List.some(
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.TypeInference
+        && (
+          String.contains("unknown identifier nativeAdd", diag.message)
+            || String.contains("unknown identifier nativeSub", diag.message)
+            || String.contains("unknown identifier nativeMul", diag.message)
+            || String.contains("unknown identifier nativeDiv", diag.message)
+            || String.contains("unknown identifier nativeCmpInt", diag.message)
+        ),
+    entry.diagnostics
+  )
+  assertFalse(hasNativeUnknown)
 })
 
 let results = runTests()

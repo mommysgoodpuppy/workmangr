@@ -55,6 +55,26 @@ let emptySubst = () => Map.make()
 let emptyEnv = () => Map.make()
 let mapSize = (m) => List.length(Map.toList(m))
 
+let typeVarLabel = (id: Number) => {
+  if (id == 0) {
+    "T"
+  } else if (id == 1) {
+    "U"
+  } else if (id == 2) {
+    "V"
+  } else if (id == 3) {
+    "W"
+  } else if (id == 4) {
+    "X"
+  } else if (id == 5) {
+    "Y"
+  } else if (id == 6) {
+    "Z"
+  } else {
+    "T" ++ toString(id)
+  }
+}
+
 provide let rec typeToString = (t: Type) => match (t) {
   TNumber => "Number",
   TBool => "Bool",
@@ -63,7 +83,7 @@ provide let rec typeToString = (t: Type) => match (t) {
   TChar => "Char",
   TVoid => "Void",
   THole(id) => "?[" ++ toString(id) ++ "]",
-  TVar(id) => "'" ++ toString(id),
+  TVar(id) => typeVarLabel(id),
   TFun(a, b) => {
     let left = match (a) {
       TFun(_, _) => "(" ++ typeToString(a) ++ ")",

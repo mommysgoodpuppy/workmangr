@@ -2,6 +2,7 @@ module ModuleInfer
 
 from "list" include List
 from "map" include Map
+from "array" include Array
 
 from "./analysis.gr" include Analysis
 from "./core_ast.gr" include CoreAst
@@ -14,10 +15,16 @@ from "../frontend/lower.gr" include Lower
 from "../module/module_system.gr" include ModuleSystem
 from "./layer1/expr.gr" include Layer1Expr
 
+provide record TypeAtOffset {
+  span: Source.Span,
+  ty: Types.Type,
+}
+
 provide record ModuleSummary {
   moduleId: String,
   program: CoreAst.Program,
   infer: Infer.InferState,
+  typeEntries: List<TypeAtOffset>,
   valueExports: Types.Env,
   typeExports: Map.Map<String, Env.TypeInfo>,
   diagnostics: List<Error.CompilerError>,
@@ -29,9 +36,18 @@ provide record InferenceResult {
   diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
 }
 
-provide record TypeAtOffset {
-  span: Source.Span,
-  ty: Types.Type,
+provide record SummaryCacheEntry {
+  node: ModuleSystem.ModuleNode,
+  dependencySignature: String,
+  exportSignature: String,
+  summary: ModuleSummary,
+}
+
+provide type SummaryCache = Map.Map<String, SummaryCacheEntry>
+
+provide let emptySummaryCache = () => {
+  let cache: SummaryCache = Map.make()
+  cache
 }
 
 let spanContainsOffset = (span: Source.Span, offset: Number) => {
@@ -44,35 +60,46 @@ let spanContainsOffset = (span: Source.Span, offset: Number) => {
 
 let spanLength = (span: Source.Span) => span.end - span.start
 
+let buildTypeEntries = (
+  program: CoreAst.Program,
+  infer: Infer.InferState,
+) => {
+  let nodeSpans = Analysis.buildNodeSpans(program)
+  let raw = List.filterMap(((nodeId, inferredType): (Number, Types.Type)) =>
+    match (Map.get(nodeId, nodeSpans)) {
+      Some(span) => {
+        let appliedType = Types.applySubstType(infer.subst, inferredType)
+        Some({ span, ty: appliedType }: TypeAtOffset)
+      },
+      None => None,
+    }, Map.toList(infer.nodeTypes))
+  List.sort(
+    compare=((a, b) => {
+      let lenA = spanLength(a.span)
+      let lenB = spanLength(b.span)
+      if (lenA == lenB) {
+        a.span.start - b.span.start
+      } else {
+        lenA - lenB
+      }
+    }),
+    raw,
+  )
+}
+
 provide let typeAtOffsetInSummary = (summary: ModuleSummary, offset: Number) => {
-  let nodeSpans = Analysis.buildNodeSpans(summary.program)
-  let rec choose = (
-    entries: List<(Number, Types.Type)>,
-    best: Option<TypeAtOffset>,
-  ) =>
+  let rec choose = (entries: List<TypeAtOffset>) =>
     match (entries) {
-      [] => best,
-      [(nodeId, inferredType), ...rest] =>
-        match (Map.get(nodeId, nodeSpans)) {
-          Some(span) when spanContainsOffset(span, offset) => {
-            let appliedType = Types.applySubstType(summary.infer.subst, inferredType)
-            let candidate: TypeAtOffset = { span, ty: appliedType }
-            let nextBest = match (best) {
-              None => Some(candidate),
-              Some(prev) =>
-                if (spanLength(candidate.span) <= spanLength(prev.span)) {
-                  Some(candidate)
-                } else {
-                  best
-                },
-            }
-            choose(rest, nextBest)
-          },
-          _ => choose(rest, best),
+      [] => None,
+      [entry, ...rest] =>
+        if (spanContainsOffset(entry.span, offset)) {
+          Some(entry)
+        } else {
+          choose(rest)
         },
     }
 
-  choose(Map.toList(summary.infer.nodeTypes), None)
+  choose(summary.typeEntries)
 }
 
 let typeDiagnosticsForProgram = (
@@ -243,41 +270,138 @@ let applyReexports = (
   }, node.reexports)
 }
 
-provide let inferGraph = (graph: ModuleSystem.ModuleGraph) => {
+let schemeSignature = (scheme: Types.Scheme) => {
+  let qs = Array.join(",", Array.fromList(List.map(toString, scheme.quantifiers)))
+  qs ++ "|" ++ Types.typeToString(scheme.ty)
+}
+
+let typeInfoSignature = (info: Env.TypeInfo) => {
+  let typeParams = Array.join(",", Array.fromList(info.typeParams))
+  let ctors = Array.join(
+    ",",
+    Array.fromList(List.map((ctor: Env.ConstructorInfo) => ctor.name, info.constructors))
+  )
+  info.name ++ "<" ++ typeParams ++ ">[" ++ ctors ++ "]"
+}
+
+let exportSignature = (summary: ModuleSummary) => {
+  let values = Array.join(
+    ";",
+    Array.fromList(
+      List.map(
+        ((name, scheme)) => name ++ "=" ++ schemeSignature(scheme),
+        Map.toList(summary.valueExports)
+      )
+    )
+  )
+  let types = Array.join(
+    ";",
+    Array.fromList(
+      List.map(
+        ((name, info)) => name ++ "=" ++ typeInfoSignature(info),
+        Map.toList(summary.typeExports)
+      )
+    )
+  )
+  "v{" ++ values ++ "}t{" ++ types ++ "}"
+}
+
+let dependencySignature = (
+  node: ModuleSystem.ModuleNode,
+  nextCache: SummaryCache,
+) => {
+  let depList = List.append(node.imports, node.reexports)
+  let parts = List.map((depId: String) =>
+    match (Map.get(depId, nextCache)) {
+      Some(dep) => depId ++ "#" ++ dep.exportSignature,
+      None => depId ++ "#missing",
+    }, depList)
+  Array.join("|", Array.fromList(parts))
+}
+
+provide let inferGraphWithCache = (
+  graph: ModuleSystem.ModuleGraph,
+  previousCache: SummaryCache,
+) => {
   let summaries: Map.Map<String, ModuleSummary> = Map.make()
   let diagnosticsById = Map.make()
+  let nextCache: SummaryCache = Map.make()
+  let mut reused = 0
+  let mut recomputed = 0
 
   List.forEach((moduleId: String) => {
     match (Map.get(moduleId, graph.nodes)) {
       None => void,
       Some(node) => {
-        let lowered = Lower.lowerProgram(node.program)
-        let importedEnv = collectImportedEnv(node, lowered, summaries)
-        let infer = Infer.inferProgramWithEnv(lowered, importedEnv)
-        let typeDiagnostics = typeDiagnosticsForProgram(lowered, infer)
-        let parseDiagnostics = match (Map.get(moduleId, graph.diagnosticsById)) {
-          Some(diags) => diags,
-          None => [],
+        let depSig = dependencySignature(node, nextCache)
+        let reusedSummary = match (Map.get(moduleId, previousCache)) {
+          Some(prev) when prev.node == node && prev.dependencySignature == depSig =>
+            Some(prev.summary),
+          _ => None,
         }
-        let combined = List.append(parseDiagnostics, typeDiagnostics)
-        Map.set(moduleId, combined, diagnosticsById)
+        match (reusedSummary) {
+          Some(summary) => {
+            reused += 1
+            Map.set(moduleId, summary, summaries)
+            Map.set(moduleId, summary.diagnostics, diagnosticsById)
+            let sig = exportSignature(summary)
+            let cacheEntry: SummaryCacheEntry = {
+              node,
+              dependencySignature: depSig,
+              exportSignature: sig,
+              summary,
+            }
+            Map.set(moduleId, cacheEntry, nextCache)
+          },
+          None => {
+            recomputed += 1
+            let lowered = Lower.lowerProgram(node.program)
+            let importedEnv = collectImportedEnv(node, lowered, summaries)
+            let infer = Infer.inferProgramWithEnv(lowered, importedEnv)
+            let typeEntries = buildTypeEntries(lowered, infer)
+            let typeDiagnostics = typeDiagnosticsForProgram(lowered, infer)
+            let parseDiagnostics = match (Map.get(moduleId, graph.diagnosticsById)) {
+              Some(diags) => diags,
+              None => [],
+            }
+            let combined = List.append(parseDiagnostics, typeDiagnostics)
+            Map.set(moduleId, combined, diagnosticsById)
 
-        let (ownValues, ownTypes) = buildOwnExports(lowered, infer)
-        applyReexports(node, summaries, ownValues, ownTypes)
-        let summary: ModuleSummary = {
-          moduleId,
-          program: lowered,
-          infer,
-          valueExports: ownValues,
-          typeExports: ownTypes,
-          diagnostics: combined,
+            let (ownValues, ownTypes) = buildOwnExports(lowered, infer)
+            applyReexports(node, summaries, ownValues, ownTypes)
+            let summary: ModuleSummary = {
+              moduleId,
+              program: lowered,
+              infer,
+              typeEntries,
+              valueExports: ownValues,
+              typeExports: ownTypes,
+              diagnostics: combined,
+            }
+            Map.set(moduleId, summary, summaries)
+            let sig = exportSignature(summary)
+            let cacheEntry: SummaryCacheEntry = {
+              node,
+              dependencySignature: depSig,
+              exportSignature: sig,
+              summary,
+            }
+            Map.set(moduleId, cacheEntry, nextCache)
+          },
         }
-        Map.set(moduleId, summary, summaries)
       },
     }
   }, graph.topo)
 
-  { graph, modules: summaries, diagnosticsById }: InferenceResult
+  ({ graph, modules: summaries, diagnosticsById }: InferenceResult, nextCache, reused, recomputed)
+}
+
+provide let inferGraph = (graph: ModuleSystem.ModuleGraph) => {
+  let (result, _cache, _reused, _recomputed) = inferGraphWithCache(
+    graph,
+    emptySummaryCache()
+  )
+  result
 }
 
 provide let inferEntry = (

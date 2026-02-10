@@ -139,6 +139,65 @@ test("parser supports if condition with equality comparison", () => {
   assertFalse(hasErrors)
 })
 
+test("parser supports unary bang, unary minus, and not-equals", () => {
+  clearErrors()
+  let source =
+    "let a = !true;\n"
+      ++ "let b = -1;\n"
+      ++ "let c = 1 != 2;"
+  let parsed = Parser.parse(source)
+
+  let shapeOk = match (parsed.items) {
+    [
+      SurfaceAst.DeclGroup(g1),
+      SurfaceAst.DeclGroup(g2),
+      SurfaceAst.DeclGroup(g3),
+    ] => {
+      let aOk = match (g1.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.Apply(
+              { kind: SurfaceAst.Ident({ text: "!", _ }), _ },
+              { kind: SurfaceAst.Lit(SurfaceAst.Bool(true)), _ },
+            ) => true,
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      let bOk = match (g2.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.Apply(
+              { kind: SurfaceAst.Ident({ text: "-", _ }), _ },
+              { kind: SurfaceAst.Tuple([_, _]), _ },
+            ) => true,
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      let cOk = match (g3.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.InfixChain({ rest: [({ text: "!=", _ }, _)], _ }) => true,
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      aOk && bOk && cOk
+    },
+    _ => false,
+  }
+
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
 test(
   "parser supports multiline functional call arguments with multiplication",
   () => {
