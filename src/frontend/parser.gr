@@ -207,7 +207,14 @@ let ensureProgress = (before: ParseState, after: ParseState, context: String) =>
     Error.createMarkedError(
       Error.Parsing,
       mark,
-      "Parser made no progress in " ++ context ++ "; skipping token",
+      "Parser made no progress in "
+        ++ context
+        ++ "; skipping token "
+        ++ Lexer.tokenKindToString(tok.kind)
+        ++ " at line "
+        ++ toString(tok.span.line)
+        ++ ", col "
+        ++ toString(tok.span.col),
       dropToken(state1),
       clues=[
         Error.Received(Lexer.tokenKindToString(tok.kind)),

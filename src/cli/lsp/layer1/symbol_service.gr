@@ -21,7 +21,7 @@ provide record HoverDecl {
 
 let tokenNameAtOffset = (source: String, offset: Number) => {
   let tokens = Lexer.lex(source)
-  let rec loop = (remaining: List<Lexer.Token>) =>
+  let rec loopStrict = (remaining: List<Lexer.Token>) =>
     match (remaining) {
       [] => None,
       [tok, ...rest] =>
@@ -32,10 +32,63 @@ let tokenNameAtOffset = (source: String, offset: Number) => {
             _ => None,
           }
         } else {
-          loop(rest)
+          loopStrict(rest)
         },
     }
-  loop(tokens)
+  match (loopStrict(tokens)) {
+    Some(name) => Some(name),
+    None => {
+      let rec loopBoundary = (remaining: List<Lexer.Token>) =>
+        match (remaining) {
+          [] => None,
+          [tok, ...rest] =>
+            if (tok.span.end > tok.span.start && offset == tok.span.end) {
+              match (tok.kind) {
+                Lexer.LitName(name) => Some(name),
+                Lexer.ConstructorTok(name) => Some(name),
+                _ => loopBoundary(rest),
+              }
+            } else {
+              loopBoundary(rest)
+            },
+        }
+      loopBoundary(tokens)
+    },
+  }
+}
+
+let tokenAtOffsetWithIndex = (source: String, offset: Number) => {
+  let tokens = Lexer.lex(source)
+  let rec loopStrict = (remaining: List<Lexer.Token>, idx: Number) =>
+    match (remaining) {
+      [] => None,
+      [tok, ...rest] =>
+        if (offset >= tok.span.start && offset < tok.span.end) {
+          Some((idx, tok, tokens))
+        } else {
+          loopStrict(rest, idx + 1)
+        },
+    }
+  match (loopStrict(tokens, 0)) {
+    Some(found) => Some(found),
+    None => {
+      let rec loopBoundary = (remaining: List<Lexer.Token>, idx: Number) =>
+        match (remaining) {
+          [] => None,
+          [tok, ...rest] =>
+            if (tok.span.end > tok.span.start && offset == tok.span.end) {
+              match (tok.kind) {
+                Lexer.LitName(_) | Lexer.ConstructorTok(_) =>
+                  Some((idx, tok, tokens)),
+                _ => loopBoundary(rest, idx + 1),
+              }
+            } else {
+              loopBoundary(rest, idx + 1)
+            },
+        }
+      loopBoundary(tokens, 0)
+    },
+  }
 }
 
 let rec nth = (items: List<String>, index: Number) =>
@@ -48,6 +101,78 @@ let rec nth = (items: List<String>, index: Number) =>
         nth(rest, index - 1)
       },
   }
+
+let explicitImportCount = (program: SurfaceAst.Program) => {
+  let rec loop = (items: List<SurfaceAst.TopItem>, count: Number) =>
+    match (items) {
+      [] => count,
+      [item, ...rest] =>
+        match (item) {
+          SurfaceAst.Import(_) => loop(rest, count + 1),
+          _ => loop(rest, count),
+        },
+    }
+  loop(program.items, 0)
+}
+
+let rec nthToken = (items: List<Lexer.Token>, index: Number) =>
+  match (items) {
+    [] => None,
+    [head, ...rest] =>
+      if (index <= 0) {
+        Some(head)
+      } else {
+        nthToken(rest, index - 1)
+      },
+  }
+
+let tokenName = (tok: Lexer.Token) =>
+  match (tok.kind) {
+    Lexer.LitName(name) => Some(name),
+    Lexer.ConstructorTok(name) => Some(name),
+    _ => None,
+  }
+
+let qualifiedNameAtOffset = (source: String, offset: Number) => {
+  match (tokenAtOffsetWithIndex(source, offset)) {
+    None => None,
+    Some((idx, tok, tokens)) => {
+      let currentName = tokenName(tok)
+      let prev1 = nthToken(tokens, idx - 1)
+      let prev2 = nthToken(tokens, idx - 2)
+      let next1 = nthToken(tokens, idx + 1)
+      let next2 = nthToken(tokens, idx + 2)
+      match (currentName) {
+        Some(name) =>
+          match ((prev1, prev2)) {
+            (Some(dotTok), Some(qualifierTok)) =>
+              match ((dotTok.kind, tokenName(qualifierTok))) {
+                (Lexer.Period, Some(qualifier)) => Some((qualifier, name)),
+                _ =>
+                  match ((next1, next2)) {
+                    (Some(dotTok2), Some(memberTok)) =>
+                      match ((dotTok2.kind, tokenName(memberTok))) {
+                        (Lexer.Period, Some(member)) => Some((name, member)),
+                        _ => None,
+                      },
+                    _ => None,
+                  },
+              },
+            _ =>
+              match ((next1, next2)) {
+                (Some(dotTok), Some(memberTok)) =>
+                  match ((dotTok.kind, tokenName(memberTok))) {
+                    (Lexer.Period, Some(member)) => Some((name, member)),
+                    _ => None,
+                  },
+                _ => None,
+              },
+          },
+        None => None,
+      }
+    },
+  }
+}
 
 let rec findInPattern = (
   pattern: SurfaceAst.Pattern,
@@ -172,6 +297,13 @@ let findImportAliasTarget = (
   node: ModuleSystem.ModuleNode,
   aliasName: String,
 ) => {
+  let explicitCount = explicitImportCount(node.program)
+  let importCount = List.length(node.imports)
+  let pathIndexOffset = if (importCount > explicitCount) {
+    importCount - explicitCount
+  } else {
+    0
+  }
   let rec loopTop = (
     items: List<SurfaceAst.TopItem>,
     importIndex: Number,
@@ -184,7 +316,7 @@ let findImportAliasTarget = (
             let next = importIndex + 1
             match (importDecl.alias) {
               Some(alias) when alias.text == aliasName =>
-                match (nth(node.imports, importIndex)) {
+                match (nth(node.imports, importIndex + pathIndexOffset)) {
                   Some(modulePath) => Some({ modulePath, span: alias.node.span }: Definition),
                   None => None,
                 },
@@ -195,6 +327,14 @@ let findImportAliasTarget = (
         },
     }
   loopTop(node.program.items, 0)
+}
+
+let findImportAliasModulePath = (
+  node: ModuleSystem.ModuleNode,
+  aliasName: String,
+) => match (findImportAliasTarget(node, aliasName)) {
+  Some(found) => Some(found.modulePath),
+  None => None,
 }
 
 provide let findDefinitionAtOffset = (
@@ -209,31 +349,44 @@ provide let findDefinitionAtOffset = (
       let currentNodeOpt = Map.get(currentModulePath, graph.nodes)
       match (currentNodeOpt) {
         Some(currentNode) => {
-          match (findImportAliasTarget(currentNode, name)) {
-            Some(found) => Some(found),
+          match (qualifiedNameAtOffset(source, offset)) {
+            Some((qualifier, memberName)) =>
+              match (findImportAliasModulePath(currentNode, qualifier)) {
+                Some(targetModule) =>
+                  match (Map.get(targetModule, graph.nodes)) {
+                    Some(targetNode) =>
+                      findDefinitionInProgram(targetNode.id, targetNode.program, memberName),
+                    None => None,
+                  },
+                None => None,
+              },
             None =>
-              match (findDefinitionInProgram(currentNode.id, currentNode.program, name)) {
+              match (findImportAliasTarget(currentNode, name)) {
                 Some(found) => Some(found),
-                None => {
-                  let rec loop = (moduleIds: List<String>) =>
-                    match (moduleIds) {
-                      [] => None,
-                      [moduleId, ...rest] => {
-                        if (moduleId == currentNode.id) {
-                          loop(rest)
-                        } else {
-                          match (Map.get(moduleId, graph.nodes)) {
-                            Some(node) => match (findDefinitionInProgram(node.id, node.program, name)) {
-                              Some(found) => Some(found),
-                              None => loop(rest),
-                            },
-                            None => loop(rest),
-                          }
+                None =>
+                  match (findDefinitionInProgram(currentNode.id, currentNode.program, name)) {
+                    Some(found) => Some(found),
+                    None => {
+                      let rec loop = (moduleIds: List<String>) =>
+                        match (moduleIds) {
+                          [] => None,
+                          [moduleId, ...rest] => {
+                            if (moduleId == currentNode.id) {
+                              loop(rest)
+                            } else {
+                              match (Map.get(moduleId, graph.nodes)) {
+                                Some(node) => match (findDefinitionInProgram(node.id, node.program, name)) {
+                                  Some(found) => Some(found),
+                                  None => loop(rest),
+                                },
+                                None => loop(rest),
+                              }
+                            }
+                          },
                         }
-                      },
-                    }
-                  loop(graph.topo)
-                },
+                      loop(graph.topo)
+                    },
+                  },
               },
           }
         },
@@ -241,6 +394,41 @@ provide let findDefinitionAtOffset = (
       }
     },
   }
+}
+
+provide let findDefinitionNearOffset = (
+  graph: ModuleSystem.ModuleGraph,
+  currentModulePath: String,
+  source: String,
+  offset: Number,
+) => {
+  let sourceLen = String.length(source)
+  let clamp = (value: Number) => {
+    if (value < 0) {
+      0
+    } else if (value > sourceLen) {
+      sourceLen
+    } else {
+      value
+    }
+  }
+  let candidates = [
+    clamp(offset),
+    clamp(offset - 1),
+    clamp(offset + 1),
+    clamp(offset - 2),
+    clamp(offset + 2),
+  ]
+  let rec loop = (remaining: List<Number>) =>
+    match (remaining) {
+      [] => None,
+      [candidate, ...rest] =>
+        match (findDefinitionAtOffset(graph, currentModulePath, source, candidate)) {
+          Some(found) => Some(found),
+          None => loop(rest),
+        },
+    }
+  loop(candidates)
 }
 
 let declHoverAtOffsetInDecl = (decl: SurfaceAst.Decl, offset: Number) =>

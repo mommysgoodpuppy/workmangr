@@ -8,6 +8,7 @@ from "string" include String
 
 from "../src/cli/lsp/layer1/symbol_service.gr" include SymbolService
 from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/source.gr" include Source
 
 setSourceFile("./tests/lsp_symbol_service_test.gr")
 
@@ -71,6 +72,105 @@ test("definition resolves import alias to target module", () => {
         None => fail("expected alias definition target"),
       },
     None => fail("expected alias use"),
+  }
+})
+
+test("definition resolves qualified alias member call", () => {
+  let entrySource = "from \"./dep\" import * as List; let x = List.at(1);"
+  let depSource = "let at = (x) => { x };"
+  let overrides = Map.make()
+  Map.set("entry.wm", entrySource, overrides)
+  Map.set("dep.wm", depSource, overrides)
+  let graph = graphFromOverrides("entry", overrides)
+
+  match (String.indexOf("at(1)", entrySource)) {
+    Some(offset) =>
+      match (SymbolService.findDefinitionAtOffset(graph, "entry.wm", entrySource, offset)) {
+        Some(found) => {
+          assertEquals("dep.wm", found.modulePath)
+          assertEquals("at", Source.slice(depSource, found.span))
+        },
+        None => fail("expected qualified member definition target"),
+      },
+    None => fail("expected qualified member use"),
+  }
+})
+
+test("definition resolves qualified alias at token edge offsets", () => {
+  let entrySource = "from \"./dep\" import * as List; let x = List.at(1);"
+  let depSource = "let at = (x) => { x };"
+  let overrides = Map.make()
+  Map.set("entry.wm", entrySource, overrides)
+  Map.set("dep.wm", depSource, overrides)
+  let graph = graphFromOverrides("entry", overrides)
+
+  match (String.indexOf("List.at", entrySource)) {
+    Some(base) => {
+      let listEdgeOffset = base + 4
+      let atEdgeOffset = base + 7
+      let listEdgeDef = SymbolService.findDefinitionAtOffset(graph, "entry.wm", entrySource, listEdgeOffset)
+      let atEdgeDef = SymbolService.findDefinitionAtOffset(graph, "entry.wm", entrySource, atEdgeOffset)
+      all([
+        match (listEdgeDef) {
+          Some(found) => assertEquals("dep.wm", found.modulePath),
+          None => fail("expected definition for List edge offset"),
+        },
+        match (atEdgeDef) {
+          Some(found) => assertEquals("dep.wm", found.modulePath),
+          None => fail("expected definition for at edge offset"),
+        },
+      ])
+    },
+    None => fail("expected List.at call"),
+  }
+})
+
+test("near-offset lookup resolves qualified member from punctuation-adjacent offset", () => {
+  let entrySource = "from \"./dep\" import * as List; let x = List.at(1);"
+  let depSource = "let at = (x) => { x };"
+  let overrides = Map.make()
+  Map.set("entry.wm", entrySource, overrides)
+  Map.set("dep.wm", depSource, overrides)
+  let graph = graphFromOverrides("entry", overrides)
+
+  match (String.indexOf("List.at(", entrySource)) {
+    Some(base) => {
+      let openParenOffset = base + 7
+      match (SymbolService.findDefinitionNearOffset(graph, "entry.wm", entrySource, openParenOffset)) {
+        Some(found) => assertEquals("dep.wm", found.modulePath),
+        None => fail("expected near-offset qualified member definition"),
+      }
+    },
+    None => fail("expected List.at call"),
+  }
+})
+
+test("qualified alias resolves to explicit std module when implicit prelude is present", () => {
+  let entrySource = "from \"std/list\" import * as List; let x = List.at(1);"
+  let preludeSource = "export from \"std/coretypes\" type List(..); let preludeMarker = 1;"
+  let listSource = "let at = (x) => { x };"
+  let coreTypesSource = "export type List<T> = Empty | Link<T, List<T>>;"
+  let overrides = Map.make()
+  Map.set("entry.wm", entrySource, overrides)
+  Map.set("stdroot/prelude.wm", preludeSource, overrides)
+  Map.set("stdroot/list.wm", listSource, overrides)
+  Map.set("stdroot/coretypes.wm", coreTypesSource, overrides)
+  let graph = ModuleSystem.buildGraph(
+    "entry",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      stdRoots: ["stdroot"],
+      sourceOverrides: overrides,
+    }
+  )
+
+  match (String.indexOf("at(1)", entrySource)) {
+    Some(offset) =>
+      match (SymbolService.findDefinitionNearOffset(graph, "entry.wm", entrySource, offset)) {
+        Some(found) => assertEquals("stdroot/list.wm", found.modulePath),
+        None => fail("expected std list member definition target"),
+      },
+    None => fail("expected qualified member use"),
   }
 })
 

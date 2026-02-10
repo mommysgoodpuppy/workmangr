@@ -415,10 +415,10 @@ let rec typeInlaysFromExpr = (
 
 let typeInlaysFromLoweredProgram = (
   program: CoreAst.Program,
+  infer: Infer.InferState,
   rangeStart: Number,
   rangeEnd: Number,
 ) => {
-  let infer = Infer.inferProgram(program)
   List.flatten(List.map((item: CoreAst.TopItem) => match (item) {
     CoreAst.DeclGroup(group) =>
       List.flatten(List.map((decl: CoreAst.Decl) => match (decl) {
@@ -454,6 +454,16 @@ let typeInlaysFromLoweredProgram = (
       }, group.decls)),
     _ => [],
   }, program.items))
+}
+
+provide let typeInlayHintsFromLoweredProgram = (
+  program: CoreAst.Program,
+  infer: Infer.InferState,
+  rangeStart: Number,
+  rangeEnd: Number,
+) => {
+  let hints = typeInlaysFromLoweredProgram(program, infer, rangeStart, rangeEnd)
+  "[" ++ Array.join(",", Array.fromList(hints)) ++ "]"
 }
 
 let applyInsertionsToSource = (source: String, inserts: List<InsertChunk>) => {
@@ -1151,17 +1161,49 @@ let inlayHintsForSourceWithTiming = (
     debug("[LSP] preview:")
     debug(preview)
   }
-  // Keep type inlays available under recoverable parser diagnostics.
-  let lowered = Lower.lowerProgram(parsed.program)
-  let typeHints = typeInlaysFromLoweredProgram(lowered, rangeStart, rangeEnd)
-  let allHints = List.append(hints, typeHints)
-  let result = "[" ++ Array.join(",", Array.fromList(allHints)) ++ "]"
+  let result = "[" ++ Array.join(",", Array.fromList(hints)) ++ "]"
   let totalEnd = nowNs()
   maybeLogTiming(timingPrefix, "total", totalStart, totalEnd)
   result
 }
 
 provide let inlayHintsForSource = (
+  source: String,
+  rangeStart: Number,
+  rangeEnd: Number,
+  debug: (String) => Void,
+  escapeJson: (String) => String,
+  debugEnabled: Bool,
+) => {
+  // TODO(remove): legacy single-file inference path kept for inlay unit tests.
+  // LSP uses module-summary-backed type inlays via formatInlayHintsForSource + typeInlayHintsFromLoweredProgram.
+  let formatJson = inlayHintsForSourceWithTiming(
+    source,
+    rangeStart,
+    rangeEnd,
+    debug,
+    escapeJson,
+    debugEnabled,
+    None
+  )
+  Error.clearErrors()
+  Error.setPanicMode(false)
+  let parsed = Parser.parseResult(source)
+  let lowered = Lower.lowerProgram(parsed.program)
+  let infer = Infer.inferProgram(lowered)
+  let typeJson = typeInlayHintsFromLoweredProgram(lowered, infer, rangeStart, rangeEnd)
+  if (formatJson == "[]") {
+    typeJson
+  } else if (typeJson == "[]") {
+    formatJson
+  } else {
+    let leftInner = String.slice(1, end=String.length(formatJson) - 1, formatJson)
+    let rightInner = String.slice(1, end=String.length(typeJson) - 1, typeJson)
+    "[" ++ leftInner ++ "," ++ rightInner ++ "]"
+  }
+}
+
+provide let formatInlayHintsForSource = (
   source: String,
   rangeStart: Number,
   rangeEnd: Number,

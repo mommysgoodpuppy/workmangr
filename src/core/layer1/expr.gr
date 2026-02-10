@@ -36,16 +36,42 @@ provide let rec typeExprToType = (
   typeExpr: CoreAst.TypeExpr,
   paramMap: Map.Map<String, Types.Type>,
 ) => {
+  let primitiveByName = (name: String) => {
+    if (name == "Number") {
+      Some(Types.TNumber)
+    } else if (name == "Bool") {
+      Some(Types.TBool)
+    } else if (name == "String") {
+      Some(Types.TString)
+    } else if (name == "Byte") {
+      Some(Types.TByte)
+    } else if (name == "Char") {
+      Some(Types.TChar)
+    } else if (name == "Void") {
+      Some(Types.TVoid)
+    } else {
+      None
+    }
+  }
+
   match (typeExpr.kind) {
     CoreAst.Var(name) => match (Map.get(name.text, paramMap)) {
       Some(t) => t,
-      None => Types.TNominal(name.text, []),
+      None =>
+        match (primitiveByName(name.text)) {
+          Some(prim) => prim,
+          None => Types.TNominal(name.text, []),
+        },
     },
     CoreAst.Ref(name, args) =>
       if (args == []) {
         match (Map.get(name.text, paramMap)) {
           Some(t) => t,
-          None => Types.TNominal(name.text, []),
+          None =>
+            match (primitiveByName(name.text)) {
+              Some(prim) => prim,
+              None => Types.TNominal(name.text, []),
+            },
         }
       } else {
         Types.TNominal(

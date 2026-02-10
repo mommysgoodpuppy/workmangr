@@ -13,6 +13,21 @@ let joinStrings = (sep: String, strs: List<String>) => match (strs) {
   [x, ...xs] => List.reduce((acc, s) => acc ++ sep ++ s, x, xs),
 }
 
+let reverse = (items) => {
+  let mut out = []
+  let mut rest = items
+  while (rest != []) {
+    match (rest) {
+      [] => void,
+      [x, ...xs] => {
+        out = [x, ...out]
+        rest = xs
+      },
+    }
+  }
+  out
+}
+
 let typeDebugEnabled = match (Process.env()) {
   Ok(vars) => List.some((entry: String) => {
     entry == "WORKMAN_INFER_DEBUG=1" || entry == "WORKMAN_INFER_DEBUG=true"
@@ -75,35 +90,80 @@ let typeVarLabel = (id: Number) => {
   }
 }
 
-provide let rec typeToString = (t: Type) => match (t) {
-  TNumber => "Number",
-  TBool => "Bool",
-  TString => "String",
-  TByte => "Byte",
-  TChar => "Char",
-  TVoid => "Void",
-  THole(id) => "?[" ++ toString(id) ++ "]",
-  TVar(id) => typeVarLabel(id),
-  TFun(a, b) => {
-    let left = match (a) {
-      TFun(_, _) => "(" ++ typeToString(a) ++ ")",
-      _ => typeToString(a),
+let maxTypeStringDepth = 96
+let maxTypeStringItems = 256
+
+let rec typeToStringDepth = (t: Type, depthLeft: Number) => {
+  if (depthLeft <= 0) {
+    "..."
+  } else {
+    match (t) {
+      TNumber => "Number",
+      TBool => "Bool",
+      TString => "String",
+      TByte => "Byte",
+      TChar => "Char",
+      TVoid => "Void",
+      THole(id) => "?[" ++ toString(id) ++ "]",
+      TVar(id) => typeVarLabel(id),
+      TFun(a, b) => {
+        let left = match (a) {
+          TFun(_, _) => "(" ++ typeToStringDepth(a, depthLeft - 1) ++ ")",
+          _ => typeToStringDepth(a, depthLeft - 1),
+        }
+        left ++ " -> " ++ typeToStringDepth(b, depthLeft - 1)
+      },
+      TTuple(items) => {
+        let mut renderedRev = []
+        let mut rest = items
+        let mut count = 0
+        while (rest != [] && count < maxTypeStringItems) {
+          match (rest) {
+            [] => void,
+            [item, ...xs] => {
+              renderedRev = [typeToStringDepth(item, depthLeft - 1), ...renderedRev]
+              rest = xs
+              count += 1
+            },
+          }
+        }
+        let rendered = if (rest == []) {
+          reverse(renderedRev)
+        } else {
+          reverse(["...", ...renderedRev])
+        }
+        "(" ++ joinStrings(", ", rendered) ++ ")"
+      },
+      TNominal(name, args) => {
+        if (args == []) {
+          name
+        } else {
+          let mut renderedRev = []
+          let mut rest = args
+          let mut count = 0
+          while (rest != [] && count < maxTypeStringItems) {
+            match (rest) {
+              [] => void,
+              [arg, ...xs] => {
+                renderedRev = [typeToStringDepth(arg, depthLeft - 1), ...renderedRev]
+                rest = xs
+                count += 1
+              },
+            }
+          }
+          let rendered = if (rest == []) {
+            reverse(renderedRev)
+          } else {
+            reverse(["...", ...renderedRev])
+          }
+          name ++ "<" ++ joinStrings(", ", rendered) ++ ">"
+        }
+      },
     }
-    left ++ " -> " ++ typeToString(b)
-  },
-  TTuple(items) => {
-    let parts = List.map(typeToString, items)
-    "(" ++ joinStrings(", ", parts) ++ ")"
-  },
-  TNominal(name, args) => {
-    if (args == []) {
-      name
-    } else {
-      let rendered = List.map(typeToString, args)
-      name ++ "<" ++ joinStrings(", ", rendered) ++ ">"
-    }
-  },
+  }
 }
+
+provide let typeToString = (t: Type) => typeToStringDepth(t, maxTypeStringDepth)
 
 let containsVar = (vars: List<Number>, target: Number) => {
   let mut rest = vars
@@ -175,18 +235,43 @@ let dedupeVars = (vars: List<Number>) => {
   List.reverse(outRev)
 }
 
-let rec freeVars = (t: Type) => match (t) {
-  TNumber => [],
-  TBool => [],
-  TString => [],
-  TByte => [],
-  TChar => [],
-  TVoid => [],
-  THole(_) => [],
-  TVar(id) => [id],
-  TFun(a, b) => List.append(freeVars(a), freeVars(b)),
-  TTuple(items) => List.flatten(List.map(freeVars, items)),
-  TNominal(_, args) => List.flatten(List.map(freeVars, args)),
+let freeVars = (t: Type) => {
+  let out = Map.make()
+  let mut stack: List<Type> = [t]
+  while (stack != []) {
+    match (stack) {
+      [] => void,
+      [current, ...rest] => {
+        stack = rest
+        match (current) {
+          TNumber => void,
+          TBool => void,
+          TString => void,
+          TByte => void,
+          TChar => void,
+          TVoid => void,
+          THole(_) => void,
+          TVar(id) => {
+            Map.set(id, true, out)
+            void
+          },
+          TFun(a, b) => {
+            stack = [a, ...stack]
+            stack = [b, ...stack]
+          },
+          TTuple(items) =>
+            List.forEach((item: Type) => {
+              stack = [item, ...stack]
+            }, items),
+          TNominal(_name, args) =>
+            List.forEach((item: Type) => {
+              stack = [item, ...stack]
+            }, args),
+        }
+      },
+    }
+  }
+  List.map(((id, _)) => id, Map.toList(out))
 }
 
 let rec applySubstType = (subst: Subst, t: Type) => {

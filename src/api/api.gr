@@ -9,7 +9,10 @@ from "fs" include Fs
 from "path" include Path
 
 from "../core/surface_ast.gr" include SurfaceAst
+from "../core/core_ast.gr" include CoreAst
 from "../core/analysis.gr" include Analysis
+from "../core/infer.gr" include Infer
+from "../core/constraints.gr" include Constraints
 from "../core/types.gr" include Types
 from "../core/source.gr" include Source
 from "../core/error.gr" include Error
@@ -406,19 +409,107 @@ let programToJson = (program: SurfaceAst.Program) => {
 let nodeTypesToJson = (nodeTypes: Map.Map<Number, Types.Type>) => {
   let pairs = Map.toList(nodeTypes)
   let items = List.map(((id, ty)) => {
-    let typeStr = Types.typeToString(ty)
+    let typeStr = Types.typeToReadableString(ty)
     "{\"id\":" ++ toString(id) ++ ",\"type\":\"" ++ escapeJson(typeStr) ++ "\"}"
   }, pairs)
   "[" ++ joinStrings(",", items) ++ "]"
 }
 
-let topBindingsToJson = (bindings: Map.Map<String, Types.Scheme>) => {
+let quantifiersToJson = (quantifiers: List<Number>) =>
+  "[" ++ joinStrings(",", List.map((id) => toString(id), quantifiers)) ++ "]"
+
+let topBindingsToJson = (bindings: Map.Map<String, Types.Scheme>, subst: Types.Subst) => {
   let pairs = Map.toList(bindings)
-  let items = List.map(((name, _scheme)) => {
-    "{\"name\":\"" ++ escapeJson(name) ++ "\",\"type\":\"<inferred>\"}"
+  let items = List.map((pair: (String, Types.Scheme)) => {
+    let (name, scheme) = pair
+    let applied = Types.applySubstType(subst, scheme.ty)
+    let typeStr = Types.typeToReadableString(applied)
+    "{\"name\":\""
+      ++ escapeJson(name)
+      ++ "\",\"type\":\""
+      ++ escapeJson(typeStr)
+      ++ "\",\"quantifiers\":"
+      ++ quantifiersToJson(scheme.quantifiers)
+      ++ "}"
   }, pairs)
   "[" ++ joinStrings(",", items) ++ "]"
 }
+
+let originToJson = (origin: Constraints.Origin) =>
+  "{\"nodeId\":"
+    ++ toString(origin.nodeId)
+    ++ ",\"description\":\""
+    ++ escapeJson(origin.description)
+    ++ "\"}"
+
+let constraintToJson = (constraint: Constraints.Constraint) => match (constraint) {
+  Constraints.Equality(left, right, origin) =>
+    "{\"kind\":\"Equality\",\"left\":\""
+      ++ escapeJson(Types.typeToReadableString(left))
+      ++ "\",\"right\":\""
+      ++ escapeJson(Types.typeToReadableString(right))
+      ++ "\",\"origin\":"
+      ++ originToJson(origin)
+      ++ "}",
+  Constraints.Domain(label, origin) =>
+    "{\"kind\":\"Domain\",\"label\":\""
+      ++ escapeJson(label)
+      ++ "\",\"origin\":"
+      ++ originToJson(origin)
+      ++ "}",
+}
+
+let constraintsToJson = (constraints: List<Constraints.Constraint>) =>
+  "[" ++ joinStrings(",", List.map(constraintToJson, constraints)) ++ "]"
+
+let typeMarkReasonToString = (reason: Infer.TypeMarkReason) => match (reason) {
+  Infer.TypeMismatch => "TypeMismatch",
+  Infer.OccursCycle => "OccursCycle",
+  Infer.UnknownIdentifier => "UnknownIdentifier",
+  Infer.UnfillableHole => "UnfillableHole",
+  Infer.Internal => "Internal",
+}
+
+let markTagToJson = (mark: CoreAst.Mark) => match (mark) {
+  CoreAst.FreeVar(name) =>
+    "{\"kind\":\"FreeVar\",\"text\":\"" ++ escapeJson(name.text) ++ "\"}",
+  CoreAst.NotFunction =>
+    "{\"kind\":\"NotFunction\",\"text\":\"\"}",
+  CoreAst.OccursCheck =>
+    "{\"kind\":\"OccursCheck\",\"text\":\"\"}",
+  CoreAst.Inconsistent =>
+    "{\"kind\":\"Inconsistent\",\"text\":\"\"}",
+  CoreAst.UnsupportedExpr =>
+    "{\"kind\":\"UnsupportedExpr\",\"text\":\"\"}",
+  CoreAst.UnfillableHole =>
+    "{\"kind\":\"UnfillableHole\",\"text\":\"\"}",
+  CoreAst.PatternError =>
+    "{\"kind\":\"PatternError\",\"text\":\"\"}",
+  CoreAst.TypeExprUnknown =>
+    "{\"kind\":\"TypeExprUnknown\",\"text\":\"\"}",
+  CoreAst.TypeExprArity =>
+    "{\"kind\":\"TypeExprArity\",\"text\":\"\"}",
+  CoreAst.TypeExprUnsupported =>
+    "{\"kind\":\"TypeExprUnsupported\",\"text\":\"\"}",
+  CoreAst.Internal(text) =>
+    "{\"kind\":\"Internal\",\"text\":\"" ++ escapeJson(text) ++ "\"}",
+}
+
+let typeMarkToJson = (entry: Infer.TypeMark) =>
+  "{\"reason\":\""
+    ++ typeMarkReasonToString(entry.reason)
+    ++ "\",\"message\":\""
+    ++ escapeJson(entry.message)
+    ++ "\",\"origin\":"
+    ++ originToJson(entry.origin)
+    ++ ",\"related\":["
+    ++ joinStrings(",", List.map(originToJson, entry.related))
+    ++ "],\"mark\":"
+    ++ markTagToJson(entry.mark)
+    ++ "}"
+
+let typeMarksToJson = (marks: List<Infer.TypeMark>) =>
+  "[" ++ joinStrings(",", List.map(typeMarkToJson, marks)) ++ "]"
 
 let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
   "{\"kind\":\""
@@ -628,8 +719,12 @@ provide let compileToJson = (source: String) => {
 
   // Lower
   let lowered = Lower.lowerProgram(parsed)
+  let inferLayer1 = Infer.inferProgramLayer1(lowered)
+  let inferLayer2 = Infer.inferProgramLayer2(inferLayer1)
   let diagnostics = Error.getErrors()
   let markedDiagnostics = Error.getMarkedErrors()
+  let nodeSpans = Analysis.buildNodeSpans(lowered)
+  let typeDiagnostics = Analysis.typeInferenceDiagnostics(inferLayer2.marks, nodeSpans)
   Error.clearErrors()
   let formattedResult = Formatter.formatResultWithProgramMode(
     parsed,
@@ -681,7 +776,10 @@ provide let compileToJson = (source: String) => {
     diagnostics,
     List.append(
       formatterDiagnostics,
-      List.append(virtualDiagnostics, fixDiagnostics)
+      List.append(
+        virtualDiagnostics,
+        List.append(fixDiagnostics, typeDiagnostics)
+      )
     )
   )
   let allMarked = List.append(
@@ -722,6 +820,21 @@ provide let compileToJson = (source: String) => {
     ++ opaqueSpansToJson(realFixOpaqueSpans)
     ++ ",\"formattedVirtualArtifacts\":"
     ++ virtualArtifactsToJson(virtualResult.virtualArtifacts)
+    ++ ",\"typeDebug\":{\"layer1\":{\"constraints\":"
+    ++ constraintsToJson(List.reverse(inferLayer1.constraints))
+    ++ ",\"nodeTypes\":"
+    ++ nodeTypesToJson(inferLayer1.nodeTypes)
+    ++ ",\"marks\":"
+    ++ typeMarksToJson(List.reverse(inferLayer1.marks))
+    ++ "},\"layer2\":{\"constraints\":"
+    ++ constraintsToJson(List.reverse(inferLayer2.constraints))
+    ++ ",\"nodeTypes\":"
+    ++ nodeTypesToJson(inferLayer2.nodeTypes)
+    ++ ",\"topBindings\":"
+    ++ topBindingsToJson(inferLayer2.topBindings, inferLayer2.subst)
+    ++ ",\"marks\":"
+    ++ typeMarksToJson(List.reverse(inferLayer2.marks))
+    ++ "}}"
     ++ "}"
 }
 

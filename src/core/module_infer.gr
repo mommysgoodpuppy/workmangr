@@ -116,11 +116,30 @@ let collectImportedEnv = (
   summaries: Map.Map<String, ModuleSummary>,
 ) => {
   let env = Map.make()
+  let providerValues = (summary: ModuleSummary) => {
+    let explicit = Map.toList(summary.valueExports)
+    if (List.length(explicit) > 0) {
+      summary.valueExports
+    } else {
+      summary.infer.topBindings
+    }
+  }
   let importDecls = List.filterMap((item: CoreAst.TopItem) =>
     match (item) {
       CoreAst.Import(importDecl) => Some(importDecl),
       _ => None,
     }, lowered.items)
+  let applyWildcardImport = (providerPath: String) => {
+    match (Map.get(providerPath, summaries)) {
+      Some(summary) => {
+        let values = providerValues(summary)
+        List.forEach(((name, scheme)) => {
+          Map.set(name, scheme, env)
+        }, Map.toList(values))
+      },
+      None => void,
+    }
+  }
   let rec loop = (
     remainingImports: List<CoreAst.ImportDecl>,
     remainingPaths: List<String>,
@@ -128,19 +147,20 @@ let collectImportedEnv = (
     match ((remainingImports, remainingPaths)) {
       ([], []) => void,
       ([], [providerPath, ...pathRest]) => {
-        match (Map.get(providerPath, summaries)) {
-          Some(summary) =>
-            List.forEach(((name, scheme)) => {
-              Map.set(name, scheme, env)
-            }, Map.toList(summary.valueExports)),
-          None => void,
-        }
+        applyWildcardImport(providerPath)
         loop([], pathRest)
       },
       (_, []) => void,
       ([importDecl, ...importRest], [providerPath, ...pathRest]) => {
+        if (List.length(remainingPaths) > List.length(remainingImports)) {
+          // Extra provider paths come from implicit imports (e.g. std/prelude).
+          // They have no corresponding source import declaration.
+          applyWildcardImport(providerPath)
+          loop(remainingImports, pathRest)
+        } else {
         match (Map.get(providerPath, summaries)) {
           Some(summary) => {
+            let values = providerValues(summary)
             if (importDecl.names != []) {
               List.forEach((item: CoreAst.ImportName) => {
                 let exportedName = item.name.text
@@ -148,7 +168,7 @@ let collectImportedEnv = (
                   Some(aliasName) => aliasName.text,
                   None => exportedName,
                 }
-                match (Map.get(exportedName, summary.valueExports)) {
+                match (Map.get(exportedName, values)) {
                   Some(scheme) => Map.set(localName, scheme, env),
                   None => void,
                 }
@@ -159,17 +179,18 @@ let collectImportedEnv = (
                   List.forEach(((name, scheme)) => {
                     let qualified = alias.text ++ "." ++ name
                     Map.set(qualified, scheme, env)
-                  }, Map.toList(summary.valueExports)),
+                  }, Map.toList(values)),
                 None =>
                   List.forEach(((name, scheme)) => {
                     Map.set(name, scheme, env)
-                  }, Map.toList(summary.valueExports)),
+                  }, Map.toList(values)),
               }
             }
           },
           None => void,
         }
         loop(importRest, pathRest)
+        }
       },
     }
   }
@@ -214,37 +235,38 @@ let buildOwnExports = (
   let types = Map.make()
   let allValues = Env.snapshotValues(infer.env)
   let (explicitValueNames, explicitTypeNames) = collectExplicitExports(lowered)
-  let hasExplicit =
-    List.length(Map.toList(explicitValueNames)) > 0
-      || List.length(Map.toList(explicitTypeNames)) > 0
+  let explicitValueList = List.map(((name, _)) => name, Map.toList(explicitValueNames))
+  let explicitTypeList = List.map(((name, _)) => name, Map.toList(explicitTypeNames))
 
-  if (hasExplicit) {
+  // Keep value exports permissive unless there is an explicit value export list.
+  // This prevents `export from "...\" type ...` from accidentally suppressing `export let ...`.
+  if (List.length(explicitValueList) > 0) {
     List.forEach((name: String) => {
       match (Map.get(name, allValues)) {
         Some(scheme) => Map.set(name, scheme, values),
         None => void,
       }
-    }, List.map(((name, _)) => name, Map.toList(explicitValueNames)))
-
-    List.forEach((typeName: String) => {
-      match (Env.lookupType(infer.env, typeName)) {
-        Some(typeInfo) => {
-          Map.set(typeName, typeInfo, types)
-          List.forEach((ctor: Env.ConstructorInfo) => {
-            match (Map.get(ctor.name, allValues)) {
-              Some(scheme) => Map.set(ctor.name, scheme, values),
-              None => void,
-            }
-          }, typeInfo.constructors)
-        },
-        None => void,
-      }
-    }, List.map(((name, _)) => name, Map.toList(explicitTypeNames)))
+    }, explicitValueList)
   } else {
     List.forEach(((name, scheme)) => {
       Map.set(name, scheme, values)
     }, Map.toList(infer.topBindings))
   }
+
+  List.forEach((typeName: String) => {
+    match (Env.lookupType(infer.env, typeName)) {
+      Some(typeInfo) => {
+        Map.set(typeName, typeInfo, types)
+        List.forEach((ctor: Env.ConstructorInfo) => {
+          match (Map.get(ctor.name, allValues)) {
+            Some(scheme) => Map.set(ctor.name, scheme, values),
+            None => void,
+          }
+        }, typeInfo.constructors)
+      },
+      None => void,
+    }
+  }, explicitTypeList)
 
   (values, types)
 }
@@ -281,7 +303,15 @@ let typeInfoSignature = (info: Env.TypeInfo) => {
     ",",
     Array.fromList(List.map((ctor: Env.ConstructorInfo) => ctor.name, info.constructors))
   )
-  info.name ++ "<" ++ typeParams ++ ">[" ++ ctors ++ "]"
+  let fields = match (info.recordFields) {
+    None => "",
+    Some(items) =>
+      Array.join(
+        ",",
+        Array.fromList(List.map(((name, _ty): (CoreAst.Name, CoreAst.TypeExpr)) => name.text, items))
+      ),
+  }
+  info.name ++ "<" ++ typeParams ++ ">[" ++ ctors ++ "]{" ++ fields ++ "}"
 }
 
 let exportSignature = (summary: ModuleSummary) => {

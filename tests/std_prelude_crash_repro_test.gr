@@ -1,0 +1,73 @@
+module StdPreludeCrashReproTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "array" include Array
+from "list" include List
+from "map" include Map
+from "string" include String
+from "wasi/process" include Process
+
+from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/module/module_system.gr" include ModuleSystem
+
+setSourceFile("./tests/std_prelude_crash_repro_test.gr")
+
+let envLookup = (name: String) => {
+  match (Process.env()) {
+    Err(_) => None,
+    Ok(vars) => {
+      let prefix = name ++ "="
+      let prefixLen = String.length(prefix)
+      Array.reduce((acc, entry) => {
+        match (acc) {
+          Some(_) => acc,
+          None => if (String.startsWith(prefix, entry)) {
+            Some(String.slice(prefixLen, entry))
+          } else {
+            None
+          },
+        }
+      }, None, vars)
+    },
+  }
+}
+
+let defaultStdRoot = "/Users/profilence/git/workman/std"
+
+test("real std prelude path no longer crashes inference", () => {
+  let stdRoot = match (envLookup("WORKMAN_STD_ROOT")) {
+    Some(path) => path,
+    None => defaultStdRoot,
+  }
+  // Regression target: this used to crash in Types.freeVars during occurs-check.
+  let result = ModuleInfer.inferEntry(
+    "simple",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: ".",
+      stdRoots: [stdRoot],
+    }
+  )
+  assertTrue(Map.get(result.graph.entry, result.modules) != None)
+})
+
+test("aoc2016/1 module graph inference does not crash", () => {
+  let stdRoot = match (envLookup("WORKMAN_STD_ROOT")) {
+    Some(path) => path,
+    None => defaultStdRoot,
+  }
+  let result = ModuleInfer.inferEntry(
+    "/Users/profilence/git/workman/aoc2016/1",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: ".",
+      stdRoots: [stdRoot],
+    }
+  )
+  assertTrue(Map.get(result.graph.entry, result.modules) != None)
+})
+
+let results = runTests()
+printResultsAndExit(results)

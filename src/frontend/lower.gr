@@ -2,7 +2,9 @@ module Lower
 
 from "../core/surface_ast.gr" include SurfaceAst
 from "../core/core_ast.gr" include CoreAst
+from "char" include Char
 from "list" include List
+from "string" include String
 from "../core/error.gr" include Error
 
 let lowerNode = (node: SurfaceAst.Node) =>
@@ -46,6 +48,40 @@ let makeExpr = (node: SurfaceAst.Node, kind: CoreAst.ExprKind) =>
 let makeIdentExpr = (node: SurfaceAst.Node, text: String) => {
   let name: CoreAst.Name = { node: lowerNode(node), text }
   makeExpr(node, CoreAst.Ident(name))
+}
+
+let isLikelyModuleQualifier = (text: String) => {
+  if (String.length(text) == 0) {
+    false
+  } else {
+    let first = String.charAt(0, text)
+    first == 'A'
+      || first == 'B'
+      || first == 'C'
+      || first == 'D'
+      || first == 'E'
+      || first == 'F'
+      || first == 'G'
+      || first == 'H'
+      || first == 'I'
+      || first == 'J'
+      || first == 'K'
+      || first == 'L'
+      || first == 'M'
+      || first == 'N'
+      || first == 'O'
+      || first == 'P'
+      || first == 'Q'
+      || first == 'R'
+      || first == 'S'
+      || first == 'T'
+      || first == 'U'
+      || first == 'V'
+      || first == 'W'
+      || first == 'X'
+      || first == 'Y'
+      || first == 'Z'
+  }
 }
 
 let makeUnitExpr = (node: SurfaceAst.Node) =>
@@ -303,7 +339,8 @@ and lowerPostfix = (node: SurfaceAst.Node, pf: SurfaceAst.Postfix) => {
       [SurfaceAst.Project(name), ...rest] => {
         match (currentExpr.kind) {
           // Module-style qualification: List.at => Ident("List.at")
-          CoreAst.Ident(base) => {
+          // Record projection remains `project(recordExpr, "field")`.
+          CoreAst.Ident(base) when isLikelyModuleQualifier(base.text) => {
             let qualifiedName = {
               node: lowerNode(name.node),
               text: base.text ++ "." ++ name.text,

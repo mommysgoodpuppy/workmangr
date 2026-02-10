@@ -43,6 +43,7 @@ provide let prepareTypeDecl = (
     name: typeName,
     typeParams,
     constructors,
+    recordFields: None,
     infection,
   }
 
@@ -64,4 +65,16 @@ provide let prepareTypeDecl = (
   }, constructors)
 
   { info, constructorSchemes, nextVar }: PreparedTypeDecl
+}
+
+provide let prepareRecordDecl = (decl: CoreAst.RecordDecl) => {
+  let typeName = decl.name.text
+  let typeParams = List.map((name: CoreAst.Name) => name.text, decl.typeParams)
+  {
+    name: typeName,
+    typeParams,
+    constructors: [],
+    recordFields: Some(decl.fields),
+    infection: None,
+  }: Env.TypeInfo
 }

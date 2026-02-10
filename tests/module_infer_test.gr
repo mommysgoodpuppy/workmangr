@@ -186,5 +186,70 @@ test("std core int module typechecks native arithmetic builtins", () => {
   assertFalse(hasNativeUnknown)
 })
 
+test("star import alias resolves qualified module member calls", () => {
+  let overrides = Map.make()
+  Map.set(
+    "list.wm",
+    "export let at = (pair) => { 1 };",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./list\" import * as List;\nlet pick = (xs) => { List.at((xs, 0)) };",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let pickScheme = match (Map.get("pick", entry.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing pick binding"),
+  }
+  let hasUnknownListAt = List.some(
+    (diag: Error.CompilerError) =>
+      String.contains("unknown identifier List.at", diag.message),
+    entry.diagnostics
+  )
+  let returnsNumber = match (pickScheme.ty) {
+    Types.TFun(_, Types.TNumber) => true,
+    _ => false,
+  }
+  all([assertFalse(hasUnknownListAt), assertTrue(returnsNumber)])
+})
+
+test("type-only reexport does not suppress value exports", () => {
+  let overrides = Map.make()
+  Map.set(
+    "coretypes.wm",
+    "export type IResult<T, E> = IOk(T) | IErr(E);",
+    overrides
+  )
+  Map.set(
+    "result.wm",
+    "from \"./coretypes\" import { IOk, IErr };\nexport from \"./coretypes\" type IResult(..);\nexport let stripErr = match(in) => {\n  IOk(value) => { value },\n  IErr(_) => { 0 }\n};",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./result\" import { stripErr };\nlet v = stripErr(IOk(1));",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let hasUnknownStripErr = List.some(
+    (diag: Error.CompilerError) =>
+      String.contains("unknown identifier stripErr", diag.message),
+    entry.diagnostics
+  )
+  assertFalse(hasUnknownStripErr)
+})
+
 let results = runTests()
 printResultsAndExit(results)

@@ -277,6 +277,303 @@ let bindVar = (
   }
 }
 
+let findRecordFieldType = (
+  fields: List<(String, Types.Type)>,
+  fieldName: String,
+) => {
+  let rec loop = (remaining: List<(String, Types.Type)>) =>
+    match (remaining) {
+      [] => None,
+      [(name, fieldTy), ...rest] =>
+        if (name == fieldName) {
+          Some(fieldTy)
+        } else {
+          loop(rest)
+        },
+    }
+  loop(fields)
+}
+
+let resolveNominalRecordFields = (
+  typeName: String,
+  args: List<Types.Type>,
+  state: InferState,
+) => {
+  match (Env.lookupType(state.env, typeName)) {
+    Some(typeInfo) =>
+      match (typeInfo.recordFields) {
+        None => None,
+        Some(recordFields) => {
+          let paramMap = Map.make()
+          let rec bindParams = (
+            params: List<String>,
+            values: List<Types.Type>,
+          ) => match ((params, values)) {
+            ([paramName, ...paramRest], [argType, ...argRest]) => {
+              Map.set(paramName, argType, paramMap)
+              bindParams(paramRest, argRest)
+            },
+            _ => void,
+          }
+          bindParams(typeInfo.typeParams, args)
+          Some(
+            List.map(
+              ((fieldName, fieldTypeExpr): (CoreAst.Name, CoreAst.TypeExpr)) =>
+                (fieldName.text, Layer1Expr.typeExprToType(fieldTypeExpr, paramMap)),
+              recordFields
+            )
+          )
+        },
+      },
+    None => None,
+  }
+}
+
+record NominalRecordCandidate {
+  typeName: String,
+  nominalType: Types.Type,
+  fields: List<(String, Types.Type)>,
+}
+
+let hasRecordField = (fields: List<(String, Types.Type)>, fieldName: String) =>
+  match (findRecordFieldType(fields, fieldName)) {
+    Some(_) => true,
+    None => false,
+  }
+
+let inferNominalRecordContext = (
+  literalNodeId: Number,
+  providedFields: List<(String, Types.Type)>,
+  state: InferState,
+  unifyFn: (Types.Type, Types.Type, Constraints.Origin, InferState) => InferState,
+) => {
+  let rec buildCandidates = (
+    remaining: List<(String, Env.TypeInfo)>,
+    nextVar: Number,
+    acc: List<NominalRecordCandidate>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(acc), nextVar),
+      [(_name, info), ...rest] =>
+        match (info.recordFields) {
+          None => buildCandidates(rest, nextVar, acc),
+          Some(_recordFields) => {
+            let (paramTypes, _paramMap, nextVar1) = Layer1Expr.instantiateTypeParams(
+              info.typeParams,
+              nextVar
+            )
+            let nominalType = Types.TNominal(info.name, paramTypes)
+            match (resolveNominalRecordFields(info.name, paramTypes, state)) {
+              Some(fields) => {
+                let candidate: NominalRecordCandidate = {
+                  typeName: info.name,
+                  nominalType,
+                  fields,
+                }
+                buildCandidates(rest, nextVar1, [candidate, ...acc])
+              },
+              None => buildCandidates(rest, nextVar1, acc),
+            }
+          },
+        },
+    }
+  let (allCandidates, nextVarAfterCandidates) = buildCandidates(
+    Map.toList(state.env.types),
+    state.nextVar,
+    [],
+  )
+  let state1 = { ...state, nextVar: nextVarAfterCandidates }
+  let rec filterByProvided = (
+    candidates: List<NominalRecordCandidate>,
+    acc: List<NominalRecordCandidate>,
+  ) =>
+    match (candidates) {
+      [] => List.reverse(acc),
+      [candidate, ...rest] => {
+        let allKnown = List.every(
+          ((fieldName, _fieldType)) => hasRecordField(candidate.fields, fieldName),
+          providedFields
+        )
+        if (allKnown) {
+          filterByProvided(rest, [candidate, ...acc])
+        } else {
+          filterByProvided(rest, acc)
+        }
+      },
+    }
+  let candidates = filterByProvided(allCandidates, [])
+  match (candidates) {
+    [] => {
+      let holeTy = Types.THole(literalNodeId)
+      let marked = addTypeMark(
+        state1,
+        TypeMismatch,
+        originForNode(literalNodeId, "record literal context"),
+        CoreAst.Inconsistent,
+        "Type error: record literal requires nominal type context"
+      )
+      (holeTy, marked)
+    },
+    [candidate] => {
+      let rec unifyProvided = (
+        remaining: List<(String, Types.Type)>,
+        st: InferState,
+      ) =>
+        match (remaining) {
+          [] => st,
+          [(fieldName, fieldType), ...rest] =>
+            match (findRecordFieldType(candidate.fields, fieldName)) {
+                  Some(expectedType) =>
+                    unifyProvided(
+                      rest,
+                      unifyFn(
+                        fieldType,
+                        expectedType,
+                        originForNode(literalNodeId, "record literal field"),
+                        st
+                  )
+                ),
+              None =>
+                unifyProvided(
+                  rest,
+                  addTypeMark(
+                    st,
+                    TypeMismatch,
+                    originForNode(literalNodeId, "record literal field"),
+                    CoreAst.Inconsistent,
+                    "Type error: unknown record field " ++ fieldName
+                  )
+                ),
+            },
+        }
+      let st2 = unifyProvided(providedFields, state1)
+      let rec markMissingFields = (
+        remaining: List<(String, Types.Type)>,
+        st: InferState,
+      ) =>
+        match (remaining) {
+          [] => st,
+          [(expectedName, _), ...rest] =>
+            if (
+              List.some(
+                ((providedName, _)) => providedName == expectedName,
+                providedFields
+              )
+            ) {
+              markMissingFields(rest, st)
+            } else {
+              markMissingFields(
+                rest,
+                addTypeMark(
+                  st,
+                  TypeMismatch,
+                  originForNode(literalNodeId, "record literal missing field"),
+                  CoreAst.Inconsistent,
+                  "Type error: missing record field " ++ expectedName
+                )
+              )
+            },
+        }
+      let st3 = markMissingFields(candidate.fields, st2)
+      (candidate.nominalType, st3)
+    },
+    _ => {
+      let holeTy = Types.THole(literalNodeId)
+      let marked = addTypeMark(
+        state1,
+        TypeMismatch,
+        originForNode(literalNodeId, "record literal ambiguous context"),
+        CoreAst.Inconsistent,
+        "Type error: record literal has ambiguous nominal context"
+      )
+      (holeTy, marked)
+    },
+  }
+}
+
+let validateRecordLiteralAgainstNominal = (
+  literalNodeId: Number,
+  fields: List<(String, Types.Type)>,
+  expectedType: Types.Type,
+  state: InferState,
+  unifyFn: (Types.Type, Types.Type, Constraints.Origin, InferState) => InferState,
+) =>
+  match (apply(state, expectedType)) {
+    Types.TNominal(typeName, typeArgs) =>
+      match (resolveNominalRecordFields(typeName, typeArgs, state)) {
+        Some(nominalFields) => {
+          let hasProvidedField = (fieldName: String) =>
+            List.some(((name, _ty)) => name == fieldName, fields)
+          let rec unifyFields = (
+            remaining: List<(String, Types.Type)>,
+            st: InferState,
+          ) =>
+            match (remaining) {
+              [] => st,
+              [(name, litTy), ...rest] =>
+                match (findRecordFieldType(nominalFields, name)) {
+                  Some(nominalTy) =>
+                    unifyFields(
+                      rest,
+                      unifyFn(
+                        litTy,
+                        nominalTy,
+                        originForNode(literalNodeId, "record field"),
+                        st
+                      )
+                    ),
+                  None =>
+                    addTypeMark(
+                      st,
+                      TypeMismatch,
+                      originForNode(literalNodeId, "record literal field"),
+                      CoreAst.Inconsistent,
+                      "Type error: unknown record field " ++ name
+                    ),
+                },
+            }
+          let state1 = unifyFields(fields, state)
+          let rec markMissingFields = (
+            remaining: List<(String, Types.Type)>,
+            st: InferState,
+          ) =>
+            match (remaining) {
+              [] => st,
+              [(name, _ty), ...rest] =>
+                if (hasProvidedField(name)) {
+                  markMissingFields(rest, st)
+                } else {
+                  let st1 = addTypeMark(
+                    st,
+                    TypeMismatch,
+                    originForNode(literalNodeId, "record literal field"),
+                    CoreAst.Inconsistent,
+                    "Type error: missing record field " ++ name
+                  )
+                  markMissingFields(rest, st1)
+                },
+            }
+          markMissingFields(nominalFields, state1)
+        },
+        None =>
+          addTypeMark(
+            state,
+            TypeMismatch,
+            originForNode(literalNodeId, "record literal annotation"),
+            CoreAst.Inconsistent,
+            "Type error: record literal requires nominal type context"
+          ),
+      },
+    _ =>
+      addTypeMark(
+        state,
+        TypeMismatch,
+        originForNode(literalNodeId, "record literal annotation"),
+        CoreAst.Inconsistent,
+        "Type error: record literal requires nominal type context"
+      ),
+  }
+
 let rec unify = (
   left: Types.Type,
   right: Types.Type,
@@ -733,23 +1030,271 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       (tRecorded, stFn)
     },
     CoreAst.Apply(callee, arg) => {
-      let (tCallee, state1) = inferExpr(callee, state)
-      let (tArg, state2) = inferExpr(arg, state1)
-      let (tRes, state3) = freshVar(state2)
-      let state4 = unifyForNode(
-        expr.node.id,
-        "function application",
-        tCallee,
-        Types.TFun(tArg, tRes),
-        state3
-      )
-      let state5 = match (callee.kind) {
-        CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, tArg, state4),
-        _ => state4,
+      match ((callee.kind, arg.kind)) {
+        (CoreAst.Apply(innerCallee, targetExpr), _) =>
+          match (innerCallee.kind) {
+            CoreAst.Ident(fnName) when fnName.text == "project" =>
+              match (arg.kind) {
+                CoreAst.Lit(CoreAst.Str(fieldName)) => {
+                  let (targetType, state1) = inferExpr(targetExpr, state)
+                  let (fieldType, state2) = freshVar(state1)
+                  let state3 = match (apply(state2, targetType)) {
+                    Types.TNominal(typeName, typeArgs) =>
+                      match (resolveNominalRecordFields(typeName, typeArgs, state2)) {
+                        Some(fields) =>
+                          match (findRecordFieldType(fields, fieldName)) {
+                            Some(existingType) =>
+                              unifyForNode(
+                                expr.node.id,
+                                "record projection field",
+                                fieldType,
+                                existingType,
+                                state2
+                              ),
+                            None =>
+                              addTypeMark(
+                                state2,
+                                TypeMismatch,
+                                originForNode(expr.node.id, "record projection missing field"),
+                                CoreAst.Inconsistent,
+                                "Type error: unknown record field " ++ fieldName
+                              ),
+                          },
+                        None =>
+                          addTypeMark(
+                            state2,
+                            TypeMismatch,
+                            originForNode(expr.node.id, "record projection nominal"),
+                            CoreAst.Inconsistent,
+                            "Type error: projection expects a nominal record value"
+                          ),
+                      },
+                    _ =>
+                      addTypeMark(
+                        state2,
+                        TypeMismatch,
+                        originForNode(expr.node.id, "record projection"),
+                        CoreAst.Inconsistent,
+                        "Type error: projection expects a nominal record value"
+                      ),
+                  }
+                  let resolved = apply(state3, fieldType)
+                  let tRecorded = recordNodeType(expr.node.id, resolved, state3)
+                  (tRecorded, state3)
+                },
+                _ => {
+                  let (tUnknown, state1) = freshVar(state)
+                  let state2 = addTypeMark(
+                    state1,
+                    TypeMismatch,
+                    originForNode(expr.node.id, "record projection field"),
+                    CoreAst.Inconsistent,
+                    "Type error: record projection expects string field name"
+                  )
+                  let tRecorded = recordNodeType(expr.node.id, tUnknown, state2)
+                  (tRecorded, state2)
+                },
+              },
+            _ => {
+              let (tCallee, state1) = inferExpr(callee, state)
+              let (tArg, state2) = inferExpr(arg, state1)
+              let (tRes, state3) = freshVar(state2)
+              let state4 = unifyForNode(
+                expr.node.id,
+                "function application",
+                tCallee,
+                Types.TFun(tArg, tRes),
+                state3
+              )
+              let state5 = match (callee.kind) {
+                CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, tArg, state4),
+                _ => state4,
+              }
+              let tApplied = apply(state5, tRes)
+              let tRecorded = recordNodeType(expr.node.id, tApplied, state5)
+              (tRecorded, state5)
+            },
+          },
+        (CoreAst.Ident(fnName), CoreAst.Tuple([targetExpr, fieldExpr])) when fnName.text == "project" =>
+          match (fieldExpr.kind) {
+            CoreAst.Lit(CoreAst.Str(fieldName)) => {
+              let (targetType, state1) = inferExpr(targetExpr, state)
+              let (fieldType, state2) = freshVar(state1)
+              let state3 = match (apply(state2, targetType)) {
+                Types.TNominal(typeName, typeArgs) =>
+                  match (resolveNominalRecordFields(typeName, typeArgs, state2)) {
+                    Some(fields) =>
+                      match (findRecordFieldType(fields, fieldName)) {
+                        Some(existingType) =>
+                          unifyForNode(
+                            expr.node.id,
+                            "record projection field",
+                            fieldType,
+                            existingType,
+                            state2
+                          ),
+                        None =>
+                          addTypeMark(
+                            state2,
+                            TypeMismatch,
+                            originForNode(expr.node.id, "record projection missing field"),
+                            CoreAst.Inconsistent,
+                            "Type error: unknown record field " ++ fieldName
+                          ),
+                      },
+                    None =>
+                      addTypeMark(
+                        state2,
+                        TypeMismatch,
+                        originForNode(expr.node.id, "record projection nominal"),
+                        CoreAst.Inconsistent,
+                        "Type error: projection expects a nominal record value"
+                      ),
+                  },
+                _ =>
+                  addTypeMark(
+                    state2,
+                    TypeMismatch,
+                    originForNode(expr.node.id, "record projection"),
+                    CoreAst.Inconsistent,
+                    "Type error: projection expects a nominal record value"
+                  ),
+              }
+              let resolved = apply(state3, fieldType)
+              let tRecorded = recordNodeType(expr.node.id, resolved, state3)
+              (tRecorded, state3)
+            },
+            _ => {
+              let (tUnknown, state1) = freshVar(state)
+              let state2 = addTypeMark(
+                state1,
+                TypeMismatch,
+                originForNode(expr.node.id, "record projection field"),
+                CoreAst.Inconsistent,
+                "Type error: record projection expects string field name"
+              )
+              let tRecorded = recordNodeType(expr.node.id, tUnknown, state2)
+              (tRecorded, state2)
+            },
+          },
+        (CoreAst.Ident(typeName), CoreAst.RecordLit(items)) =>
+          match (Env.lookupType(state.env, typeName.text)) {
+            Some(typeInfo) =>
+              match (typeInfo.recordFields) {
+                Some(_) => {
+                  let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
+                    typeInfo.typeParams,
+                    state.nextVar
+                  )
+                  let nominalType = Types.TNominal(typeInfo.name, paramTypes)
+                  let state0 = { ...state, nextVar }
+                  let rec collectFields = (
+                    remaining: List<CoreAst.RecordItem>,
+                    st: InferState,
+                    acc: List<(String, Types.Type)>,
+                  ) =>
+                    match (remaining) {
+                      [] => (List.reverse(acc), st),
+                      [item, ...rest] => match (item) {
+                        CoreAst.Field(fieldName, valueExpr) => {
+                          let (valueType, st1) = inferExpr(valueExpr, st)
+                          collectFields(rest, st1, [(fieldName.text, valueType), ...acc])
+                        },
+                        CoreAst.Spread(valueExpr) => {
+                          let (spreadType, st1) = inferExpr(valueExpr, st)
+                          match (apply(st1, spreadType)) {
+                            Types.TNominal(typeName, typeArgs) =>
+                              match (resolveNominalRecordFields(typeName, typeArgs, st1)) {
+                                Some(spreadFields) =>
+                                  collectFields(rest, st1, List.append(List.reverse(spreadFields), acc)),
+                                None => {
+                                  let st2 = addTypeMark(
+                                    st1,
+                                    TypeMismatch,
+                                    originForNode(expr.node.id, "record spread"),
+                                    CoreAst.Inconsistent,
+                                    "Type error: record spread expects a nominal record value"
+                                  )
+                                  collectFields(rest, st2, acc)
+                                },
+                              },
+                            _ => {
+                              let st2 = addTypeMark(
+                                st1,
+                                TypeMismatch,
+                                originForNode(expr.node.id, "record spread"),
+                                CoreAst.Inconsistent,
+                                "Type error: record spread expects a nominal record value"
+                              )
+                              collectFields(rest, st2, acc)
+                            },
+                          }
+                        },
+                      },
+                    }
+                  let (fields, state1) = collectFields(items, state0, [])
+                  let state2 = validateRecordLiteralAgainstNominal(
+                    expr.node.id,
+                    fields,
+                    nominalType,
+                    state1,
+                    unify
+                  )
+                  let tRecorded = recordNodeType(expr.node.id, nominalType, state2)
+                  (tRecorded, state2)
+                },
+                None => {
+                  let (tCallee, state1) = inferExpr(callee, state)
+                  let (tArg, state2) = inferExpr(arg, state1)
+                  let (tRes, state3) = freshVar(state2)
+                  let state4 = unifyForNode(
+                    expr.node.id,
+                    "function application",
+                    tCallee,
+                    Types.TFun(tArg, tRes),
+                    state3
+                  )
+                  let tApplied = apply(state4, tRes)
+                  let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
+                  (tRecorded, state4)
+                },
+              },
+            None => {
+              let (tCallee, state1) = inferExpr(callee, state)
+              let (tArg, state2) = inferExpr(arg, state1)
+              let (tRes, state3) = freshVar(state2)
+              let state4 = unifyForNode(
+                expr.node.id,
+                "function application",
+                tCallee,
+                Types.TFun(tArg, tRes),
+                state3
+              )
+              let tApplied = apply(state4, tRes)
+              let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
+              (tRecorded, state4)
+            },
+          },
+        _ => {
+          let (tCallee, state1) = inferExpr(callee, state)
+          let (tArg, state2) = inferExpr(arg, state1)
+          let (tRes, state3) = freshVar(state2)
+          let state4 = unifyForNode(
+            expr.node.id,
+            "function application",
+            tCallee,
+            Types.TFun(tArg, tRes),
+            state3
+          )
+          let state5 = match (callee.kind) {
+            CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, tArg, state4),
+            _ => state4,
+          }
+          let tApplied = apply(state5, tRes)
+          let tRecorded = recordNodeType(expr.node.id, tApplied, state5)
+          (tRecorded, state5)
+        },
       }
-      let tApplied = apply(state5, tRes)
-      let tRecorded = recordNodeType(expr.node.id, tApplied, state5)
-      (tRecorded, state5)
     },
     CoreAst.Let(binding, body) => {
       match (binding.name.kind) {
@@ -780,7 +1325,10 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
               ),
             None => state2,
           }
-          let tValue = apply(state3, tValueRaw)
+          let tValue = match (binding.annotation) {
+            Some(annotation) => apply(state3, typeFromAnnotation(annotation)),
+            None => apply(state3, tValueRaw),
+          }
           logState("let.preGeneralize", state3, nodeId=binding.node.id)
           let scheme = Types.generalize(
             Env.snapshotValues(state3.env),
@@ -809,7 +1357,10 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
               ),
             None => state1,
           }
-          let tValue = apply(state2, tValueRaw)
+          let tValue = match (binding.annotation) {
+            Some(annotation) => apply(state2, typeFromAnnotation(annotation)),
+            None => apply(state2, tValueRaw),
+          }
           logState("let.preGeneralize", state2, nodeId=binding.node.id)
           let scheme = Types.generalize(
             Env.snapshotValues(state2.env),
@@ -858,6 +1409,30 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       let t = recordNodeType(expr.node.id, Types.TTuple(types), state1)
       (t, state1)
     },
+    CoreAst.RecordLit(items) => {
+      let rec collectProvidedFields = (
+        remaining: List<CoreAst.RecordItem>,
+        st: InferState,
+        acc: List<(String, Types.Type)>,
+      ) =>
+        match (remaining) {
+          [] => (List.reverse(acc), st),
+          [item, ...rest] => match (item) {
+            CoreAst.Field(fieldName, valueExpr) => {
+              let (valueType, st1) = inferExpr(valueExpr, st)
+              collectProvidedFields(rest, st1, [(fieldName.text, valueType), ...acc])
+            },
+            CoreAst.Spread(valueExpr) => {
+              let (_spreadType, st1) = inferExpr(valueExpr, st)
+              collectProvidedFields(rest, st1, acc)
+            },
+          },
+        }
+      let (fields, state1) = collectProvidedFields(items, state, [])
+      let (recordType, state2) = inferNominalRecordContext(expr.node.id, fields, state1, unify)
+      let t = recordNodeType(expr.node.id, recordType, state2)
+      (t, state2)
+    },
     _ => {
       let (t, state1) = freshVar(state)
       let tRecorded = recordNodeType(expr.node.id, t, state1)
@@ -877,31 +1452,90 @@ and inferExprList = (exprs: List<CoreAst.Expr>, state: InferState) => {
 }
 
 let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
-  let (valueType, state1) = inferExpr(binding.value, state)
-  let state2 = match (binding.annotation) {
-    Some(annotation) =>
+  let annotationTypeOpt = match (binding.annotation) {
+    Some(annotation) => Some(typeFromAnnotation(annotation)),
+    None => None,
+  }
+  let (valueType, state1) = match ((annotationTypeOpt, binding.value.kind)) {
+    (Some(expectedType), CoreAst.RecordLit(items)) => {
+      let rec collectFields = (
+        remaining: List<CoreAst.RecordItem>,
+        st: InferState,
+        acc: List<(String, Types.Type)>,
+      ) =>
+        match (remaining) {
+          [] => (List.reverse(acc), st),
+          [item, ...rest] => match (item) {
+            CoreAst.Field(fieldName, valueExpr) => {
+              let (valueType, st1) = inferExpr(valueExpr, st)
+              collectFields(rest, st1, [(fieldName.text, valueType), ...acc])
+            },
+            CoreAst.Spread(valueExpr) => {
+              let (spreadType, st1) = inferExpr(valueExpr, st)
+              match (apply(st1, spreadType)) {
+                Types.TNominal(typeName, typeArgs) =>
+                  match (resolveNominalRecordFields(typeName, typeArgs, st1)) {
+                    Some(spreadFields) =>
+                      collectFields(rest, st1, List.append(List.reverse(spreadFields), acc)),
+                    None => {
+                      let st2 = addTypeMark(
+                        st1,
+                        TypeMismatch,
+                        originForNode(binding.value.node.id, "record spread"),
+                        CoreAst.Inconsistent,
+                        "Type error: record spread expects a nominal record value"
+                      )
+                      collectFields(rest, st2, acc)
+                    },
+                  },
+                _ => {
+                  let st2 = addTypeMark(
+                    st1,
+                    TypeMismatch,
+                    originForNode(binding.value.node.id, "record spread"),
+                    CoreAst.Inconsistent,
+                    "Type error: record spread expects a nominal record value"
+                  )
+                  collectFields(rest, st2, acc)
+                },
+              }
+            },
+          },
+        }
+      let (fields, st1) = collectFields(items, state, [])
+      let st2 = validateRecordLiteralAgainstNominal(binding.value.node.id, fields, expectedType, st1, unify)
+      (expectedType, st2)
+    },
+    _ => inferExpr(binding.value, state),
+  }
+  let state2 = match (annotationTypeOpt) {
+    Some(annotationType) =>
       unifyForNode(
         binding.node.id,
         "binding annotation",
         valueType,
-        typeFromAnnotation(annotation),
+        annotationType,
         state1
       ),
     None => state1,
   }
-  let appliedValueType = apply(state2, valueType)
+  let appliedValueType0 = match (annotationTypeOpt) {
+    Some(annotationType) => apply(state2, annotationType),
+    None => apply(state2, valueType),
+  }
+  let (appliedValueType, state3a) = (appliedValueType0, state2)
   let state3 = match (binding.name.kind) {
     CoreAst.Var(name) => {
-      Map.set(binding.name.node.id, appliedValueType, state2.nodeTypes)
-      Map.set(name.node.id, appliedValueType, state2.nodeTypes)
-      state2
+      Map.set(binding.name.node.id, appliedValueType, state3a.nodeTypes)
+      Map.set(name.node.id, appliedValueType, state3a.nodeTypes)
+      state3a
     },
     CoreAst.Pin(name) => {
-      Map.set(binding.name.node.id, appliedValueType, state2.nodeTypes)
-      Map.set(name.node.id, appliedValueType, state2.nodeTypes)
-      state2
+      Map.set(binding.name.node.id, appliedValueType, state3a.nodeTypes)
+      Map.set(name.node.id, appliedValueType, state3a.nodeTypes)
+      state3a
     },
-    _ => state2,
+    _ => state3a,
   }
   (appliedValueType, state3)
 }
@@ -982,6 +1616,12 @@ let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
   { ...state, nextVar: prepared.nextVar, env: env1 }
 }
 
+let registerRecordDecl = (decl: CoreAst.RecordDecl, state: InferState) => {
+  let info = Layer1Decl.prepareRecordDecl(decl)
+  let env1 = Env.registerType(state.env, info)
+  { ...state, env: env1 }
+}
+
 let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
   Layer1Top.inferTopItems(
     items,
@@ -1001,7 +1641,10 @@ let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
             ),
         },
         registerTypeDecl,
-        (_decl, stDecl) => stDecl
+        (decl, stDecl) => match (decl) {
+          CoreAst.RecordDecl(recordDecl) => registerRecordDecl(recordDecl, stDecl),
+          _ => stDecl,
+        }
       ),
     (_item, st) => st
   )
@@ -1030,7 +1673,7 @@ let solveConstraints = (state: InferState) => {
                 ([], []) => false,
                 ([xh, ...xt], [yh, ...yt]) => loop(xh, yh) || anyConflict(xt, yt),
                 _ => true,
-              }
+            }
             anyConflict(xs, ys)
           },
         (Types.TNominal(nameL, argsL), Types.TNominal(nameR, argsR)) =>

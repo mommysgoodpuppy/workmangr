@@ -16,6 +16,7 @@ from "json" include Json
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
 from "../../core/module_infer.gr" include ModuleInfer
+from "../../core/types.gr" include Types
 from "../../module/module_system.gr" include ModuleSystem
 from "./format.gr" include Format
 from "./inlay.gr" include Inlay
@@ -191,56 +192,6 @@ let debugFormat = (text: String) => {
 let documentVersion = (uri: String) => match (Map.get(uri, docVersions)) {
   Some(v) => v,
   None => 0,
-}
-
-let computeInlayHints = (uri: String, source: String, version: Number) => {
-  let sourceLen = String.length(source)
-  if (sourceLen > inlayMaxSourceChars) {
-    logErr(
-      "[LSP inlay] skip uri="
-        ++ uri
-        ++ " sourceLen="
-        ++ toString(sourceLen)
-        ++ " exceeds max"
-    )
-    "[]"
-  } else {
-    logErr(
-      "[LSP inlay] compute start uri="
-        ++ uri
-        ++ " v"
-        ++ toString(version)
-        ++ " sourceLen="
-        ++ toString(sourceLen)
-    )
-    let hintsJson = Inlay.inlayHintsForSource(
-      source,
-      0,
-      sourceLen,
-      debugInlay,
-      escapeJson,
-      inlayDebugEnabled
-    )
-    Map.set(uri, hintsJson, inlayCache)
-    Map.set(uri, version, inlayCachedVersion)
-    logErr("[LSP inlay] compute done uri=" ++ uri ++ " v" ++ toString(version))
-    hintsJson
-  }
-}
-
-let warmInlayCache = (uri: String, source: String, version: Number) => {
-  match (Map.get(uri, inlayCachedVersion)) {
-    Some(v) when v == version => {
-      logErr(
-        "[LSP inlay] warm cache hit uri=" ++ uri ++ " v" ++ toString(version)
-      )
-    },
-    _ => {
-      logErr("[LSP inlay] warm start uri=" ++ uri ++ " v" ++ toString(version))
-      let _ = computeInlayHints(uri, source, version)
-      logErr("[LSP inlay] warm done uri=" ++ uri ++ " v" ++ toString(version))
-    },
-  }
 }
 
 let invalidateInlayCache = (uri: String) => {
@@ -578,15 +529,16 @@ let hoverRangeJson = (source: String, span: Source.Span) => {
     ++ "}}"
 }
 
-let hoverJsonForType = (
+let hoverJsonForTypeValue = (
   source: String,
-  typeAtOffset: ModuleInfer.TypeAtOffset,
+  span: Source.Span,
+  ty: Types.Type,
 ) => {
-  let renderedType = TypeDisplay.render(typeAtOffset.ty)
+  let renderedType = TypeDisplay.render(ty)
   "{\"contents\":{\"kind\":\"plaintext\",\"value\":\""
     ++ escapeJson("Type: " ++ renderedType)
     ++ "\"},\"range\":"
-    ++ hoverRangeJson(source, typeAtOffset.span)
+    ++ hoverRangeJson(source, span)
     ++ "}"
 }
 
@@ -849,6 +801,108 @@ let buildInferenceForEntry = (
   }
 }
 
+let lookupModuleSummaryForUri = (
+  uri: String,
+  docs: Map.Map<String, String>,
+  caller: String="unknown",
+) => {
+  let (_entryPath, graph, inferred) = buildInferenceForEntry(uri, docs, caller=caller)
+  let modulePath = toWorkspacePath(uriToPath(uri))
+  let summaryOpt = Map.get(modulePath, inferred.modules)
+  (modulePath, graph, summaryOpt)
+}
+
+let computeInlayHints = (
+  uri: String,
+  source: String,
+  version: Number,
+  docs: Map.Map<String, String>,
+) => {
+  let sourceLen = String.length(source)
+  if (sourceLen > inlayMaxSourceChars) {
+    logErr(
+      "[LSP inlay] skip uri="
+        ++ uri
+        ++ " sourceLen="
+        ++ toString(sourceLen)
+        ++ " exceeds max"
+    )
+    "[]"
+  } else {
+    logErr(
+      "[LSP inlay] compute start uri="
+        ++ uri
+        ++ " v"
+        ++ toString(version)
+        ++ " sourceLen="
+        ++ toString(sourceLen)
+    )
+    let formatHintsJson = Inlay.formatInlayHintsForSource(
+      source,
+      0,
+      sourceLen,
+      debugInlay,
+      escapeJson,
+      inlayDebugEnabled
+    )
+    let typeHintsJson = if (isInlayWorker) {
+      "[]"
+    } else {
+      let (_modulePath, _graph, summaryOpt) = lookupModuleSummaryForUri(
+        uri,
+        docs,
+        caller="inlay",
+      )
+      match (summaryOpt) {
+        Some(summary) =>
+          Inlay.typeInlayHintsFromLoweredProgram(
+            summary.program,
+            summary.infer,
+            0,
+            sourceLen
+          ),
+        None => "[]",
+      }
+    }
+    let mergeJsonArrays = (left: String, right: String) => {
+      if (left == "[]") {
+        right
+      } else if (right == "[]") {
+        left
+      } else {
+        let leftInner = String.slice(1, end=String.length(left) - 1, left)
+        let rightInner = String.slice(1, end=String.length(right) - 1, right)
+        "[" ++ leftInner ++ "," ++ rightInner ++ "]"
+      }
+    }
+    let hintsJson = mergeJsonArrays(formatHintsJson, typeHintsJson)
+    Map.set(uri, hintsJson, inlayCache)
+    Map.set(uri, version, inlayCachedVersion)
+    logErr("[LSP inlay] compute done uri=" ++ uri ++ " v" ++ toString(version))
+    hintsJson
+  }
+}
+
+let warmInlayCache = (
+  uri: String,
+  source: String,
+  version: Number,
+  docs: Map.Map<String, String>,
+) => {
+  match (Map.get(uri, inlayCachedVersion)) {
+    Some(v) when v == version => {
+      logErr(
+        "[LSP inlay] warm cache hit uri=" ++ uri ++ " v" ++ toString(version)
+      )
+    },
+    _ => {
+      logErr("[LSP inlay] warm start uri=" ++ uri ++ " v" ++ toString(version))
+      let _ = computeInlayHints(uri, source, version, docs)
+      logErr("[LSP inlay] warm done uri=" ++ uri ++ " v" ++ toString(version))
+    },
+  }
+}
+
 let publishGraphDiagnostics = (
   entryUri: String,
   docs: Map.Map<String, String>,
@@ -968,7 +1022,7 @@ let handleInlayHint = (
               logErr(
                 "[LSP inlay] computing uri=" ++ uri ++ " v" ++ toString(version)
               )
-              let hintsJson = computeInlayHints(uri, source, version)
+              let hintsJson = computeInlayHints(uri, source, version, docs)
               sendResponse(idText, hintsJson)
             },
           }
@@ -1002,20 +1056,36 @@ let handleHover = (
         Some(source) => {
           let hoverStart = nowNs()
           let offset = positionToOffsetForUri(uri, source, line0, col0)
-          let modulePath = toWorkspacePath(uriToPath(uri))
           let buildStart = nowNs()
           let (_entryPath, graph, inferred) = buildInferenceForEntry(uri, docs, caller="hover")
+          let modulePath = toWorkspacePath(uriToPath(uri))
+          let summaryOpt = Map.get(modulePath, inferred.modules)
           let buildEnd = nowNs()
           timing("hover.infer", buildStart, buildEnd)
-          match (Map.get(modulePath, inferred.modules)) {
+          match (summaryOpt) {
             Some(summary) => {
               let lookupStart = nowNs()
               match (ModuleInfer.typeAtOffsetInSummary(summary, offset)) {
                 Some(found) => {
+                  let selectedType = match (SymbolService.findDefinitionNearOffset(graph, modulePath, source, offset)) {
+                    Some(definition) =>
+                      match (Map.get(definition.modulePath, inferred.modules)) {
+                        Some(defSummary) =>
+                          match (ModuleInfer.typeAtOffsetInSummary(defSummary, definition.span.start)) {
+                            Some(defTypeAt) => match (defTypeAt.ty) {
+                              Types.TFun(_, _) => defTypeAt.ty,
+                              _ => found.ty,
+                            },
+                            None => found.ty,
+                          },
+                        None => found.ty,
+                      },
+                    None => found.ty,
+                  }
                   let lookupEnd = nowNs()
                   timing("hover.lookup", lookupStart, lookupEnd)
                   timing("hover.total", hoverStart, lookupEnd)
-                  sendResponse(idText, hoverJsonForType(source, found))
+                  sendResponse(idText, hoverJsonForTypeValue(source, found.span, selectedType))
                 },
                 None => {
                   let fallbackDecl = match (Map.get(modulePath, graph.nodes)) {
@@ -1094,7 +1164,7 @@ let handleDefinition = (
         Some(source) => {
           let offset = positionToOffsetForUri(uri, source, line0, col0)
           let (entryPath, graph, _inferred) = buildInferenceForEntry(uri, docs, caller="definition")
-          match (SymbolService.findDefinitionAtOffset(graph, entryPath, source, offset)) {
+          match (SymbolService.findDefinitionNearOffset(graph, entryPath, source, offset)) {
             Some(found) => sendResponse(idText, "[" ++ definitionJson(found.modulePath, found.span) ++ "]"),
             None => sendResponse(idText, "[]"),
           }
@@ -1219,7 +1289,7 @@ let handleMessage = (
                       Map.set(uri, version, lineStartsCacheVersion)
                       invalidateInferenceCache()
                       if (isInlayWorker) {
-                        warmInlayCache(uri, text, version)
+                        warmInlayCache(uri, text, version, docs)
                       } else {
                         void
                       }

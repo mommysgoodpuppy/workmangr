@@ -277,6 +277,104 @@ let gt = 2 > 1;
   assertEquals("Bool", Types.typeToString(expectTopBinding(state, "gt").ty))
 })
 
+test("nominal record literals and projection infer field types", () => {
+  let source =
+    "
+record Location = { x: Number, y: Bool };
+let r: Location = .{ x = 1, y = true };
+let x = r.x;
+"
+  let state = inferSource(source)
+  let xScheme = expectTopBinding(state, "x")
+  assertEquals("Number", Types.typeToString(xScheme.ty))
+  let hasProjectionErrors = List.some(
+    (entry: Infer.TypeMark) => String.contains("record projection", entry.message),
+    state.marks
+  )
+  assertFalse(hasProjectionErrors)
+})
+
+test("record literals require nominal context", () => {
+  let source =
+    "
+let start = .{ x = 1, y = 2 };
+"
+  let state = inferSource(source)
+  let hasNominalContextError = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("record literal requires nominal type context", entry.message),
+    state.marks
+  )
+  let startScheme = expectTopBinding(state, "start")
+  all([
+    assertTrue(hasNominalContextError),
+    assertTrue(String.startsWith("?[", Types.typeToString(startScheme.ty))),
+  ])
+})
+
+test("record literals infer unique nominal record and report missing/type errors", () => {
+  let source =
+    "
+record Location = { x: Int, y: Int };
+let start = .{ x = \"x\" };
+"
+  let state = inferSource(source)
+  let startScheme = expectTopBinding(state, "start")
+  let hasMissingY = List.some(
+    (entry: Infer.TypeMark) => String.contains("missing record field y", entry.message),
+    state.marks
+  )
+  let hasTypeMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("cannot unify String with Int", entry.message)
+        || String.contains("cannot unify Int with String", entry.message),
+    state.marks
+  )
+  all([
+    assertEquals("Location", Types.typeToString(startScheme.ty)),
+    assertTrue(hasMissingY),
+    assertTrue(hasTypeMismatch),
+  ])
+})
+
+test("constructor-style nominal record construction supports punning", () => {
+  let source =
+    "
+record Operation = { direction: Int, distance: Int };
+let direction = 1;
+let distance = 2;
+let op = Operation{ direction, distance };
+"
+  let state = inferSource(source)
+  let opScheme = expectTopBinding(state, "op")
+  assertEquals("Operation", Types.typeToString(opScheme.ty))
+})
+
+test("constructor-style nominal record construction reports field errors", () => {
+  let source =
+    "
+record Operation = { direction: Int, distance: Int };
+let op = Operation{ direction = \"x\" };
+"
+  let state = inferSource(source)
+  let opScheme = expectTopBinding(state, "op")
+  let hasMissingDistance = List.some(
+    (entry: Infer.TypeMark) => String.contains("missing record field distance", entry.message),
+    state.marks
+  )
+  let hasTypeMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("cannot unify String with Int", entry.message)
+        || String.contains("cannot unify Int with String", entry.message),
+    state.marks
+  )
+  all([
+    assertEquals("Operation", Types.typeToString(opScheme.ty)),
+    assertTrue(hasMissingDistance),
+    assertTrue(hasTypeMismatch),
+  ])
+})
+
 test("match clause guard parses and types as bool", () => {
   let source =
     "
