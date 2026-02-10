@@ -228,6 +228,16 @@ just some random disruption
   assertEquals(canonicalNonWs(source), canonicalNonWs(realOut))
 })
 
+test("formatter preserves canonical from-import syntax", () => {
+  let source =
+    "
+from \"std/list\" import * as List;
+from \"std/result\" import { stripErr, map as mapResult };
+"
+  let formatted = Formatter.formatWithMode(source, Formatter.Real)
+  assertEquals(canonicalNonWs(source), canonicalNonWs(formatted))
+})
+
 test("edge case with trivia", () => {
   let source =
     "

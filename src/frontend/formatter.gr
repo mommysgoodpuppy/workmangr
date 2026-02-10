@@ -1470,6 +1470,56 @@ let renderWithSettingsWithTokens = (
     }
   }
 
+  let quoteModulePath = (modulePath: String) => {
+    let escaped = String.replaceAll("\\", "\\\\", modulePath)
+    "\"" ++ String.replaceAll("\"", "\\\"", escaped) ++ "\""
+  }
+
+  let emitImportClause = (importDecl: SurfaceAst.ImportDecl) => {
+    if (importDecl.alias != None && importDecl.names == []) {
+      write("*")
+      match (importDecl.alias) {
+        Some(alias) => {
+          space()
+          write("as")
+          space()
+          write(alias.text)
+        },
+        None => void,
+      }
+    } else if (importDecl.names == []) {
+      write("*")
+    } else {
+      write("{")
+      if (importDecl.names != []) {
+        space()
+      }
+      let mut first = true
+      List.forEach((entry: SurfaceAst.ImportName) => {
+        if (!first) {
+          write(",")
+          space()
+        } else {
+          first = false
+        }
+        write(entry.name.text)
+        match (entry.alias) {
+          Some(alias) => {
+            space()
+            write("as")
+            space()
+            write(alias.text)
+          },
+          None => void,
+        }
+      }, importDecl.names)
+      if (importDecl.names != []) {
+        space()
+      }
+      write("}")
+    }
+  }
+
   let emitTopItem = (item: SurfaceAst.TopItem) => {
     match (item) {
       SurfaceAst.DeclGroup(group) => {
@@ -1622,14 +1672,18 @@ let renderWithSettingsWithTokens = (
         }
       },
       SurfaceAst.Import(importDecl) => {
+        write("from")
+        space()
+        write(quoteModulePath(importDecl.modulePath))
+        space()
         write("import")
         space()
-        write(importDecl.modulePath)
+        emitImportClause(importDecl)
       },
       SurfaceAst.Reexport(reexportDecl) => {
         write("reexport")
         space()
-        write(reexportDecl.modulePath)
+        write(quoteModulePath(reexportDecl.modulePath))
       },
       SurfaceAst.Export(_) => void,
       SurfaceAst.Directive(directive) => emitDirective(directive),

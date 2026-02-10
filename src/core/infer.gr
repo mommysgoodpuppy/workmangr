@@ -78,6 +78,10 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   let intType = Types.TNominal("Int", [])
   let numberType = Types.TNumber
   let boolType = Types.TBool
+  let charType = Types.TChar
+  let stringType = Types.TString
+  let voidType = Types.TVoid
+  let listIntType = Types.TNominal("List", [intType])
   let orderingType = Types.TNominal("Ordering", [])
   let binaryInt: Types.Scheme = {
     quantifiers: [],
@@ -99,6 +103,30 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
     quantifiers: [],
     ty: Types.TFun(Types.TTuple([intType, intType]), orderingType),
   }
+  let nativeStringFromLiteral: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(stringType, stringType),
+  }
+  let nativeStringToList: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(stringType, listIntType),
+  }
+  let nativeListToString: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(listIntType, stringType),
+  }
+  let nativeStrFromLiteral: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(stringType, listIntType),
+  }
+  let nativeCharEq: Types.Scheme = {
+    quantifiers: [],
+    ty: Types.TFun(Types.TTuple([charType, charType]), boolType),
+  }
+  let nativePrint: Types.Scheme = {
+    quantifiers: [0],
+    ty: Types.TFun(Types.TVar(0), voidType),
+  }
   let define = (name: String, scheme: Types.Scheme) => {
     Env.defineValue(env, name, scheme)
     void
@@ -108,6 +136,12 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   Env.defineValue(env, "nativeMul", binaryInt)
   Env.defineValue(env, "nativeDiv", binaryInt)
   Env.defineValue(env, "nativeCmpInt", cmpInt)
+  Env.defineValue(env, "nativeStringFromLiteral", nativeStringFromLiteral)
+  Env.defineValue(env, "nativeStringToList", nativeStringToList)
+  Env.defineValue(env, "nativeListToString", nativeListToString)
+  Env.defineValue(env, "nativeStrFromLiteral", nativeStrFromLiteral)
+  Env.defineValue(env, "nativeCharEq", nativeCharEq)
+  Env.defineValue(env, "nativePrint", nativePrint)
   // Temporary builtin operator support until std-based operator resolution lands.
   define("+", binaryNumber)
   define("-", binaryNumber)

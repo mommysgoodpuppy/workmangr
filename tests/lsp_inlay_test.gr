@@ -31,5 +31,18 @@ test("type inlays still render under missing semicolon recovery", () => {
   assertTrue(String.contains(": Int", hints))
 })
 
+test("format inlays do not synthesize legacy import artifacts", () => {
+  let source = "from \"std/list\" import * as List;\nlet x = 1;"
+  let hints = Inlay.inlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  assertTrue(!String.contains("import std/list;", hints))
+})
+
 let results = runTests()
 printResultsAndExit(results)
