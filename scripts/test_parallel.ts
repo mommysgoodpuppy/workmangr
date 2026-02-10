@@ -91,6 +91,20 @@ async function runOne(file: string): Promise<FileResult> {
   return { file, status, code, durationMs, output };
 }
 
+async function runLspCompileSmoke(): Promise<void> {
+  const outPath = "/tmp/workman_lsp_smoke.wasm";
+  const child = new Deno.Command("grain", {
+    args: ["compile", "--include-dirs", "src", "src/cli/lsp/lsp.gr", "-o", outPath],
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const { code, stdout, stderr } = await child.output();
+  if (code !== 0) {
+    const output = new TextDecoder().decode(stdout) + new TextDecoder().decode(stderr);
+    throw new Error(`LSP compile smoke failed:\\n${output}`);
+  }
+}
+
 async function runParallel(files: string[], jobs: number): Promise<FileResult[]> {
   const results: FileResult[] = [];
   let idx = 0;
@@ -137,6 +151,7 @@ function summarize(results: FileResult[]) {
 }
 
 async function main() {
+  await runLspCompileSmoke();
   const { paths, jobs, filter } = parseArgs(Deno.args);
   let files = await discover(paths);
   if (filter) files = files.filter((f) => f.includes(filter));

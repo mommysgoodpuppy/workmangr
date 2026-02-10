@@ -1,0 +1,29 @@
+module ReproGraphOutside
+
+from "list" include List
+from "map" include Map
+
+from "../src/module/module_system.gr" include ModuleSystem
+
+let main = () => {
+  let graph = ModuleSystem.buildGraph(
+    "/Users/profilence/git/workman/aoc2016/1",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: "/Users/profilence/git/workmangr",
+      stdRoots: ["/Users/profilence/git/workman/std"],
+    }
+  )
+  print("entry=" ++ graph.entry)
+  List.forEach((id: String) => {
+    match (Map.get(id, graph.nodes)) {
+      Some(node) => {
+        print("node=" ++ id)
+        List.forEach((imp: String) => print("  import=" ++ imp), node.imports)
+      },
+      None => void,
+    }
+  }, graph.topo)
+}
+
+main()

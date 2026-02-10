@@ -1,0 +1,38 @@
+module DebugSymbolQualified
+
+from "map" include Map
+from "string" include String
+
+from "../src/cli/lsp/layer1/symbol_service.gr" include SymbolService
+from "../src/module/module_system.gr" include ModuleSystem
+
+let depSource = "let at = (x) => { x }; let remove = (x) => { x };"
+
+let runCase = (entrySource: String, needle: String) => {
+  let overrides = Map.make()
+  Map.set("entry.wm", entrySource, overrides)
+  Map.set("dep.wm", depSource, overrides)
+  let graph = ModuleSystem.buildGraph("entry", options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides })
+  print("--- " ++ needle ++ " ---")
+  match (String.indexOf(needle, entrySource)) {
+    Some(base) => {
+      let mut i = base
+      while (i <= base + String.length(needle) + 1) {
+        let found = SymbolService.findDefinitionAtOffset(graph, "entry.wm", entrySource, i)
+        match (found) {
+          Some(def) => print("offset=" ++ toString(i) ++ " -> " ++ def.modulePath),
+          None => print("offset=" ++ toString(i) ++ " -> none"),
+        }
+        i += 1
+      }
+    },
+    None => print("needle not found"),
+  }
+}
+
+let main = () => {
+  runCase("from \"./dep\" import * as List; let x = List.remove(1);", "List.remove")
+  runCase("from \"./dep\" import * as List; let x = 1 :> List.at :> id;", "List.at")
+}
+
+main()

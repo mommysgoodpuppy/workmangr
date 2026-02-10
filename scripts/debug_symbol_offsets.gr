@@ -1,0 +1,33 @@
+module DebugSymbolOffsets
+
+from "map" include Map
+from "string" include String
+
+from "../src/cli/lsp/layer1/symbol_service.gr" include SymbolService
+from "../src/module/module_system.gr" include ModuleSystem
+
+let entrySource = "from \"./dep\" import * as List; let x = List.at(1);"
+let depSource = "let at = (x) => { x };"
+let overrides = Map.make()
+Map.set("entry.wm", entrySource, overrides)
+Map.set("dep.wm", depSource, overrides)
+let graph = ModuleSystem.buildGraph("entry", options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides })
+
+let main = () => {
+  match (String.indexOf("List.at", entrySource)) {
+    Some(base) => {
+      let mut i = base
+      while (i <= base + 8) {
+        let found = SymbolService.findDefinitionAtOffset(graph, "entry.wm", entrySource, i)
+        match (found) {
+          Some(def) => print("offset=" ++ toString(i) ++ " -> " ++ def.modulePath),
+          None => print("offset=" ++ toString(i) ++ " -> none"),
+        }
+        i += 1
+      }
+    },
+    None => print("no List.at"),
+  }
+}
+
+main()

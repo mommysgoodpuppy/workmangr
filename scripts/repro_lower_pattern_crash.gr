@@ -1,0 +1,7 @@
+module ReproLowerPatternCrash
+
+from "../src/frontend/frontend.gr" include Frontend
+
+let source = "\nlet bad = foo(1) => { 1 };\n"
+let _ = Frontend.parseAndLower(source)
+print("ok")

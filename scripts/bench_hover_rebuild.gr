@@ -1,0 +1,37 @@
+module BenchHoverRebuild
+
+from "wasi/process" include Process
+from "map" include Map
+
+from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/module/module_system.gr" include ModuleSystem
+
+let main = () => {
+  let _ = Process.argv()
+  let n = 5
+  let mut i = 0
+  let mut found = 0
+  while (i < n) {
+    let result = ModuleInfer.inferEntry(
+      "tests/fixtures/workman_std/list",
+      options={
+        ...ModuleSystem.defaultOptions(),
+        rootDir: ".",
+        stdRoots: ["tests/fixtures/workman_std"],
+      }
+    )
+    let moduleId = result.graph.entry
+    match (Map.get(moduleId, result.modules)) {
+      Some(summary) =>
+        match (ModuleInfer.typeAtOffsetInSummary(summary, 500)) {
+          Some(_) => found += 1,
+          None => void,
+        },
+      None => void,
+    }
+    i += 1
+  }
+  print("iterations=" ++ toString(n) ++ " found=" ++ toString(found))
+}
+
+main()

@@ -1,0 +1,41 @@
+module InspectListDiag
+
+from "list" include List
+from "map" include Map
+
+from "../src/core/error.gr" include Error
+from "../src/core/source.gr" include Source
+from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/module/module_system.gr" include ModuleSystem
+
+let main = () => {
+  let result = ModuleInfer.inferEntry(
+    "tests/fixtures/workman_std/list",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: ".",
+      stdRoots: ["tests/fixtures/workman_std"],
+    }
+  )
+  let moduleId = result.graph.entry
+  print("entry=" ++ moduleId)
+  let diagnostics = match (Map.get(moduleId, result.diagnosticsById)) {
+    Some(diags) => diags,
+    None => [],
+  }
+  print("diag_count=" ++ toString(List.length(diagnostics)))
+  List.forEach((diag: Error.CompilerError) => {
+    let span: Source.Span = diag.span
+    print(
+      Error.stageName(diag.stage)
+        ++ ": "
+        ++ diag.message
+        ++ " @"
+        ++ toString(span.line)
+        ++ ":"
+        ++ toString(span.col)
+    )
+  }, diagnostics)
+}
+
+main()

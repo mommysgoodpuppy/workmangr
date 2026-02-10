@@ -1,0 +1,29 @@
+module ReproLspCrash
+
+from "map" include Map
+from "list" include List
+
+from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/module/module_system.gr" include ModuleSystem
+
+let main = () => {
+  let result = ModuleInfer.inferEntry(
+    "/Users/profilence/git/workman/aoc2016/1",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: "/Users/profilence/git/workmangr",
+      stdRoots: ["/Users/profilence/git/workman/std"],
+    }
+  )
+  print("entry=" ++ result.graph.entry)
+  List.forEach((id: String) => {
+    match (Map.get(id, result.modules)) {
+      Some(_moduleResult) => {
+        print("module=" ++ id)
+      },
+      None => void,
+    }
+  }, result.graph.topo)
+}
+
+main()
