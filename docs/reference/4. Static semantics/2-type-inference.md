@@ -41,12 +41,29 @@ Normative:
 - Module exports reuse the same boundary rules: a `let` exported from a module
   is generalized exactly once and subsequently instantiated by importers.
 
-Open design decision (must be resolved):
+Normative (v1 generalization policy):
 
-- Whether canonical Workman adopts a value restriction. If adopted, the manual
-  must define what counts as a “generalizable value”.
-- How infection domains/effect rows interact with generalization (e.g., whether
-  infection rows are part of the "generalizable" set).
+- By default, `let` bindings are generalized.
+- Canonical Workman does **not** impose a blanket "discharge infection before
+  generalization" rule.
+- Infection propagation through ordinary expressions remains valid across `let`
+  boundaries and function boundaries when represented in inferred types/schemes.
+- Generalization must preserve inferred infection/domain information; it must
+  not erase or silently drop infection state from a binding's exported scheme.
+- Rejection of infected flows is enforced at explicit domain/policy boundaries
+  (for example `pure`/`rejectDomains`/domain boundary requirements), not as a
+  global ban on infected bindings.
+- This rule is semantic and policy-boundary-aware, not a syntactic "values-only"
+  gate.
+
+Normative (infection + generalization integration):
+
+- Infection/effect information participates in the same generalization boundary.
+- A `let` binding may remain infected after generalization when the infection is
+  represented in its inferred scheme (for example `A -> IResult<B, E>`).
+- Discharge by pattern matching is one way to eliminate infection from a local
+  expression, but it is not required at every `let` boundary.
+- Implementations must not silently generalize away or drop infection state.
 
 ---
 
@@ -56,7 +73,7 @@ Annotations may appear:
 
 - on bindings: `let x: T = expr;`
 - on parameters: `(x: T) => { ... }`
-- as local assertions: `expr as T` (if supported)
+- as local assertions: `expr as T`
 
 Normative:
 

@@ -68,7 +68,16 @@ Canonical Workman intends infection to fit HM-style inference. That implies:
 - infection constraints must integrate with unification/generalization
 - solutions must be stable and deterministic for the same program
 
-This section will later include:
-- what is generalized at `let` boundaries in the presence of infections
-- how domain constraints appear in type schemes (if they do)
+Normative (v1 generalization boundary with infection):
+- Workman allows infection propagation to cross `let`/function boundaries when
+  represented in inferred types/schemes.
+- There is no blanket requirement to discharge infection before a binding can be
+  generalized.
+- Domain/effect constraints must not be dropped at `let` boundaries.
+- Rejection happens at explicit domain/policy boundaries (for example pure or
+  domain-specific boundary rules), not as a global anti-infection rule.
 
+Implementation-defined (must be documented):
+- The concrete scheme encoding for infection/domain constraints (for example,
+  explicit row components vs equivalent canonical encoding), provided it
+  preserves the normative behavior above.
