@@ -251,5 +251,141 @@ test("type-only reexport does not suppress value exports", () => {
   assertFalse(hasUnknownStripErr)
 })
 
+test("non-exhaustive dependency match reports type diagnostic on dependency module", () => {
+  let overrides = Map.make()
+  Map.set(
+    "dep.wm",
+    "export type Option<T> = Some<T> | None;\nexport let pick = (o) => { match(o) { Some(v) => { v } } };",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { pick };\nlet main = pick(Some(1));",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let dep = expectModule(result, "dep.wm")
+  let hasNonExhaustive = List.some(
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.TypeInference
+        && String.contains("non-exhaustive match for type Option", diag.message),
+    dep.diagnostics
+  )
+  assertTrue(hasNonExhaustive)
+})
+
+test("inference result diagnosticsById matches per-module summary diagnostics", () => {
+  let overrides = Map.make()
+  Map.set(
+    "dep.wm",
+    "export type Option<T> = Some<T> | None;\nexport let pick = (o) => { match(o) { Some(v) => { v } } };",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { pick };\nlet main = pick(Some(1));",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let dep = expectModule(result, "dep.wm")
+  let depById = match (Map.get("dep.wm", result.diagnosticsById)) {
+    Some(diags) => diags,
+    None => [],
+  }
+  let entry = expectModule(result, "entry.wm")
+  let entryById = match (Map.get("entry.wm", result.diagnosticsById)) {
+    Some(diags) => diags,
+    None => [],
+  }
+  all([
+    assertEquals(List.length(dep.diagnostics), List.length(depById)),
+    assertEquals(List.length(entry.diagnostics), List.length(entryById)),
+  ])
+})
+
+test("module infer preserves Panic typing across module boundaries", () => {
+  let overrides = Map.make()
+  Map.set(
+    "dep.wm",
+    "export let choose = (b) => { if (b) { Panic(\"boom\") } else { 1 } };",
+    overrides
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { choose };\nlet main = choose(true);",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let dep = expectModule(result, "dep.wm")
+  let entry = expectModule(result, "entry.wm")
+  let chooseScheme = match (Map.get("choose", dep.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing choose export"),
+  }
+  let hasUnknownPanic = List.some(
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.TypeInference
+        && String.contains("unknown identifier Panic", diag.message),
+    dep.diagnostics
+  )
+  let mainScheme = match (Map.get("main", entry.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing main export"),
+  }
+  let chooseTypeOk = match (chooseScheme.ty) {
+    Types.TFun(Types.TBool, Types.TNumber) => true,
+    _ => false,
+  }
+  let mainTypeOk = match (mainScheme.ty) {
+    Types.TNumber => true,
+    _ => false,
+  }
+  all([
+    assertTrue(chooseTypeOk),
+    assertTrue(mainTypeOk),
+    assertFalse(hasUnknownPanic),
+  ])
+})
+
+test("module infer summaries are keyed by canonical module ids", () => {
+  let overrides = Map.make()
+  Map.set("dep.wm", "export let x = 1;", overrides)
+  Map.set("entry.wm", "from \"./dep\" import { x };\nlet main = x;", overrides)
+
+  let result = ModuleInfer.inferEntry(
+    "./pkg/../entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let graphNodeIds = List.map(((id, _node)) => id, Map.toList(result.graph.nodes))
+  let moduleSummaryIds = List.map(((id, _summary)) => id, Map.toList(result.modules))
+  let summariesHaveSelfId = List.every(
+    ((id, summary): (String, ModuleInfer.ModuleSummary)) => summary.moduleId == id,
+    Map.toList(result.modules)
+  )
+  let allGraphNodesHaveSummary = List.every(
+    (moduleId: String) => Map.get(moduleId, result.modules) != None,
+    graphNodeIds
+  )
+  let summaryCountMatches = List.length(graphNodeIds) == List.length(moduleSummaryIds)
+  all([
+    assertEquals("entry.wm", result.graph.entry),
+    assertTrue(summariesHaveSelfId),
+    assertTrue(allGraphNodesHaveSummary),
+    assertTrue(summaryCountMatches),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

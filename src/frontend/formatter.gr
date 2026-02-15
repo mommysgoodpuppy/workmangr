@@ -513,6 +513,15 @@ let renderWithSettingsWithTokens = (
     }
   }
 
+  let emitIndent = () => {
+    if (settings.emitText) {
+      if (atLineStart) {
+        chunks = [spaces(indent), ...chunks]
+        atLineStart = false
+      }
+    }
+  }
+
   let emitVirtual = (text: String, anchor: Number, reason: String) => {
     if (mode == Virtual && settings.allowVirtualInsertions) {
       write(text)
@@ -1427,6 +1436,67 @@ let renderWithSettingsWithTokens = (
     write("}")
   }
 
+  let emitRuleValuePart = (part: SurfaceAst.RuleValuePart) => {
+    match (part) {
+      SurfaceAst.RuleName(name) => write(name),
+      SurfaceAst.RuleList(items) => {
+        write("[")
+        let mut first = true
+        List.forEach((item: String) => {
+          if (!first) {
+            write(",")
+            space()
+          } else {
+            first = false
+          }
+          write(item)
+        }, items)
+        write("]")
+      },
+      SurfaceAst.RulePairList(pairs) => {
+        write("[")
+        let mut first = true
+        List.forEach((pair: (String, String)) => {
+          let (left, right) = pair
+          if (!first) {
+            write(",")
+            space()
+          } else {
+            first = false
+          }
+          write("(")
+          write(left)
+          write(",")
+          space()
+          write(right)
+          write(")")
+        }, pairs)
+        write("]")
+      },
+    }
+  }
+
+  let emitRuleEntry = (entry: SurfaceAst.RuleEntry) => {
+    write(entry.key.text)
+    match (entry.value) {
+      None => void,
+      Some(value) => {
+        if (value.parts != []) {
+          space()
+          let mut first = true
+          List.forEach((part: SurfaceAst.RuleValuePart) => {
+            if (!first) {
+              space()
+            } else {
+              first = false
+            }
+            emitRuleValuePart(part)
+          }, value.parts)
+        }
+      },
+    }
+  }
+
   let emitDecl = (decl: SurfaceAst.Decl) => {
     match (decl) {
       SurfaceAst.LetDecl(letDecl) => {
@@ -1466,6 +1536,108 @@ let renderWithSettingsWithTokens = (
         write("prefix")
         space()
         write(prefixDecl.name.text)
+      },
+      SurfaceAst.DomainDecl(domainDecl) => {
+        write("domain")
+        space()
+        write(domainDecl.name.text)
+        space()
+        write("{")
+        if (domainDecl.entries != [] || domainDecl.defaultEntries != None) {
+          newline()
+          indent += 1
+          List.forEach((entry: SurfaceAst.RuleEntry) => {
+            emitIndent()
+            emitRuleEntry(entry)
+            write(";")
+            newline()
+          }, domainDecl.entries)
+          match (domainDecl.defaultEntries) {
+            None => void,
+            Some(entries) => {
+              emitIndent()
+              write("default")
+              space()
+              write("{")
+              if (entries != []) {
+                newline()
+                indent += 1
+                List.forEach((entry: SurfaceAst.RuleEntry) => {
+                  emitIndent()
+                  emitRuleEntry(entry)
+                  write(";")
+                  newline()
+                }, entries)
+                indent -= 1
+                emitIndent()
+              }
+              write("}")
+              write(";")
+              newline()
+            },
+          }
+          indent -= 1
+          emitIndent()
+        }
+        write("}")
+      },
+      SurfaceAst.PolicyDecl(policyDecl) => {
+        write("policy")
+        space()
+        write(policyDecl.name.text)
+        space()
+        write("{")
+        if (policyDecl.entries != []) {
+          newline()
+          indent += 1
+          List.forEach((entry: SurfaceAst.RuleEntry) => {
+            emitIndent()
+            emitRuleEntry(entry)
+            write(";")
+            newline()
+          }, policyDecl.entries)
+          indent -= 1
+          emitIndent()
+        }
+        write("}")
+      },
+      SurfaceAst.OpDecl(opDecl) => {
+        write("op")
+        space()
+        write(opDecl.name.text)
+        space()
+        write("{")
+        if (opDecl.entries != []) {
+          newline()
+          indent += 1
+          List.forEach((entry: SurfaceAst.RuleEntry) => {
+            emitIndent()
+            emitRuleEntry(entry)
+            write(";")
+            newline()
+          }, opDecl.entries)
+          indent -= 1
+          emitIndent()
+        }
+        write("}")
+      },
+      SurfaceAst.AnnotateDecl(annotateDecl) => {
+        write("annotate")
+        space()
+        write(annotateDecl.target.text)
+        space()
+        write("{")
+        let mut first = true
+        List.forEach((policyName: SurfaceAst.Name) => {
+          if (!first) {
+            write(",")
+            space()
+          } else {
+            first = false
+          }
+          write(policyName.text)
+        }, annotateDecl.policies)
+        write("}")
       },
     }
   }
@@ -1662,12 +1834,23 @@ let renderWithSettingsWithTokens = (
             emitDecls(group.decls)
           },
           SurfaceAst.RuleGroup(kind) => {
-            match (kind) {
-              SurfaceAst.Domain => write("domain"),
-              SurfaceAst.Policy => write("policy"),
-              SurfaceAst.Op => write("op"),
-              SurfaceAst.Annotate => write("annotate"),
+            let mut first = true
+            let rec emitDecls = (decls: List<SurfaceAst.Decl>) => {
+              match (decls) {
+                [] => void,
+                [decl, ...tail] => {
+                  if (!first) {
+                    newline()
+                  } else {
+                    first = false
+                  }
+                  emitDecl(decl)
+                  emitDecls(tail)
+                },
+              }
             }
+            let _ = kind
+            emitDecls(group.decls)
           },
         }
       },
@@ -1765,6 +1948,10 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.RecordDecl(recordDecl) => recordDeclIsDecidable(recordDecl),
     SurfaceAst.InfixDecl(_) => true,
     SurfaceAst.PrefixDecl(_) => true,
+    SurfaceAst.DomainDecl(_) => true,
+    SurfaceAst.PolicyDecl(_) => true,
+    SurfaceAst.OpDecl(_) => true,
+    SurfaceAst.AnnotateDecl(_) => true,
   }
 
   let declHasMissingRBrace = (decl: SurfaceAst.Decl) => match (decl) {

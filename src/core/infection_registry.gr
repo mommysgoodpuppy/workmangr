@@ -1,0 +1,225 @@
+module InfectionRegistry
+
+from "list" include List
+from "map" include Map
+
+from "./core_ast.gr" include CoreAst
+
+provide record rec DomainRuleDefinition {
+  name: String,
+  stateKind: Option<String>,
+  merge: Option<String>,
+  mergeRow: Option<String>,
+  conflict: Option<String>,
+  conflictPairs: Option<List<(String, String)>>,
+  boundary: Option<String>,
+  infectsReturn: Option<Bool>,
+  defaultRule: Option<OpRuleDefinition>,
+  entries: List<CoreAst.RuleEntry>,
+}
+
+and provide record OpRuleDefinition {
+  name: String,
+  domain: Option<String>,
+  target: Option<String>,
+  requiresExact: Option<List<String>>,
+  requiresAny: Option<List<String>>,
+  requiresNot: Option<List<String>>,
+  adds: Option<List<String>>,
+  removes: Option<List<String>>,
+  callPolicy: Option<String>,
+  rejectDomains: Option<List<String>>,
+  entries: List<CoreAst.RuleEntry>,
+}
+
+and provide record PolicyDefinition {
+  name: String,
+  domain: Option<String>,
+  requireAtReturn: Option<List<String>>,
+  rejectsAllDomains: Bool,
+  rejectDomains: Option<List<String>>,
+  entries: List<CoreAst.RuleEntry>,
+}
+
+and provide record AnnotationDefinition {
+  target: String,
+  policies: List<String>,
+}
+
+and provide record Registry {
+  domains: Map.Map<String, DomainRuleDefinition>,
+  opRules: Map.Map<String, OpRuleDefinition>,
+  policies: Map.Map<String, PolicyDefinition>,
+  annotations: Map.Map<String, AnnotationDefinition>,
+}
+
+provide let empty = () =>
+  {
+    domains: Map.make(),
+    opRules: Map.make(),
+    policies: Map.make(),
+    annotations: Map.make(),
+  }: Registry
+
+let findEntry = (entries: List<CoreAst.RuleEntry>, key: String) =>
+  List.find((entry: CoreAst.RuleEntry) => entry.key.text == key, entries)
+
+let nameFromPart = (part: CoreAst.RuleValuePart) =>
+  match (part) {
+    CoreAst.RuleName(name) => Some(name),
+    _ => None,
+  }
+
+let listFromPart = (part: CoreAst.RuleValuePart) =>
+  match (part) {
+    CoreAst.RuleList(items) => Some(items),
+    _ => None,
+  }
+
+let pairListFromPart = (part: CoreAst.RuleValuePart) =>
+  match (part) {
+    CoreAst.RulePairList(pairs) => Some(pairs),
+    _ => None,
+  }
+
+let getNameByKey = (entries: List<CoreAst.RuleEntry>, key: String) =>
+  match (findEntry(entries, key)) {
+    Some(entry) => match (entry.value) {
+      Some(value) => List.findMap(nameFromPart, value.parts),
+      None => None,
+    },
+    None => None,
+  }
+
+let getListByKey = (entries: List<CoreAst.RuleEntry>, key: String) =>
+  match (findEntry(entries, key)) {
+    Some(entry) => match (entry.value) {
+      Some(value) => List.findMap(listFromPart, value.parts),
+      None => None,
+    },
+    None => None,
+  }
+
+let getPairListByKey = (entries: List<CoreAst.RuleEntry>, key: String) =>
+  match (findEntry(entries, key)) {
+    Some(entry) => match (entry.value) {
+      Some(value) => List.findMap(pairListFromPart, value.parts),
+      None => None,
+    },
+    None => None,
+  }
+
+let getBoolByKey = (entries: List<CoreAst.RuleEntry>, key: String) =>
+  match (findEntry(entries, key)) {
+    None => None,
+    Some(entry) => match (entry.value) {
+      None => Some(true),
+      Some(value) => match (List.findMap(nameFromPart, value.parts)) {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+      },
+    },
+  }
+
+let hasFlag = (entries: List<CoreAst.RuleEntry>, key: String) =>
+  match (findEntry(entries, key)) {
+    Some({ value: None, _ }) => true,
+    _ => false,
+  }
+
+let parseOpRuleEntries = (
+  name: String,
+  entries: List<CoreAst.RuleEntry>,
+  domainOverride: Option<String>,
+) =>
+  {
+    name,
+    domain: match (getNameByKey(entries, "domain")) {
+      Some(found) => Some(found),
+      None => domainOverride,
+    },
+    target: getNameByKey(entries, "target"),
+    requiresExact: getListByKey(entries, "requiresExact"),
+    requiresAny: getListByKey(entries, "requiresAny"),
+    requiresNot: match (getListByKey(entries, "requiresNot")) {
+      Some(items) => Some(items),
+      None => getListByKey(entries, "requires_not"),
+    },
+    adds: getListByKey(entries, "adds"),
+    removes: getListByKey(entries, "removes"),
+    callPolicy: match (getNameByKey(entries, "callPolicy")) {
+      Some(policy) => Some(policy),
+      None => getNameByKey(entries, "call_policy"),
+    },
+    rejectDomains: match (getListByKey(entries, "rejectDomains")) {
+      Some(domains) => Some(domains),
+      None => getListByKey(entries, "reject_domains"),
+    },
+    entries,
+  }: OpRuleDefinition
+
+let parseDomainDecl = (decl: CoreAst.DomainDecl) =>
+  {
+    name: decl.name.text,
+    stateKind: getNameByKey(decl.entries, "stateKind"),
+    merge: getNameByKey(decl.entries, "merge"),
+    mergeRow: getNameByKey(decl.entries, "mergeRow"),
+    conflict: getNameByKey(decl.entries, "conflict"),
+    conflictPairs: getPairListByKey(decl.entries, "conflict"),
+    boundary: getNameByKey(decl.entries, "boundary"),
+    infectsReturn: getBoolByKey(decl.entries, "infectsReturn"),
+    defaultRule: match (decl.defaultEntries) {
+      Some(entries) =>
+        Some(parseOpRuleEntries("__default_" ++ decl.name.text, entries, Some(decl.name.text))),
+      None => None,
+    },
+    entries: decl.entries,
+  }: DomainRuleDefinition
+
+let parsePolicyDecl = (decl: CoreAst.PolicyDecl) =>
+  {
+    name: decl.name.text,
+    domain: getNameByKey(decl.entries, "domain"),
+    requireAtReturn: getListByKey(decl.entries, "requireAtReturn"),
+    rejectsAllDomains: hasFlag(decl.entries, "rejectsAllDomains"),
+    rejectDomains: match (getListByKey(decl.entries, "rejectDomains")) {
+      Some(domains) => Some(domains),
+      None => getListByKey(decl.entries, "reject_domains"),
+    },
+    entries: decl.entries,
+  }: PolicyDefinition
+
+let parseAnnotateDecl = (decl: CoreAst.AnnotateDecl) =>
+  {
+    target: decl.target.text,
+    policies: List.map((name: CoreAst.Name) => name.text, decl.policies),
+  }: AnnotationDefinition
+
+provide let mergeDecl = (registry: Registry, decl: CoreAst.Decl) =>
+  match (decl) {
+    CoreAst.DomainDecl(domainDecl) => {
+      let parsed = parseDomainDecl(domainDecl)
+      Map.set(parsed.name, parsed, registry.domains)
+      registry
+    },
+    CoreAst.OpDecl(opDecl) => {
+      let parsed = parseOpRuleEntries(opDecl.name.text, opDecl.entries, None)
+      Map.set(parsed.name, parsed, registry.opRules)
+      registry
+    },
+    CoreAst.PolicyDecl(policyDecl) => {
+      let parsed = parsePolicyDecl(policyDecl)
+      Map.set(parsed.name, parsed, registry.policies)
+      registry
+    },
+    CoreAst.AnnotateDecl(annotateDecl) => {
+      let parsed = parseAnnotateDecl(annotateDecl)
+      Map.set(parsed.target, parsed, registry.annotations)
+      registry
+    },
+    _ => registry,
+  }
+
+provide let mergeDecls = (registry: Registry, decls: List<CoreAst.Decl>) =>
+  List.reduce(mergeDecl, registry, decls)

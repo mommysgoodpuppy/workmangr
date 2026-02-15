@@ -279,5 +279,178 @@ test("parser supports match arrow params with type annotations", () => {
   all([assertTrue(shapeOk), assertFalse(hasErrors)])
 })
 
+test("only @core directive enables canonical core mode", () => {
+  clearErrors()
+  let coreProgram = Parser.parse("@core;\nlet x = 1;")
+  let fooProgram = Parser.parse("@foo;\nlet x = 1;")
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(coreProgram.core),
+    assertFalse(fooProgram.core),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("unknown directives parse as top-level directives without panicking", () => {
+  clearErrors()
+  let parsed = Parser.parse("@future;\nlet x = 1;")
+  let hasDirective = List.some(
+    (item: SurfaceAst.TopItem) => match (item) {
+      SurfaceAst.Directive({ name, _ }) => name.text == "future",
+      _ => false,
+    },
+    parsed.items
+  )
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(hasDirective),
+    assertFalse(hasErrors),
+    assertFalse(parsed.core),
+  ])
+})
+
+test("parser supports domain/policy/op/annotate rule declarations", () => {
+  clearErrors()
+  let source =
+    "domain effect { mergeRow union; conflict [(A, B)]; default { target arg0; requiresNot [Closed]; }; };"
+      ++ "\npolicy pure { rejectsAllDomains; };"
+      ++ "\nop io.read { callPolicy pure; rejectDomains [effect, mem]; };"
+      ++ "\nannotate io.read { pure, noLeakMem };"
+  let parsed = Parser.parse(source)
+  let hasDomain = List.some((item: SurfaceAst.TopItem) => match (item) {
+    SurfaceAst.DeclGroup(group) => match (group.decls) {
+      [SurfaceAst.DomainDecl(_)] => true,
+      _ => false,
+    },
+    _ => false,
+  }, parsed.items)
+  let hasPolicy = List.some((item: SurfaceAst.TopItem) => match (item) {
+    SurfaceAst.DeclGroup(group) => match (group.decls) {
+      [SurfaceAst.PolicyDecl(_)] => true,
+      _ => false,
+    },
+    _ => false,
+  }, parsed.items)
+  let hasOp = List.some((item: SurfaceAst.TopItem) => match (item) {
+    SurfaceAst.DeclGroup(group) => match (group.decls) {
+      [SurfaceAst.OpDecl(_)] => true,
+      _ => false,
+    },
+    _ => false,
+  }, parsed.items)
+  let hasAnnotate = List.some((item: SurfaceAst.TopItem) => match (item) {
+    SurfaceAst.DeclGroup(group) => match (group.decls) {
+      [SurfaceAst.AnnotateDecl(_)] => true,
+      _ => false,
+    },
+    _ => false,
+  }, parsed.items)
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(hasDomain),
+    assertTrue(hasPolicy),
+    assertTrue(hasOp),
+    assertTrue(hasAnnotate),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("parser disambiguates match bundle literal vs scrutinee vs arrow sugar", () => {
+  clearErrors()
+  let bundleProgram = Parser.parse("let m = match { Var(x) => { x } };")
+  let scrutineeProgram = Parser.parse("let m = match(input) { Var(x) => { x } };")
+  let arrowProgram = Parser.parse("let m = match(input) => { Var(x) => { x } };")
+
+  let matchShape = (program: SurfaceAst.Program) =>
+    match (program.items) {
+      [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.Match(m) => Some((m.scrutinee, m.arrowSugar)),
+            _ => None,
+          },
+          _ => None,
+        },
+        _ => None,
+      },
+      _ => None,
+    }
+
+  let bundleOk = match (matchShape(bundleProgram)) {
+    Some((None, false)) => true,
+    _ => false,
+  }
+  let scrutineeOk = match (matchShape(scrutineeProgram)) {
+    Some((Some(_), false)) => true,
+    _ => false,
+  }
+  let arrowOk = match (matchShape(arrowProgram)) {
+    Some((Some(_), true)) => true,
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(bundleOk),
+    assertTrue(scrutineeOk),
+    assertTrue(arrowOk),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("raw-like directives remain non-canonical in WMC parser mode", () => {
+  clearErrors()
+  let parsed = Parser.parse("@raw;\n@backend;\nlet x = 1;")
+  let directiveNames = List.filterMap((item: SurfaceAst.TopItem) =>
+    match (item) {
+      SurfaceAst.Directive({ name, _ }) => Some(name.text),
+      _ => None,
+    }, parsed.items)
+  let hasRaw = List.some((name: String) => name == "raw", directiveNames)
+  let hasBackend = List.some((name: String) => name == "backend", directiveNames)
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(hasRaw),
+    assertTrue(hasBackend),
+    assertFalse(parsed.core),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("parser records mut let group modifier", () => {
+  clearErrors()
+  let parsed = Parser.parse("let mut counter = 0;")
+  let hasMutLetGroup = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.kind) {
+      SurfaceAst.LetGroup(SurfaceAst.Mut) => true,
+      _ => false,
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(hasMutLetGroup),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("backend-target directive syntax with args is rejected in canonical parser", () => {
+  clearErrors()
+  let parsed = Parser.parseResult("@backend(\"zig\");\nlet x = 1;")
+  let marked = getMarkedErrors()
+  let hasDirective = List.some(
+    (item: SurfaceAst.TopItem) => match (item) {
+      SurfaceAst.Directive({ name, _ }) => name.text == "backend",
+      _ => false,
+    },
+    parsed.program.items
+  )
+  let hasError = List.length(marked) > 0
+  all([
+    assertTrue(hasDirective),
+    assertTrue(hasError),
+    assertFalse(parsed.program.core),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

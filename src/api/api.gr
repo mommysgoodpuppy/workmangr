@@ -51,6 +51,8 @@ let tokenToJson = (tok: Lexer.Token) => {
     Lexer.RParen => "RParen",
     Lexer.LBrace => "LBrace",
     Lexer.RBrace => "RBrace",
+    Lexer.LBracket => "LBracket",
+    Lexer.RBracket => "RBracket",
     Lexer.FatArrow => "FatArrow",
     Lexer.Question => "Question",
     Lexer.Pipe => "Pipe",

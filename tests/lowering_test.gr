@@ -87,6 +87,60 @@ test("match lowers to apply and pins pattern", () => {
   )
 })
 
+test("constructor argument identifier lowers as binder var not pin", () => {
+  let source = "
+  let x3 = (y) => {
+    match(y) { Some(y) => {y} } 
+  };
+  "
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Fn(fnOuter) => match (fnOuter.items) {
+          [item] => match (item.kind) {
+            CoreAst.Clause(outerClause) =>
+              match (outerClause.body.kind) {
+                CoreAst.Apply(innerCallee, _) =>
+                  match (innerCallee.kind) {
+                    CoreAst.Fn(fnInner) => match (fnInner.items) {
+                      [innerItem] => match (innerItem.kind) {
+                        CoreAst.Clause(innerClause) =>
+                          match (innerClause.param.kind) {
+                            CoreAst.Constructor(_, [arg]) =>
+                              match (arg.kind) {
+                                CoreAst.Var({ _, text }) =>
+                                  if (text == "y") { Ok(void) } else { Err("expected var 'y'") },
+                                _ => Err("expected constructor arg binder var"),
+                              },
+                            _ => Err("expected constructor pattern"),
+                          },
+                        _ => Err("expected inner clause"),
+                      },
+                      _ => Err("expected single inner item"),
+                    },
+                    _ => Err("expected inner fn"),
+                  },
+                _ => Err("expected apply in outer clause body"),
+              },
+            _ => Err("expected outer clause"),
+          },
+          _ => Err("expected single outer item"),
+        },
+        _ => Err("expected outer fn"),
+      }
+    },
+  )
+})
+
 test("call with multiple args lowers to tuple", () => {
   let source = "let x = f(1, 2);"
   let program = Frontend.parseAndLower(source)
@@ -113,6 +167,20 @@ test("call with multiple args lowers to tuple", () => {
   )
 })
 
+test("mut let group lowers with mut group kind", () => {
+  let source = "let mut counter = 0;"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    expectSingleDeclGroup(program),
+    (dg) =>
+      match (dg.kind) {
+        CoreAst.LetGroup(CoreAst.Mut) => Ok(void),
+        _ => Err("expected lowered let group kind Mut"),
+      },
+  )
+})
+
 test("pipe prepends arg when rhs is apply", () => {
   let source = "let x = 1 :> g(2);"
   let program = Frontend.parseAndLower(source)
@@ -133,6 +201,39 @@ test("pipe prepends arg when rhs is apply", () => {
               match (first.kind) {
                 CoreAst.Lit(CoreAst.Int(1)) => Ok(void),
                 _ => Err("expected lhs to be first tuple arg"),
+              },
+            _ => Err("expected tuple arg"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+test("pipe preserves left-to-right argument order with existing rhs args", () => {
+  let source = "let x = seed :> f(one, two);"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(_, arg) =>
+          match (arg.kind) {
+            CoreAst.Tuple([a, b, c]) =>
+              match ((a.kind, b.kind, c.kind)) {
+                (
+                  CoreAst.Ident({ text: "seed", _ }),
+                  CoreAst.Ident({ text: "one", _ }),
+                  CoreAst.Ident({ text: "two", _ }),
+                ) => Ok(void),
+                _ => Err("expected pipe to lower as f(seed, one, two)"),
               },
             _ => Err("expected tuple arg"),
           },
@@ -174,6 +275,196 @@ test("qualified dot call lowers to qualified identifier apply", () => {
             _ => Err("expected ident callee"),
           },
         _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+test("call argument order is preserved left-to-right in lowered tuple", () => {
+  let source = "let x = f(first, second, third);"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(_, arg) =>
+          match (arg.kind) {
+            CoreAst.Tuple([a, b, c]) =>
+              match ((a.kind, b.kind, c.kind)) {
+                (
+                  CoreAst.Ident({ text: "first", _ }),
+                  CoreAst.Ident({ text: "second", _ }),
+                  CoreAst.Ident({ text: "third", _ }),
+                ) => Ok(void),
+                _ => Err("expected call args in source order first, second, third"),
+              },
+            _ => Err("expected tuple arg"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+test("record literal field order is preserved under nominal annotation context", () => {
+  let source = "let x: Triple = .{ a = first, b = second, c = third };"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.RecordLit([
+          CoreAst.Field(nameA, exprA),
+          CoreAst.Field(nameB, exprB),
+          CoreAst.Field(nameC, exprC),
+        ]) =>
+          match ((nameA.text, exprA.kind, nameB.text, exprB.kind, nameC.text, exprC.kind)) {
+            (
+              "a",
+              CoreAst.Ident({ text: "first", _ }),
+              "b",
+              CoreAst.Ident({ text: "second", _ }),
+              "c",
+              CoreAst.Ident({ text: "third", _ }),
+            ) => Ok(void),
+            _ => Err("expected record fields in source order: a, b, c"),
+          },
+        _ => Err("expected ordered record literal fields"),
+      }
+    },
+  )
+})
+
+test("match scrutinee lowers as single apply argument", () => {
+  let source = "
+let pick = (x) => {
+  match(f(x)) {
+    Var(v) => { v }
+  }
+};
+"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Fn(fnOuter) => match (fnOuter.items) {
+          [item] => match (item.kind) {
+            CoreAst.Clause(outerClause) =>
+              match (outerClause.body.kind) {
+                CoreAst.Apply(_bundle, scrutinee) =>
+                  match (scrutinee.kind) {
+                    CoreAst.Apply(callee, arg) =>
+                      match ((callee.kind, arg.kind)) {
+                        (
+                          CoreAst.Ident({ text: "f", _ }),
+                          CoreAst.Ident({ text: "x", _ }),
+                        ) => Ok(void),
+                        _ => Err("expected scrutinee f(x)"),
+                      },
+                    _ => Err("expected lowered scrutinee apply"),
+                  },
+                _ => Err("expected match lowered to apply"),
+              },
+            _ => Err("expected outer clause"),
+          },
+          _ => Err("expected single outer item"),
+        },
+        _ => Err("expected outer fn"),
+      }
+    },
+  )
+})
+
+test("panic call lowers to apply of Panic identifier with string argument", () => {
+  let source = "let boom = Panic(\"boom\");"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(callee, arg) =>
+          match ((callee.kind, arg.kind)) {
+            (
+              CoreAst.Ident({ text: "Panic", _ }),
+              CoreAst.Lit(CoreAst.Str("boom")),
+            ) => Ok(void),
+            _ => Err("expected Panic(\"boom\") apply lowering"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+test("assignment lowers to assign(target, value) in source order", () => {
+  let source = "
+let x = {
+  place = value;
+  0
+};
+"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Let(seqBinding, seqBody) =>
+          match (seqBinding.value.kind) {
+            CoreAst.Apply(callee, arg) =>
+              match ((callee.kind, arg.kind, seqBody.kind)) {
+                (
+                  CoreAst.Ident({ text: "assign", _ }),
+                  CoreAst.Tuple([lhs, rhs]),
+                  CoreAst.Lit(CoreAst.Int(0)),
+                ) =>
+                  match ((lhs.kind, rhs.kind)) {
+                    (
+                      CoreAst.Ident({ text: "place", _ }),
+                      CoreAst.Ident({ text: "value", _ }),
+                    ) => Ok(void),
+                    _ => Err("expected assignment tuple args (place, value)"),
+                  },
+                _ => Err("expected assign call in lowered block sequence"),
+              },
+            _ => Err("expected assign apply"),
+          },
+        _ => Err("expected block sequence lowering via let"),
       }
     },
   )

@@ -9,6 +9,8 @@ from "../src/core/layer1/mod.gr" include Layer1
 from "../src/core/layer2/mod.gr" include Layer2
 from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/types.gr" include Types
+from "../src/core/infection_registry.gr" include InfectionRegistry
+from "../src/core/constraints.gr" include Constraints
 from "map" include Map
 from "list" include List
 from "string" include String
@@ -100,6 +102,34 @@ let rec isEven = (n) => { isOdd(n) } and isOdd = (n) => { isEven(n) };
   let oddScheme = expectTopBinding(state, "isOdd")
   assertFunctionShape(evenScheme)
   assertFunctionShape(oddScheme)
+})
+
+test("let rec and generalizes mutual group for polymorphic downstream uses", () => {
+  let source =
+    "
+let rec id = (x) => { x } and keep = (v) => { id(v) };
+let one = keep(1);
+let truth = keep(true);
+"
+  let state = inferSource(source)
+  let idScheme = expectTopBinding(state, "id")
+  let keepScheme = expectTopBinding(state, "keep")
+  let oneScheme = expectTopBinding(state, "one")
+  let truthScheme = expectTopBinding(state, "truth")
+  let hasTypeMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch,
+    state.marks
+  )
+  let idPoly = List.length(idScheme.quantifiers) >= 1
+  let keepPoly = List.length(keepScheme.quantifiers) >= 1
+  all([
+    assertTrue(idPoly),
+    assertTrue(keepPoly),
+    assertFalse(hasTypeMismatch),
+    assertEquals("Number", Types.typeToString(oneScheme.ty)),
+    assertEquals("Bool", Types.typeToString(truthScheme.ty)),
+  ])
 })
 
 test("type decl registers constructor schemes for expression typing", () => {
@@ -213,6 +243,262 @@ test("inferProgramWithEnv resolves qualified module symbol names", () => {
   assertFunctionShape(scheme)
 })
 
+test("layer1 collects infection registry declarations", () => {
+  let source =
+    "
+domain effect {
+  mergeRow union;
+  conflict [(Open, Closed)];
+  infectsReturn true;
+  default {
+    target arg0;
+    requiresNot [Closed];
+  };
+};
+policy pure {
+  domain effect;
+  rejectsAllDomains;
+};
+op plusNum {
+  domain effect;
+  target arg0;
+  adds [Open];
+};
+annotate io.read {
+  pure,
+};
+"
+  let state = inferSource(source)
+  let domainDef = Map.get("effect", state.infectionRegistry.domains)
+  let policyDef = Map.get("pure", state.infectionRegistry.policies)
+  let opDef = Map.get("plusNum", state.infectionRegistry.opRules)
+  let annotationDef = Map.get("io.read", state.infectionRegistry.annotations)
+
+  assertTrue(domainDef != None)
+  assertTrue(policyDef != None)
+  assertTrue(opDef != None)
+  assertTrue(annotationDef != None)
+})
+
+test("infectious type usage emits deferred domain constraint", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let ok = IOk(1);
+"
+  let state = inferSource(source)
+  let hasShortCircuitConstraint = List.some(
+    (constraint: Constraints.Constraint) =>
+      match (constraint) {
+        Constraints.Domain(label, _) => label == "shortCircuit",
+        _ => false,
+      },
+    state.constraints
+  )
+
+  assertTrue(hasShortCircuitConstraint)
+})
+
+test("op rule adds emits domain constraint at call site", () => {
+  let source =
+    "
+op taint {
+  adds [shortCircuit];
+};
+let taint = (x) => { x };
+let out = taint(1);
+"
+  let state = inferSource(source)
+  let hasAddedConstraint = List.some(
+    (constraint: Constraints.Constraint) =>
+      match (constraint) {
+        Constraints.Domain(label, _) => label == "shortCircuit",
+        _ => false,
+      },
+    state.constraints
+  )
+  assertTrue(hasAddedConstraint)
+})
+
+test("op callPolicy rejects matching infectious argument domain", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+policy pure {
+  rejectDomains [shortCircuit];
+};
+op lift {
+  callPolicy pure;
+};
+let lift = (x) => { x };
+let out = lift(IOk(1));
+"
+  let state = inferSource(source)
+  let rejected = List.some(
+    (mark: Infer.TypeMark) =>
+      mark.reason == Infer.TypeMismatch
+        && String.contains("rejects infection domain shortCircuit", mark.message),
+    state.marks
+  )
+  assertTrue(rejected)
+})
+
+test("op requiresAny/requiresNot/requiresExact are enforced", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+op needsInfection {
+  target arg0;
+  requiresAny [shortCircuit];
+};
+op needsClean {
+  target arg0;
+  requiresNot [shortCircuit];
+};
+op needsExact {
+  target arg0;
+  requiresExact [shortCircuit];
+};
+let needsInfection = (x) => { x };
+let needsClean = (x) => { x };
+let needsExact = (x) => { x };
+let badAny = needsInfection(1);
+let badNot = needsClean(IOk(1));
+let goodExact = needsExact(IOk(1));
+let badExact = needsExact(1);
+"
+  let state = inferSource(source)
+  let hasAnyFailure = List.some(
+    (mark: Infer.TypeMark) => String.contains("requires one matching infection state", mark.message),
+    state.marks
+  )
+  let hasNotFailure = List.some(
+    (mark: Infer.TypeMark) => String.contains("forbids current infection state", mark.message),
+    state.marks
+  )
+  let hasExactFailure = List.some(
+    (mark: Infer.TypeMark) => String.contains("requires exact infection state", mark.message),
+    state.marks
+  )
+  assertTrue(hasAnyFailure)
+  assertTrue(hasNotFailure)
+  assertTrue(hasExactFailure)
+})
+
+test("op target arg1 uses tuple element infection domain", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+op takeSecond {
+  target arg1;
+  requiresAny [shortCircuit];
+};
+let takeSecond = (pair) => { pair };
+let ok = takeSecond((1, IOk(2)));
+let bad = takeSecond((IOk(1), 2));
+"
+  let state = inferSource(source)
+  let requireAnyFailures = List.length(
+    List.filter(
+      (mark: Infer.TypeMark) => String.contains("requires one matching infection state", mark.message),
+      state.marks
+    )
+  )
+  assertEquals(1, requireAnyFailures)
+})
+
+test("op removes updates policy visibility before callPolicy checks", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+policy pure {
+  rejectDomains [shortCircuit];
+};
+op sanitize {
+  target arg0;
+  removes [shortCircuit];
+  callPolicy pure;
+};
+let sanitize = (x) => { x };
+let out = sanitize(IOk(1));
+"
+  let state = inferSource(source)
+  let rejected = List.some(
+    (mark: Infer.TypeMark) =>
+      mark.reason == Infer.TypeMismatch
+        && String.contains("rejects infection domain shortCircuit", mark.message),
+    state.marks
+  )
+  assertFalse(rejected)
+})
+
+test("IResult infects plain unary function application result", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let add1 = (n) => { nativeAdd((n, 1)) };
+let out = add1(IOk(1));
+"
+  let state = inferSource(source)
+  let outScheme = expectTopBinding(state, "out")
+  match (outScheme.ty) {
+    Types.TNominal("IResult", [Types.TNominal("Int", []), _]) => assertTrue(true),
+    _ => fail "expected out : IResult<Number, _>",
+  }
+})
+
+test("IResult infects tuple-arg binary function application result", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let out = nativeAdd((IOk(1), 2));
+"
+  let state = inferSource(source)
+  let outScheme = expectTopBinding(state, "out")
+  match (outScheme.ty) {
+    Types.TNominal("IResult", [Types.TNominal("Int", []), _]) => assertTrue(true),
+    _ => fail "expected out : IResult<Number, _>",
+  }
+})
+
+test("IResult discharge via match remains plain value", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let strip = (input) => {
+  match(input) {
+    IOk(value) => { value }
+    IErr(_) => { 0 }
+  }
+};
+let out = strip(IOk(1));
+"
+  let state = inferSource(source)
+  let outScheme = expectTopBinding(state, "out")
+  assertEquals("Number", Types.typeToString(outScheme.ty))
+})
+
+test("propagation records effect event metadata at call site", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let add1 = (n) => { nativeAdd((n, 1)) };
+let out = add1(IOk(1));
+"
+  let state = inferSource(source)
+  let hasPropagationEvent = List.some(
+    ((_, events): (Number, List<Infer.EffectEvent>)) =>
+      List.some(
+        (event: Infer.EffectEvent) =>
+          event.kind == "propagation"
+            && String.contains("charged by IResult", event.message),
+        events
+      ),
+    Map.toList(state.effectEventsByNode)
+  )
+  assertTrue(hasPropagationEvent)
+})
+
 test("layer1 then layer2 pipeline works explicitly", () => {
   let source =
     "
@@ -294,7 +580,7 @@ let x = r.x;
   assertFalse(hasProjectionErrors)
 })
 
-test("record literals require nominal context", () => {
+test("structural records are not supported (nominal context required)", () => {
   let source =
     "
 let start = .{ x = 1, y = 2 };
@@ -380,7 +666,7 @@ test("match clause guard parses and types as bool", () => {
     "
 let guarded = (x) => {
   match(x) {
-    n when true => { n }
+    Var(n) when true => { n }
   }
 };
 "
@@ -596,6 +882,212 @@ let fromSome = (o) => {
     Types.typeToString(directFromSome.ty),
     Types.typeToString(layeredFromSome.ty)
   )
+})
+
+test("match bare identifier pins outer value while Var introduces binder", () => {
+  let source =
+    "
+let sentinel = 1;
+let classify = (x) => {
+  match(x) {
+    sentinel => { true },
+    Var(bound) => { !bound }
+  }
+};
+"
+  let state = inferSource(source)
+  let hasTypeMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch,
+    state.marks
+  )
+  let hasUnknownBound = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnknownIdentifier
+        && String.contains("bound", entry.message),
+    state.marks
+  )
+  all([
+    assertTrue(hasTypeMismatch),
+    assertFalse(hasUnknownBound),
+  ])
+})
+
+test("constructor pattern argument stays binder even with same outer name", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let y = true;
+let pick = (x) => {
+  match(x) {
+    Some(y) => { y }
+    None => { 0 }
+  }
+};
+"
+  let state = inferSource(source)
+  let pickScheme = expectTopBinding(state, "pick")
+  let hasTypeMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch,
+    state.marks
+  )
+  match (pickScheme.ty) {
+    Types.TFun(Types.TNominal("Option", [Types.TNumber]), Types.TNumber) =>
+      all([
+        assertFalse(hasTypeMismatch),
+        assertTrue(true),
+      ]),
+    _ => fail("expected pick : Option<Number> -> Number"),
+  }
+})
+
+test("tuple bare identifiers in match patterns are pins, not binders", () => {
+  let source =
+    "
+let x = true;
+let y = false;
+let onlyPair = (p) => {
+  match(p) {
+    (x, y) => { 1 }
+    _ => { 0 }
+  }
+};
+"
+  let state = inferSource(source)
+  let onlyPairScheme = expectTopBinding(state, "onlyPair")
+  let hasUnknownIdentifier = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnknownIdentifier
+        && (String.contains("x", entry.message) || String.contains("y", entry.message)),
+    state.marks
+  )
+  match (onlyPairScheme.ty) {
+    Types.TFun(Types.TTuple([Types.TBool, Types.TBool]), Types.TNumber) =>
+      all([
+        assertFalse(hasUnknownIdentifier),
+        assertTrue(true),
+      ]),
+    _ => fail("expected onlyPair : (Bool, Bool) -> Number"),
+  }
+})
+
+test("Panic is typed as polymorphic abort expression", () => {
+  let source =
+    "
+let choose = (b) => {
+  if (b) {
+    Panic(\"boom\")
+  } else {
+    1
+  }
+};
+"
+  let state = inferSource(source)
+  let chooseScheme = expectTopBinding(state, "choose")
+  let hasUnknownPanic = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.UnknownIdentifier
+        && String.contains("Panic", entry.message),
+    state.marks
+  )
+  match (chooseScheme.ty) {
+    Types.TFun(Types.TBool, Types.TNumber) =>
+      all([
+        assertFalse(hasUnknownPanic),
+        assertTrue(true),
+      ]),
+    _ => fail "expected choose : Bool -> Number",
+  }
+})
+
+test("non-exhaustive match emits diagnostic and inference continues", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let onlySome = (o) => {
+  match(o) {
+    Some(v) => { v }
+  }
+};
+let keep = 1;
+"
+  let state = inferSource(source)
+  let keepScheme = expectTopBinding(state, "keep")
+  let hasNonExhaustive = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("non-exhaustive match for type Option", entry.message),
+    state.marks
+  )
+  all([
+    assertEquals("Number", Types.typeToString(keepScheme.ty)),
+    assertTrue(hasNonExhaustive),
+  ])
+})
+
+test("guarded constructor arm does not satisfy exhaustiveness", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let guardedOnly = (o) => {
+  match(o) {
+    Some(v) when true => { v }
+  }
+};
+"
+  let state = inferSource(source)
+  let hasNonExhaustive = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("non-exhaustive match for type Option", entry.message),
+    state.marks
+  )
+  assertTrue(hasNonExhaustive)
+})
+
+test("wildcard arm satisfies exhaustiveness for closed sum", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let withFallback = (o) => {
+  match(o) {
+    Some(v) => { v }
+    _ => { 0 }
+  }
+};
+"
+  let state = inferSource(source)
+  let hasNonExhaustive = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("non-exhaustive match for type Option", entry.message),
+    state.marks
+  )
+  assertFalse(hasNonExhaustive)
+})
+
+test("match over constructors from multiple nominal types emits diagnostic", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+type Result<T, E> = Ok<T> | Err<E>;
+let bad = (x) => {
+  match(x) {
+    Some(v) => { v }
+    Ok(v) => { v }
+  }
+};
+let keep = 1;
+"
+  let state = inferSource(source)
+  let keepScheme = expectTopBinding(state, "keep")
+  let hasMixedTypeDiag = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("match clauses reference multiple nominal types", entry.message),
+    state.marks
+  )
+  all([
+    assertEquals("Number", Types.typeToString(keepScheme.ty)),
+    assertTrue(hasMixedTypeDiag),
+  ])
 })
 
 let results = runTests()

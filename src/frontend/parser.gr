@@ -369,6 +369,10 @@ let isKeywordName = (name: String) =>
     || name == "import"
     || name == "as"
     || name == "reexport"
+    || name == "domain"
+    || name == "policy"
+    || name == "op"
+    || name == "annotate"
 
 let isOpaqueLineStart = (state: ParseState) => {
   let tok = currentToken(state)
@@ -577,6 +581,78 @@ let expectAnyName = (state: ParseState) => {
       (recoveryName, recoveryTok, state1)
     },
   }
+}
+
+let ruleNameFromToken = (tok: Lexer.Token) =>
+  match (tok.kind) {
+    Lexer.LitName(name) => Some(name),
+    Lexer.ConstructorTok(name) => Some(name),
+    Lexer.LitBool(true) => Some("true"),
+    Lexer.LitBool(false) => Some("false"),
+    _ => None,
+  }
+
+let expectRuleName = (state: ParseState) => {
+  let tok = currentToken(state)
+  match (ruleNameFromToken(tok)) {
+    Some(text) => (text, tok, dropToken(state)),
+    None => {
+      let syntheticName = "_missing"
+      let syntheticSpan = Source.makeSpan(
+        tok.span.line,
+        tok.span.col,
+        tok.span.start,
+        tok.span.start
+      )
+      let syntheticTok: Lexer.Token = {
+        kind: Lexer.LitName(syntheticName),
+        span: syntheticSpan,
+        mate: None,
+      }
+      let (markId, state1) = freshId(state)
+      let mark: SurfaceAst.Mark = {
+        node: { id: markId, span: tok.span },
+        kind: SurfaceAst.MissingToken("rule name"),
+        expected: SurfaceAst.ExpectToken,
+      }
+      let recoveryName = Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Expected rule name",
+        syntheticName,
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
+      )
+      let recoveryTok = Error.createMarkedError(
+        Error.Parsing,
+        mark,
+        "Expected rule name",
+        syntheticTok,
+        clues=[Error.Received(Lexer.tokenKindToString(tok.kind))],
+        severity=Error.SError
+      )
+      (recoveryName, recoveryTok, state1)
+    },
+  }
+}
+
+let parseQualifiedRuleName = (state: ParseState) => {
+  let (first, firstTok, state1) = expectRuleName(state)
+  let rec loop = (partsRev: List<String>, endTok: Lexer.Token, stateX: ParseState) =>
+    if (kindIs(currentToken(stateX).kind, Lexer.Period)) {
+      let (_, state2) = expectSimple(Lexer.Period, stateX)
+      let (part, partTok, state3) = expectRuleName(state2)
+      loop([part, ...partsRev], partTok, state3)
+    } else {
+      (List.reverse(partsRev), endTok, stateX)
+    }
+  let (parts, endTok, state2) = loop([first], firstTok, state1)
+  let joined = match (parts) {
+    [] => "",
+    [head, ...tail] =>
+      List.reduce((acc: String, part: String) => acc ++ "." ++ part, head, tail),
+  }
+  (joined, endTok, state2)
 }
 
 let expectTypeParamName = (state: ParseState) => {
@@ -955,46 +1031,51 @@ let blockItemsToBody = (
 let rec parseExpr: Parser<SurfaceAst.Expr> = state => {
   let (leadingTrivia, state0) = takeLeadingGapTrivia(state, [])
   let (coreExpr: SurfaceAst.Expr, coreState) = parseInfix(state0)
-  let (expr, state1) = match (currentToken(coreState).kind) {
+  let rec parsePipeChain = (lhs: SurfaceAst.Expr, stateX: ParseState) =>
+    match (currentToken(stateX).kind) {
+      Lexer.PipeArrow => {
+        let (id, stateAfterId) = freshId(stateX)
+        let opTok = currentToken(stateAfterId)
+        let (_, state2) = expectSimple(Lexer.PipeArrow, stateAfterId)
+        let (opId, state2b) = freshId(state2)
+        let (rhs, state3) = parseInfix(state2b)
+        let span = spanFromTokens(lhs.node.span, rhs.node.span)
+        let node = makeExpr(
+          id,
+          span,
+          InfixChain(
+            {
+              first: lhs,
+              rest: [({ node: { id: opId, span: opTok.span }, text: ":>" }, rhs)],
+            },
+          )
+        )
+        parsePipeChain(node, state3)
+      },
+      _ => (lhs, stateX),
+    }
+  let (pipedExpr, pipedState) = parsePipeChain(coreExpr, coreState)
+  let (expr, state1) = match (currentToken(pipedState).kind) {
     Lexer.FatArrow => {
-      let (id, stateAfterId) = freshId(coreState)
+      let (id, stateAfterId) = freshId(pipedState)
       let opTok = currentToken(stateAfterId)
       let (_, state2) = expectSimple(Lexer.FatArrow, stateAfterId)
       let (opId, state2b) = freshId(state2)
       let (rhs, state3): (SurfaceAst.Expr, ParseState) = parseExpr(state2b)
-      let span = spanFromTokens(coreExpr.node.span, rhs.node.span)
+      let span = spanFromTokens(pipedExpr.node.span, rhs.node.span)
       let node: SurfaceAst.Expr = makeExpr(
         id,
         span,
         InfixChain(
           {
-            first: coreExpr,
+            first: pipedExpr,
             rest: [({ node: { id: opId, span: opTok.span }, text: "=>" }, rhs)],
           },
         )
       )
       (node, state3)
     },
-    Lexer.PipeArrow => {
-      let (id, stateAfterId) = freshId(coreState)
-      let opTok = currentToken(stateAfterId)
-      let (_, state2) = expectSimple(Lexer.PipeArrow, stateAfterId)
-      let (opId, state2b) = freshId(state2)
-      let (rhs, state3) = parseExpr(state2b)
-      let span = spanFromTokens(coreExpr.node.span, rhs.node.span)
-      let node = makeExpr(
-        id,
-        span,
-        InfixChain(
-          {
-            first: coreExpr,
-            rest: [({ node: { id: opId, span: opTok.span }, text: ":>" }, rhs)],
-          },
-        )
-      )
-      (node, state3)
-    },
-    _ => (coreExpr, coreState),
+    _ => (pipedExpr, pipedState),
   }
   let (trailingTrivia, state2) = takeTrailingGapTriviaOnLine(
     expr.node.span.line,
@@ -2122,6 +2203,26 @@ and parseTopLevels = (state: ParseState) => {
         let (rest, state2) = continueTopLevels(state1)
         ([typeDef, ...rest], state2)
       },
+      Lexer.LitName(name) when name == "domain" => {
+        let (ruleDecl, state1) = parseDomainDeclTopItem(state)
+        let (rest, state2) = continueTopLevels(state1)
+        ([ruleDecl, ...rest], state2)
+      },
+      Lexer.LitName(name) when name == "policy" => {
+        let (ruleDecl, state1) = parsePolicyDeclTopItem(state)
+        let (rest, state2) = continueTopLevels(state1)
+        ([ruleDecl, ...rest], state2)
+      },
+      Lexer.LitName(name) when name == "op" => {
+        let (ruleDecl, state1) = parseOpDeclTopItem(state)
+        let (rest, state2) = continueTopLevels(state1)
+        ([ruleDecl, ...rest], state2)
+      },
+      Lexer.LitName(name) when name == "annotate" => {
+        let (ruleDecl, state1) = parseAnnotateDeclTopItem(state)
+        let (rest, state2) = continueTopLevels(state1)
+        ([ruleDecl, ...rest], state2)
+      },
       _ => {
         let (trivia, state1) = consumeOpaqueLine(state)
         let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
@@ -2333,6 +2434,288 @@ and parseTypeParams = (state: ParseState) => {
     (typeParams, state3)
   }
 }
+
+and parseRuleListPart = (state: ParseState) => {
+  let (_, state1) = expectSimple(Lexer.LBracket, state)
+  if (kindIs(currentToken(state1).kind, Lexer.RBracket)) {
+    let (closeTok, state2) = expectSimple(Lexer.RBracket, state1)
+    (SurfaceAst.RuleList([]): SurfaceAst.RuleValuePart, closeTok.span, state2)
+  } else if (kindIs(currentToken(state1).kind, Lexer.LParen)) {
+    let rec parsePairs = (pairsRev: List<(String, String)>, stateX: ParseState) => {
+      let (_, state2) = expectSimple(Lexer.LParen, stateX)
+      let (left, _leftTok, state3) = expectRuleName(state2)
+      let (_, state4) = expectSimple(Lexer.Comma, state3)
+      let (right, _rightTok, state5) = expectRuleName(state4)
+      let (_, state6) = expectSimpleOrRecover(
+        Lexer.RParen,
+        state5,
+        "to close rule pair"
+      )
+      let nextPairs = [(left, right), ...pairsRev]
+      if (kindIs(currentToken(state6).kind, Lexer.Comma)) {
+        let (_, state7) = expectSimple(Lexer.Comma, state6)
+        parsePairs(nextPairs, state7)
+      } else {
+        (List.reverse(nextPairs), state6)
+      }
+    }
+    let (pairs, state2) = parsePairs([], state1)
+    let (closeTok, state3) = expectSimpleOrRecover(
+      Lexer.RBracket,
+      state2,
+      "to close rule pair list"
+    )
+    (SurfaceAst.RulePairList(pairs), closeTok.span, state3)
+  } else {
+    let rec parseNames = (itemsRev: List<String>, stateX: ParseState) => {
+      let (item, _itemTok, state2) = expectRuleName(stateX)
+      let nextItems = [item, ...itemsRev]
+      if (kindIs(currentToken(state2).kind, Lexer.Comma)) {
+        let (_, state3) = expectSimple(Lexer.Comma, state2)
+        parseNames(nextItems, state3)
+      } else {
+        (List.reverse(nextItems), state2)
+      }
+    }
+    let (items, state2) = parseNames([], state1)
+    let (closeTok, state3) = expectSimpleOrRecover(
+      Lexer.RBracket,
+      state2,
+      "to close rule list"
+    )
+    (SurfaceAst.RuleList(items), closeTok.span, state3)
+  }
+}
+
+and parseRuleEntry = (state: ParseState) => {
+  let (entryId, state1) = freshId(state)
+  let (keyText, keyTok, state2) = expectRuleName(state1)
+  let (keyId, state3) = freshId(state2)
+  let keyName: SurfaceAst.Name = {
+    node: { id: keyId, span: keyTok.span },
+    text: keyText,
+  }
+  let tok = currentToken(state3)
+  let stops = kindIs(tok.kind, Lexer.RBrace)
+    || kindIs(tok.kind, Lexer.SemiColon)
+    || kindIs(tok.kind, Lexer.Comma)
+  if (stops) {
+    let entry: SurfaceAst.RuleEntry = {
+      node: { id: entryId, span: keyTok.span },
+      key: keyName,
+      value: None,
+    }
+    (entry, state3)
+  } else {
+    let (parts, endSpan, state4) = if (kindIs(tok.kind, Lexer.LBracket)) {
+      let (part, partSpan, stateX) = parseRuleListPart(state3)
+      ([part], partSpan, stateX)
+    } else {
+      let (nameVal, nameTok, stateX) = expectRuleName(state3)
+      if (kindIs(currentToken(stateX).kind, Lexer.LBracket)) {
+        let (listPart, listSpan, stateY) = parseRuleListPart(stateX)
+        ([SurfaceAst.RuleName(nameVal), listPart], listSpan, stateY)
+      } else {
+        ([SurfaceAst.RuleName(nameVal)], nameTok.span, stateX)
+      }
+    }
+    let value: SurfaceAst.RuleValue = { parts: parts }
+    let entry: SurfaceAst.RuleEntry = {
+      node: { id: entryId, span: spanFromTokens(keyTok.span, endSpan) },
+      key: keyName,
+      value: Some(value),
+    }
+    (entry, state4)
+  }
+}
+
+and parseRuleBlock = (state: ParseState) => {
+  let (_, state1) = expectSimple(Lexer.LBrace, state)
+  let rec loop = (entriesRev: List<SurfaceAst.RuleEntry>, stateX: ParseState) =>
+    if (kindIs(currentToken(stateX).kind, Lexer.RBrace)) {
+      let (_, state2) = expectSimple(Lexer.RBrace, stateX)
+      (List.reverse(entriesRev), state2)
+    } else if (kindIs(currentToken(stateX).kind, Lexer.EOF)) {
+      (List.reverse(entriesRev), stateX)
+    } else {
+      let (entry, state2) = parseRuleEntry(stateX)
+      let state3 = if (
+        kindIs(currentToken(state2).kind, Lexer.SemiColon)
+        || kindIs(currentToken(state2).kind, Lexer.Comma)
+      ) {
+        dropToken(state2)
+      } else {
+        state2
+      }
+      loop([entry, ...entriesRev], state3)
+    }
+  loop([], state1)
+}
+
+and parseDomainRuleBlock = (state: ParseState) => {
+  let (_, state1) = expectSimple(Lexer.LBrace, state)
+  let rec loop = (
+    entriesRev: List<SurfaceAst.RuleEntry>,
+    defaultEntriesOpt: Option<List<SurfaceAst.RuleEntry>>,
+    stateX: ParseState,
+  ) =>
+    if (kindIs(currentToken(stateX).kind, Lexer.RBrace)) {
+      let (_, state2) = expectSimple(Lexer.RBrace, stateX)
+      (List.reverse(entriesRev), defaultEntriesOpt, state2)
+    } else if (kindIs(currentToken(stateX).kind, Lexer.EOF)) {
+      (List.reverse(entriesRev), defaultEntriesOpt, stateX)
+    } else {
+      let nextTok = tokenAt(stateX.tokens, 1)
+      let isDefault = match ((currentToken(stateX).kind, nextTok)) {
+        (Lexer.LitName("default"), Some({ kind: Lexer.LBrace, _ })) => true,
+        _ => false,
+      }
+      if (isDefault) {
+        let (_, state2) = expectKeyword("default", stateX)
+        let (defaultEntries, state3) = parseRuleBlock(state2)
+        let state4 = if (
+          kindIs(currentToken(state3).kind, Lexer.SemiColon)
+          || kindIs(currentToken(state3).kind, Lexer.Comma)
+        ) {
+          dropToken(state3)
+        } else {
+          state3
+        }
+        loop(entriesRev, Some(defaultEntries), state4)
+      } else {
+        let (entry, state2) = parseRuleEntry(stateX)
+        let state3 = if (
+          kindIs(currentToken(state2).kind, Lexer.SemiColon)
+          || kindIs(currentToken(state2).kind, Lexer.Comma)
+        ) {
+          dropToken(state2)
+        } else {
+          state2
+        }
+        loop([entry, ...entriesRev], defaultEntriesOpt, state3)
+      }
+    }
+  loop([], None, state1)
+}
+
+and makeRuleDeclGroup = (
+  state: ParseState,
+  span: Source.Span,
+  kind: SurfaceAst.RuleKind,
+  decl: SurfaceAst.Decl,
+) => {
+  let (groupId, state1) = freshId(state)
+  let group: SurfaceAst.TopItem = SurfaceAst.DeclGroup(
+    {
+      node: { id: groupId, span },
+      exported: false,
+      kind: SurfaceAst.RuleGroup(kind),
+      decls: [decl],
+    },
+  )
+  (group, state1)
+}
+
+and parseDomainDeclTopItem = (state: ParseState) => {
+  let (domainTok, state1) = expectKeyword("domain", state)
+  let (nameText, nameTok, state2) = expectName(state1)
+  let (nameId, state3) = freshId(state2)
+  let name: SurfaceAst.Name = { node: { id: nameId, span: nameTok.span }, text: nameText }
+  let (entries, defaultEntries, state4) = parseDomainRuleBlock(state3)
+  let span = spanFromTokens(domainTok.span, currentToken(state4).span)
+  let (declId, state5) = freshId(state4)
+  let decl: SurfaceAst.Decl = SurfaceAst.DomainDecl(
+    { node: { id: declId, span }, name, entries, defaultEntries },
+  )
+  let (group, state6) = makeRuleDeclGroup(state5, span, SurfaceAst.Domain, decl)
+  let state7 = consumeTopLevelSemicolon(state6, span)
+  (group, state7)
+}
+
+and parsePolicyDeclTopItem = (state: ParseState) => {
+  let (policyTok, state1) = expectKeyword("policy", state)
+  let (nameText, nameTok, state2) = expectName(state1)
+  let (nameId, state3) = freshId(state2)
+  let name: SurfaceAst.Name = { node: { id: nameId, span: nameTok.span }, text: nameText }
+  let (entries, state4) = parseRuleBlock(state3)
+  let span = spanFromTokens(policyTok.span, currentToken(state4).span)
+  let (declId, state5) = freshId(state4)
+  let policyDecl: SurfaceAst.PolicyDecl = {
+    node: { id: declId, span },
+    name: name,
+    entries: entries,
+  }
+  let decl: SurfaceAst.Decl = SurfaceAst.PolicyDecl(
+    policyDecl,
+  )
+  let (group, state6) = makeRuleDeclGroup(state5, span, SurfaceAst.Policy, decl)
+  let state7 = consumeTopLevelSemicolon(state6, span)
+  (group, state7)
+}
+
+and parseOpDeclTopItem = (state: ParseState) => {
+  let (opTok, state1) = expectKeyword("op", state)
+  let (nameText, endTok, state2) = parseQualifiedRuleName(state1)
+  let (nameId, state3) = freshId(state2)
+  let name: SurfaceAst.Name = { node: { id: nameId, span: endTok.span }, text: nameText }
+  let (entries, state4) = parseRuleBlock(state3)
+  let span = spanFromTokens(opTok.span, currentToken(state4).span)
+  let (declId, state5) = freshId(state4)
+  let opDecl: SurfaceAst.OpDecl = {
+    node: { id: declId, span },
+    name: name,
+    entries: entries,
+  }
+  let decl: SurfaceAst.Decl = SurfaceAst.OpDecl(
+    opDecl,
+  )
+  let (group, state6) = makeRuleDeclGroup(state5, span, SurfaceAst.Op, decl)
+  let state7 = consumeTopLevelSemicolon(state6, span)
+  (group, state7)
+}
+
+and parseAnnotateDeclTopItem = (state: ParseState) => {
+  let (annotateTok, state1) = expectKeyword("annotate", state)
+  let (targetText, targetTok, state2) = parseQualifiedRuleName(state1)
+  let (targetId, state3) = freshId(state2)
+  let target: SurfaceAst.Name = {
+    node: { id: targetId, span: targetTok.span },
+    text: targetText,
+  }
+  let (_, state4) = expectSimple(Lexer.LBrace, state3)
+  let rec parsePolicies = (itemsRev: List<SurfaceAst.Name>, stateX: ParseState) =>
+    if (kindIs(currentToken(stateX).kind, Lexer.RBrace)) {
+      (List.reverse(itemsRev), stateX)
+    } else {
+      let (policyText, policyTok, stateY) = expectRuleName(stateX)
+      let (policyId, stateY2) = freshId(stateY)
+      let policy: SurfaceAst.Name = {
+        node: { id: policyId, span: policyTok.span },
+        text: policyText,
+      }
+      if (kindIs(currentToken(stateY2).kind, Lexer.Comma)) {
+        let (_, stateY3) = expectSimple(Lexer.Comma, stateY2)
+        parsePolicies([policy, ...itemsRev], stateY3)
+      } else {
+        parsePolicies([policy, ...itemsRev], stateY2)
+      }
+    }
+  let (policies, state5) = parsePolicies([], state4)
+  let (_, state6) = expectSimpleOrRecover(
+    Lexer.RBrace,
+    state5,
+    "to close annotate block"
+  )
+  let span = spanFromTokens(annotateTok.span, targetTok.span)
+  let (declId, state7) = freshId(state6)
+  let decl: SurfaceAst.Decl = SurfaceAst.AnnotateDecl(
+    { node: { id: declId, span }, target, policies },
+  )
+  let (group, state8) = makeRuleDeclGroup(state7, span, SurfaceAst.Annotate, decl)
+  let state9 = consumeTopLevelSemicolon(state8, span)
+  (group, state9)
+}
+
 and parseTypeDef: ParseState => (SurfaceAst.TopItem, ParseState) = state => {
   let (id, state1) = freshId(state)
   let (typeTok, state2) = expectKeyword("type", state1)
@@ -2910,8 +3293,38 @@ and parseBlockItems = (state: ParseState) => {
 and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
   let (leadingTrivia, state0) = takeLeadingGapTrivia(state, [])
   let state = state0
+  let parseVarPattern = (stateX: ParseState, spanTok: Lexer.Token) => {
+    let (_, state1) = expectSimple(Lexer.LParen, dropToken(stateX))
+    let (nameStr, nameTok, state2) = expectName(state1)
+    let (_, state3) = expectSimpleOrRecover(
+      Lexer.RParen,
+      state2,
+      "to close Var(...) pattern"
+    )
+    let (patId, state4) = freshId(state3)
+    let (nameId, state5) = freshId(state4)
+    let node = { id: patId, span: spanTok.span }
+    let attach = { leading: [], trailing: [], dangling: [] }
+    let nameNode = {
+      node: { id: nameId, span: nameTok.span },
+      text: nameStr,
+    }
+    let kind: SurfaceAst.PatternKind = SurfaceAst.Var(nameNode)
+    let pat: SurfaceAst.Pattern = { node, kind, attach }
+    (pat, state5)
+  }
   let tok = currentToken(state)
   let (corePattern, coreState) = match (tok.kind) {
+    Lexer.KwVar => parseVarPattern(state, tok),
+    Lexer.KwAllErrors => {
+      let state1 = dropToken(state)
+      let (patId, state2) = freshId(state1)
+      let node = { id: patId, span: tok.span }
+      let attach = { leading: [], trailing: [], dangling: [] }
+      let kind: SurfaceAst.PatternKind = SurfaceAst.AllErrors
+      let pat: SurfaceAst.Pattern = { node, kind, attach }
+      (pat, state2)
+    },
     Lexer.Wildcard => {
       let state1 = dropToken(state)
       let (id, state2) = freshId(state1)
@@ -2978,25 +3391,14 @@ and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
     },
     Lexer.ConstructorTok(name) => {
       if (name == "Var") {
-        // Var(name) for binding
-        let (_, state1) = expectSimple(Lexer.LParen, dropToken(state))
-        let (nameStr, nameTok, state2) = expectName(state1)
-        let (_, state3) = expectSimpleOrRecover(
-          Lexer.RParen,
-          state2,
-          "to close Var(...) pattern"
-        )
-        let (patId, state4) = freshId(state3)
-        let (nameId, state5) = freshId(state4)
+        parseVarPattern(state, tok)
+      } else if (name == "AllErrors") {
+        let (patId, state1) = freshId(dropToken(state))
         let node = { id: patId, span: tok.span }
         let attach = { leading: [], trailing: [], dangling: [] }
-        let nameNode = {
-          node: { id: nameId, span: nameTok.span },
-          text: nameStr,
-        }
-        let kind: SurfaceAst.PatternKind = SurfaceAst.Var(nameNode)
+        let kind: SurfaceAst.PatternKind = SurfaceAst.AllErrors
         let pat: SurfaceAst.Pattern = { node, kind, attach }
-        (pat, state5)
+        (pat, state1)
       } else if (kindIs(currentToken(dropToken(state)).kind, Lexer.LParen)) {
         let state1 = dropToken(state)
         let (_, state2) = expectSimple(Lexer.LParen, state1)

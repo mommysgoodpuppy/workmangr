@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno test --allow-run --allow-read
+#!/usr/bin/env -S deno test --allow-run --allow-read --allow-env
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -12,6 +12,8 @@ class LspClient {
   nextId = 1;
   pending = new Map<number, Pending>();
   runtimeError: string | null = null;
+  diagnosticsByUri = new Map<string, unknown[]>();
+  publishedUris = new Set<string>();
 
   constructor(proc: Deno.ChildProcess) {
     this.proc = proc;
@@ -51,6 +53,14 @@ class LspClient {
             this.pending.delete(msg.id);
             p.resolve(msg.result);
           }
+        } else if (
+          msg.method === "textDocument/publishDiagnostics"
+          && msg.params
+          && typeof msg.params.uri === "string"
+          && Array.isArray(msg.params.diagnostics)
+        ) {
+          this.publishedUris.add(msg.params.uri);
+          this.diagnosticsByUri.set(msg.params.uri, msg.params.diagnostics);
         }
       }
     }
@@ -168,5 +178,80 @@ Deno.test({
   if (runtimeError) {
     throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
   }
+  },
+});
+
+Deno.test({
+  name: "LSP didOpen on aoc2016/1 should publish diagnostics for the opened file",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const cwd = Deno.cwd();
+    const stdRoot = Deno.env.get("WORKMAN_STD_ROOT") ?? "/Users/profilence/git/workman/std";
+    const target = "/Users/profilence/git/workman/aoc2016/1.wm";
+
+    try {
+      await Deno.stat(target);
+      await Deno.stat(stdRoot);
+    } catch {
+      return; // skip when external fixtures are unavailable
+    }
+
+    const source = await Deno.readTextFile(target);
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--dir", stdRoot,
+        "--dir", "/Users/profilence/git/workman",
+        "--dir", "/Users/profilence/git",
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+        "--std-root", stdRoot,
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    const client = new LspClient(proc);
+    const uri = `file://${target}`;
+
+    await client.request("initialize", {
+      processId: null,
+      rootUri: `file://${cwd}`,
+      capabilities: {},
+    });
+    await client.notify("initialized", {});
+    await client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri,
+        languageId: "wm",
+        version: 1,
+        text: source,
+      },
+    });
+
+    const deadlineMs = Date.now() + 12000;
+    while (
+      Date.now() < deadlineMs
+      && client.runtimeError == null
+      && !client.publishedUris.has(uri)
+    ) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const runtimeError = client.runtimeError;
+    const targetDiagnostics = client.diagnosticsByUri.get(uri) ?? [];
+    const sawTargetPublish = client.publishedUris.has(uri);
+    await client.close();
+
+    if (runtimeError) {
+      throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
+    }
+    if (!sawTargetPublish) {
+      throw new Error("expected publishDiagnostics notification for opened file, got none");
+    }
+    void targetDiagnostics;
   },
 });

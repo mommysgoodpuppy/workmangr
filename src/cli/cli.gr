@@ -2,17 +2,21 @@ module Cli
 
 from "array" include Array
 from "fs" include Fs
+from "map" include Map
+from "number" include Number
 from "path" include Path
 from "string" include String
 from "wasi/process" include Process
 from "list" include List
 
 from "../core/analysis.gr" include Analysis
+from "../core/module_infer.gr" include ModuleInfer
+from "../module/module_system.gr" include ModuleSystem
 from "./report.gr" include Report
 from "../frontend/parser.gr" include Parser
 from "../frontend/lower.gr" include Lower
 
-let usage = "Usage: wmgr type <file.wm> | wmgr ast <file.wm>"
+let usage = "Usage: wmgr type [--line <line>] [--std-root <path>] <file.wm> | wmgr ast <file.wm>"
 
 let exitWith = (code: Number, message: String) => {
   print(message)
@@ -47,22 +51,7 @@ let main = () => {
     Err(_ex) => exitWith(1, "Failed to read argv"),
     Ok(args) => {
       let argCount = Array.length(args)
-      let commandFromArg = if (argCount > 1) {
-        Some(Array.get(1, args))
-      } else {
-        None
-      }
-      let fileFromArg = if (argCount > 2) {
-        Some(Array.get(2, args))
-      } else if (
-        argCount > 1
-        && Array.get(1, args) != "type"
-        && Array.get(1, args) != "ast"
-      ) {
-        Some(Array.get(1, args))
-      } else {
-        None
-      }
+      let commandFromArg = if (argCount > 1) { Some(Array.get(1, args)) } else { None }
 
       let command = match (commandFromArg) {
         Some(cmd) => cmd,
@@ -72,15 +61,103 @@ let main = () => {
         },
       }
 
-      let filePathOpt = match (fileFromArg) {
-        Some(path) => Some(path),
-        None => envLookup("WMGR_FILE"),
+      let rec parseTypeArgs = (
+        idx: Number,
+        lineFilter: Option<Number>,
+        stdRoot: Option<String>,
+        filePath: Option<String>,
+      ) =>
+        if (idx >= argCount) {
+          (lineFilter, stdRoot, filePath)
+        } else {
+          let arg = Array.get(idx, args)
+          if (arg == "--line") {
+            if (idx + 1 >= argCount) {
+              exitWith(1, "Missing value for --line")
+              (lineFilter, stdRoot, filePath)
+            } else {
+              let lineStr = Array.get(idx + 1, args)
+              let parsed = Number.parseInt(lineStr, radix=10)
+              match (parsed) {
+                Ok(lineNum) when lineNum > 0 =>
+                  parseTypeArgs(idx + 2, Some(lineNum), stdRoot, filePath),
+                _ => {
+                  exitWith(1, "Invalid line number, must be a positive integer")
+                  (lineFilter, stdRoot, filePath)
+                },
+              }
+            }
+          } else if (arg == "--std-root") {
+            if (idx + 1 >= argCount) {
+              exitWith(1, "Missing value for --std-root")
+              (lineFilter, stdRoot, filePath)
+            } else {
+              let root = Array.get(idx + 1, args)
+              if (root == "") {
+                exitWith(1, "Invalid --std-root value")
+                (lineFilter, stdRoot, filePath)
+              } else {
+                parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
+              }
+            }
+          } else if (arg == "--std") {
+            if (idx + 1 >= argCount) {
+              exitWith(1, "Missing value for --std")
+              (lineFilter, stdRoot, filePath)
+            } else {
+              let root = Array.get(idx + 1, args)
+              if (root == "") {
+                exitWith(1, "Invalid --std value")
+                (lineFilter, stdRoot, filePath)
+              } else {
+                parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
+              }
+            }
+          } else if (String.startsWith("-", arg)) {
+            exitWith(1, "Unknown type option: " ++ arg)
+            (lineFilter, stdRoot, filePath)
+          } else {
+            match (filePath) {
+              Some(_) => {
+                exitWith(1, "Multiple input files provided")
+                (lineFilter, stdRoot, filePath)
+              },
+              None => parseTypeArgs(idx + 1, lineFilter, stdRoot, Some(arg)),
+            }
+          }
+        }
+
+      let (lineFilter, stdRootArg, fileFromArg) = if (command == "type") {
+        parseTypeArgs(2, None, None, None)
+      } else if (command == "ast") {
+        if (argCount > 2) {
+          (None, None, Some(Array.get(2, args)))
+        } else {
+          (None, None, None)
+        }
+      } else {
+        if (argCount > 1) {
+          (None, None, Some(Array.get(1, args)))
+        } else {
+          (None, None, None)
+        }
+      }
+      let stdRoot = match ((stdRootArg, envLookup("WMGR_STD_ROOT"), envLookup("WORKMAN_STD_ROOT"))) {
+        (Some(root), _, _) => Some(root),
+        (None, Some(root), _) => Some(root),
+        (None, None, envRoot) => envRoot,
       }
 
-      match (filePathOpt) {
-        None => exitWith(1, usage),
-        Some(filePath) => {
-          print(filePath)
+      let filePathOpt = match ((fileFromArg, envLookup("WMGR_FILE"))) {
+        (Some(path), _) => Some(path),
+        (None, envPath) => envPath,
+      }
+
+      match ((command, filePathOpt)) {
+        (_cmd, None) => exitWith(1, usage),
+        (cmd, Some(_)) when cmd != "type" && cmd != "ast" =>
+          exitWith(1, usage),
+        (_, Some(filePath)) => {
           let path = Path.fromString(filePath)
           match (Fs.Utf8.readFile(path)) {
             Err(fsErr) =>
@@ -97,11 +174,27 @@ let main = () => {
                 print("---")
                 print("Lowered AST:")
                 print(lowered)
-              } else if (command == "type") {
-                let analysis = Analysis.analyze(source)
-                Report.report(source, analysis)
               } else {
-                exitWith(1, usage)
+                let baseOptions = ModuleSystem.defaultOptions()
+                let options = match (stdRoot) {
+                  Some(root) => { ...baseOptions, stdRoots: [root] },
+                  None => baseOptions,
+                }
+                let inferred = ModuleInfer.inferEntry(filePath, options=options)
+                match (Map.get(inferred.graph.entry, inferred.modules)) {
+                  Some(summary) => {
+                    let analysis: Analysis.Analysis = {
+                      program: summary.program,
+                      infer: summary.infer,
+                    }
+                    Report.reportWithLine(source, analysis, lineFilter)
+                  },
+                  None =>
+                    exitWith(
+                      1,
+                      "Failed to infer entry module summary for " ++ inferred.graph.entry
+                    ),
+                }
               }
             },
           }

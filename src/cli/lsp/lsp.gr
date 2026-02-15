@@ -533,10 +533,20 @@ let hoverJsonForTypeValue = (
   source: String,
   span: Source.Span,
   ty: Types.Type,
+  effectNotes: List<String>,
 ) => {
   let renderedType = TypeDisplay.render(ty)
+  let effectSuffix = if (effectNotes == []) {
+    ""
+  } else {
+    "\n\nEffects:\n"
+      ++ Array.join(
+        "\n",
+        Array.fromList(List.map((note: String) => "- " ++ note, effectNotes))
+      )
+  }
   "{\"contents\":{\"kind\":\"plaintext\",\"value\":\""
-    ++ escapeJson("Type: " ++ renderedType)
+    ++ escapeJson("Type: " ++ renderedType ++ effectSuffix)
     ++ "\"},\"range\":"
     ++ hoverRangeJson(source, span)
     ++ "}"
@@ -1085,7 +1095,14 @@ let handleHover = (
                   let lookupEnd = nowNs()
                   timing("hover.lookup", lookupStart, lookupEnd)
                   timing("hover.total", hoverStart, lookupEnd)
-                  sendResponse(idText, hoverJsonForTypeValue(source, found.span, selectedType))
+                  let effectNotes = ModuleInfer.effectNotesAtNodeInSummary(
+                    summary,
+                    found.nodeId
+                  )
+                  sendResponse(
+                    idText,
+                    hoverJsonForTypeValue(source, found.span, selectedType, effectNotes)
+                  )
                 },
                 None => {
                   let fallbackDecl = match (Map.get(modulePath, graph.nodes)) {

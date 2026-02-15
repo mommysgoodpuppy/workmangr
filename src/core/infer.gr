@@ -3,6 +3,7 @@ module Infer
 from "list" include List
 from "map" include Map
 from "array" include Array
+from "string" include String
 from "runtime/unsafe/panic" include Panic
 from "bytes" include Bytes
 from "wasi/file" include File
@@ -13,6 +14,7 @@ from "./types.gr" include Types
 from "./env.gr" include Env
 from "./constraints.gr" include Constraints
 from "./solver.gr" include Solver
+from "./infection_registry.gr" include InfectionRegistry
 from "./layer1/expr.gr" include Layer1Expr
 from "./layer1/patterns.gr" include Layer1Patterns
 from "./layer1/declarations.gr" include Layer1Decl
@@ -40,16 +42,29 @@ provide record HoleObservation {
   origin: Constraints.Origin,
 }
 
+provide record EffectEvent {
+  kind: String,
+  message: String,
+}
+
+record InfectionCarrierWrap {
+  domain: String,
+  typeName: String,
+  tailArgs: List<Types.Type>,
+}
+
 provide record InferState {
   nextVar: Number,
   subst: Types.Subst,
   env: Env.TypingEnv,
+  infectionRegistry: InfectionRegistry.Registry,
   nodeTypes: Map.Map<Number, Types.Type>,
   topBindings: Map.Map<String, Types.Scheme>,
   constraints: List<Constraints.Constraint>,
   matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
   marks: List<TypeMark>,
   marksByNode: Map.Map<Number, List<TypeMark>>,
+  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
   holeObservations: Map.Map<Number, List<HoleObservation>>,
 }
 
@@ -127,6 +142,10 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
     quantifiers: [0],
     ty: Types.TFun(Types.TVar(0), voidType),
   }
+  let panicValue: Types.Scheme = {
+    quantifiers: [0],
+    ty: Types.TFun(stringType, Types.TVar(0)),
+  }
   let define = (name: String, scheme: Types.Scheme) => {
     Env.defineValue(env, name, scheme)
     void
@@ -142,6 +161,7 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   Env.defineValue(env, "nativeStrFromLiteral", nativeStrFromLiteral)
   Env.defineValue(env, "nativeCharEq", nativeCharEq)
   Env.defineValue(env, "nativePrint", nativePrint)
+  Env.defineValue(env, "Panic", panicValue)
   // Temporary builtin operator support until std-based operator resolution lands.
   define("+", binaryNumber)
   define("-", binaryNumber)
@@ -188,18 +208,21 @@ let logState = (label: String, state: InferState, nodeId: Number=-1) => {
 let makeInitialState = () => {
   let subst = Types.emptySubst()
   let env = seedBuiltinValues(Env.empty())
+  let infectionRegistry = InfectionRegistry.empty()
   let nodeTypes = Map.make()
   let topBindings = Map.make()
   {
     nextVar: 0,
     subst,
     env,
+    infectionRegistry,
     nodeTypes,
     topBindings,
     constraints: [],
     matchArms: Map.make(),
     marks: [],
     marksByNode: Map.make(),
+    effectEventsByNode: Map.make(),
     holeObservations: Map.make(),
   }
 }
@@ -265,12 +288,40 @@ let noteHoleObservation = (
   { ...state, holeObservations: state.holeObservations }
 }
 
+let noteEffectEvent = (
+  state: InferState,
+  nodeId: Number,
+  kind: String,
+  message: String,
+) => {
+  let entry: EffectEvent = { kind, message }
+  let existing = match (Map.get(nodeId, state.effectEventsByNode)) {
+    Some(items) => items,
+    None => [],
+  }
+  Map.set(nodeId, [entry, ...existing], state.effectEventsByNode)
+  { ...state, effectEventsByNode: state.effectEventsByNode }
+}
+
 let recordMatchArms = (fnExpr: CoreAst.FnExpr, state: InferState) => {
-  match (Layer1Patterns.analyzeMatchArms(fnExpr, state.env)) {
-    None => state,
+  let analysis = Layer1Patterns.analyzeMatchArms(fnExpr, state.env)
+  let state1 = List.reduce(
+    (accState: InferState, diag: Layer1Patterns.MatchAnalysisDiagnostic) =>
+      addTypeMark(
+        accState,
+        Internal,
+        originForNode(diag.nodeId, "match coverage"),
+        CoreAst.PatternError,
+        diag.message
+      ),
+    state,
+    analysis.diagnostics
+  )
+  match (analysis.armInfos) {
+    None => state1,
     Some(armInfos) => {
-      Map.set(fnExpr.node.id, armInfos, state.matchArms)
-      { ...state, matchArms: state.matchArms }
+      Map.set(fnExpr.node.id, armInfos, state1.matchArms)
+      { ...state1, matchArms: state1.matchArms }
     },
   }
 }
@@ -282,6 +333,457 @@ let freshVar = (state: InferState) => {
 
 let apply = (state: InferState, t: Types.Type) =>
   Types.applySubstType(state.subst, t)
+
+let collectTypeInfectionDomains = (ty: Types.Type, state: InferState) => {
+  let domains = Map.make()
+  let rec visit = (current: Types.Type) =>
+    match (apply(state, current)) {
+      Types.TNominal(name, args) => {
+        List.forEach(visit, args)
+        match (Env.lookupType(state.env, name)) {
+          Some(typeInfo) => match (typeInfo.infection) {
+            Some(domain) => {
+              Map.set(domain, true, domains)
+              void
+            },
+            None => void,
+          },
+          None => void,
+        }
+      },
+      Types.TFun(argTy, resultTy) => {
+        visit(argTy)
+        visit(resultTy)
+      },
+      Types.TTuple(items) => List.forEach(visit, items),
+      _ => void,
+    }
+  visit(ty)
+  domains
+}
+
+let emitDomainLabels = (
+  labels: List<String>,
+  nodeId: Number,
+  description: String,
+  state: InferState,
+) =>
+  List.reduce(
+    (st: InferState, label: String) =>
+      recordConstraint(st, Constraints.domain(label, originForNode(nodeId, description))),
+    state,
+    labels
+  )
+
+let emitTypeInfectionConstraints = (
+  nodeId: Number,
+  description: String,
+  ty: Types.Type,
+  state: InferState,
+) => {
+  let seenDomains = collectTypeInfectionDomains(ty, state)
+  emitDomainLabels(
+    List.map(((domain, _): (String, Bool)) => domain, Map.toList(seenDomains)),
+    nodeId,
+    description ++ " domain",
+    state
+  )
+}
+
+let hasDomain = (domains: Map.Map<String, Bool>, label: String) =>
+  match (Map.get(label, domains)) {
+    Some(_) => true,
+    None => false,
+  }
+
+let parseTargetIndex = (target: String) =>
+  if (String.startsWith("arg", target)) {
+    match (String.slice(3, target)) {
+      "0" => Some(0),
+      "1" => Some(1),
+      "2" => Some(2),
+      "3" => Some(3),
+      "4" => Some(4),
+      "5" => Some(5),
+      "6" => Some(6),
+      "7" => Some(7),
+      "8" => Some(8),
+      "9" => Some(9),
+      _ => None,
+    }
+  } else {
+    None
+  }
+
+let tupleItemAt = (index: Number, items: List<Types.Type>) => {
+  let rec go = (i: Number, rest: List<Types.Type>) =>
+    match (rest) {
+      [] => None,
+      [head, ...tail] =>
+        if (i == 0) {
+          Some(head)
+        } else {
+          go(i - 1, tail)
+        },
+    }
+  go(index, items)
+}
+
+let selectTargetType = (
+  target: String,
+  calleeType: Types.Type,
+  argType: Types.Type,
+  resultType: Types.Type,
+  state: InferState,
+) =>
+  match (target) {
+    "callee" => Some(apply(state, calleeType)),
+    "result" => Some(apply(state, resultType)),
+    "arg" => Some(apply(state, argType)),
+    _ =>
+      match (parseTargetIndex(target)) {
+        Some(0) => Some(apply(state, argType)),
+        Some(idx) =>
+          match (apply(state, argType)) {
+            Types.TTuple(items) => tupleItemAt(idx, items),
+            _ => None,
+          },
+        None => None,
+      },
+  }
+
+let domainMapFromLabels = (labels: List<String>) => {
+  let map = Map.make()
+  List.forEach((label: String) => {
+    Map.set(label, true, map)
+    void
+  }, labels)
+  map
+}
+
+let cloneDomains = (domains: Map.Map<String, Bool>) => {
+  let out = Map.make()
+  List.forEach(((label, _): (String, Bool)) => {
+    Map.set(label, true, out)
+    void
+  }, Map.toList(domains))
+  out
+}
+
+let labelsFromDomains = (domains: Map.Map<String, Bool>) =>
+  List.map(((label, _): (String, Bool)) => label, Map.toList(domains))
+
+let applyDomainRemoves = (domains: Map.Map<String, Bool>, removes: List<String>) => {
+  let out = cloneDomains(domains)
+  List.forEach((label: String) => {
+    Map.remove(label, out)
+    void
+  }, removes)
+  out
+}
+
+let applyDomainAdds = (domains: Map.Map<String, Bool>, adds: List<String>) => {
+  let out = cloneDomains(domains)
+  List.forEach((label: String) => {
+    Map.set(label, true, out)
+    void
+  }, adds)
+  out
+}
+
+let sameDomainSet = (left: Map.Map<String, Bool>, right: Map.Map<String, Bool>) => {
+  let leftKeys = labelsFromDomains(left)
+  let rightKeys = labelsFromDomains(right)
+  let leftInRight = List.every((label: String) => hasDomain(right, label), leftKeys)
+  let rightInLeft = List.every((label: String) => hasDomain(left, label), rightKeys)
+  leftInRight && rightInLeft
+}
+
+let containsLabel = (labels: List<String>, target: String) =>
+  List.some((label: String) => label == target, labels)
+
+let classifyInfectiousNominal = (ty: Types.Type, state: InferState) =>
+  match (apply(state, ty)) {
+    Types.TNominal(typeName, [valueArg, ...tailArgs]) =>
+      match (Env.lookupType(state.env, typeName)) {
+        Some(typeInfo) => match (typeInfo.infection) {
+          Some(domain) =>
+            Some((valueArg, { domain, typeName, tailArgs }: InfectionCarrierWrap)),
+          None => None,
+        },
+        None => None,
+      },
+    _ => None,
+  }
+
+let isInfectiousType = (ty: Types.Type, state: InferState) =>
+  match (classifyInfectiousNominal(ty, state)) {
+    Some(_) => true,
+    None => false,
+  }
+
+let rec normalizeArgAgainstParam = (
+  paramTy: Types.Type,
+  argTy: Types.Type,
+  state: InferState,
+) =>
+  match ((apply(state, paramTy), apply(state, argTy))) {
+    (expected, appliedArg) when isInfectiousType(expected, state) => (appliedArg, []),
+    (_expected, appliedArg) =>
+      match (classifyInfectiousNominal(appliedArg, state)) {
+        Some((valueType, wrap)) => (valueType, [wrap]),
+        None =>
+          match (apply(state, paramTy)) {
+            Types.TVar(_) => (appliedArg, []),
+            Types.TTuple(expectedItems) =>
+              match (appliedArg) {
+                Types.TTuple(argItems) when List.length(expectedItems) == List.length(argItems) => {
+                  let rec zipNormalize = (
+                    expectedRest: List<Types.Type>,
+                    argRest: List<Types.Type>,
+                    normalizedRev: List<Types.Type>,
+                    wrapsRev: List<InfectionCarrierWrap>,
+                  ) =>
+                    match ((expectedRest, argRest)) {
+                      ([], []) => (Types.TTuple(List.reverse(normalizedRev)), List.reverse(wrapsRev)),
+                      ([expectedHead, ...expectedTail], [argHead, ...argTail]) => {
+                        let (normalizedHead, headWraps) = normalizeArgAgainstParam(expectedHead, argHead, state)
+                        zipNormalize(
+                          expectedTail,
+                          argTail,
+                          [normalizedHead, ...normalizedRev],
+                          List.append(List.reverse(headWraps), wrapsRev)
+                        )
+                      },
+                      _ => (Types.TTuple(argItems), []),
+                    }
+                  zipNormalize(expectedItems, argItems, [], [])
+                },
+                _ => (appliedArg, []),
+              },
+            _ => (appliedArg, []),
+          },
+      },
+  }
+
+let normalizeArgForCallee = (
+  calleeTy: Types.Type,
+  argTy: Types.Type,
+  state: InferState,
+) =>
+  match (apply(state, calleeTy)) {
+    Types.TFun(paramTy, _resultTy) => normalizeArgAgainstParam(paramTy, argTy, state),
+    _ => (apply(state, argTy), []),
+  }
+
+let wrapsCompatible = (left: InfectionCarrierWrap, right: InfectionCarrierWrap) =>
+  left.domain == right.domain
+    && left.typeName == right.typeName
+
+let chooseCarrierWrap = (
+  wraps: List<InfectionCarrierWrap>,
+  callNodeId: Number,
+  state: InferState,
+) =>
+  match (wraps) {
+    [] => (None, state),
+    [first, ...rest] => {
+      let compatible = List.every((w: InfectionCarrierWrap) => wrapsCompatible(first, w), rest)
+      if (compatible) {
+        (Some(first), state)
+      } else {
+        (
+          None,
+          addTypeMark(
+            state,
+            TypeMismatch,
+            originForNode(callNodeId, "infection propagation"),
+            CoreAst.Inconsistent,
+            "Type error: incompatible infectious argument carriers"
+          ),
+        )
+      }
+    },
+  }
+
+let wrapResultWithCarrier = (resultTy: Types.Type, wrap: InfectionCarrierWrap, state: InferState) =>
+  match (apply(state, resultTy)) {
+    Types.TNominal(typeName, _args) =>
+      match (Env.lookupType(state.env, typeName)) {
+        Some(typeInfo) => match (typeInfo.infection) {
+          Some(existingDomain) =>
+            if (existingDomain == wrap.domain) {
+              apply(state, resultTy)
+            } else {
+              Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs])
+            },
+          None => Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs]),
+        },
+        None => Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs]),
+      },
+    _ => Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs]),
+  }
+
+let applyOpRuleAtCall = (
+  callNodeId: Number,
+  opName: String,
+  calleeType: Types.Type,
+  argType: Types.Type,
+  resultType: Types.Type,
+  state: InferState,
+) =>
+  match (Map.get(opName, state.infectionRegistry.opRules)) {
+    None => state,
+    Some(opRule) => {
+      let targetTypeOpt = match (opRule.target) {
+        Some(target) => selectTargetType(target, calleeType, argType, resultType, state),
+        None => None,
+      }
+      let requiresTargetTypeOpt = match (targetTypeOpt) {
+        Some(ty) => Some(ty),
+        None =>
+          if (
+            opRule.requiresExact != None
+              || opRule.requiresAny != None
+              || opRule.requiresNot != None
+          ) {
+            selectTargetType("arg0", calleeType, argType, resultType, state)
+          } else {
+            None
+          },
+      }
+      let requiresDomains = match (requiresTargetTypeOpt) {
+        Some(targetTy) => collectTypeInfectionDomains(targetTy, state),
+        None => Map.make(),
+      }
+      let stateReq1 = match (opRule.requiresExact) {
+        None => state,
+        Some(required) =>
+          if (sameDomainSet(requiresDomains, domainMapFromLabels(required))) {
+            state
+          } else {
+            addTypeMark(
+              state,
+              TypeMismatch,
+              originForNode(callNodeId, "op requiresExact"),
+              CoreAst.Inconsistent,
+              "Type error: op " ++ opRule.name ++ " requires exact infection state"
+            )
+          },
+      }
+      let stateReq2 = match (opRule.requiresAny) {
+        None => stateReq1,
+        Some(requiredAny) =>
+          if (List.some((label: String) => hasDomain(requiresDomains, label), requiredAny)) {
+            stateReq1
+          } else {
+            addTypeMark(
+              stateReq1,
+              TypeMismatch,
+              originForNode(callNodeId, "op requiresAny"),
+              CoreAst.Inconsistent,
+              "Type error: op " ++ opRule.name ++ " requires one matching infection state"
+            )
+          },
+      }
+      let stateReq3 = match (opRule.requiresNot) {
+        None => stateReq2,
+        Some(forbidden) =>
+          if (!List.some((label: String) => hasDomain(requiresDomains, label), forbidden)) {
+            stateReq2
+          } else {
+            addTypeMark(
+              stateReq2,
+              TypeMismatch,
+              originForNode(callNodeId, "op requiresNot"),
+              CoreAst.Inconsistent,
+              "Type error: op " ++ opRule.name ++ " forbids current infection state"
+            )
+          },
+      }
+      let state1 = match (opRule.domain) {
+        Some(domain) =>
+          recordConstraint(
+            stateReq3,
+            Constraints.domain(domain, originForNode(callNodeId, "op rule domain"))
+          ),
+        None => stateReq3,
+      }
+      let policyBaseType = match (targetTypeOpt) {
+        Some(targetTy) => targetTy,
+        None => Types.TTuple([argType, resultType]),
+      }
+      let policyDomains0 = collectTypeInfectionDomains(policyBaseType, state1)
+      let policyDomains1 = match (opRule.removes) {
+        Some(removes) => applyDomainRemoves(policyDomains0, removes),
+        None => policyDomains0,
+      }
+      let policyDomains2 = match (opRule.adds) {
+        Some(adds) => applyDomainAdds(policyDomains1, adds),
+        None => policyDomains1,
+      }
+      let netAdds = match (opRule.adds) {
+        None => [],
+        Some(adds) =>
+          match (opRule.removes) {
+            None => adds,
+            Some(removes) =>
+              List.filter((label: String) => !containsLabel(removes, label), adds),
+          },
+      }
+      let state2 = match (opRule.adds) {
+        Some(_labels) => emitDomainLabels(netAdds, callNodeId, "op rule adds", state1),
+        None => state1,
+      }
+      let state3 = match (opRule.callPolicy) {
+        None => state2,
+        Some(policyName) =>
+          match (Map.get(policyName, state2.infectionRegistry.policies)) {
+            None => state2,
+            Some(policy) => {
+              let activeDomains = policyDomains2
+              let policyState1 = if (
+                policy.rejectsAllDomains && Map.toList(activeDomains) != []
+              ) {
+                addTypeMark(
+                  state2,
+                  TypeMismatch,
+                  originForNode(callNodeId, "op call policy"),
+                  CoreAst.Inconsistent,
+                  "Type error: policy " ++ policy.name ++ " rejects all infection domains"
+                )
+              } else {
+                state2
+              }
+              match (policy.rejectDomains) {
+                None => policyState1,
+                Some(rejected) =>
+                  List.reduce(
+                    (st, rejectedLabel) =>
+                      if (hasDomain(activeDomains, rejectedLabel)) {
+                        addTypeMark(
+                          st,
+                          TypeMismatch,
+                          originForNode(callNodeId, "op call policy"),
+                          CoreAst.Inconsistent,
+                          "Type error: policy "
+                            ++ policy.name
+                            ++ " rejects infection domain "
+                            ++ rejectedLabel
+                        )
+                      } else {
+                        st
+                      },
+                    policyState1,
+                    rejected
+                  ),
+              }
+            },
+          },
+      }
+      state3
+    },
+  }
 
 let occurs = (varId: Number, t: Types.Type, state: InferState) => {
   let fv = Types.freeVars(apply(state, t))
@@ -525,6 +1027,153 @@ let inferNominalRecordContext = (
   }
 }
 
+let inferProjectionFromFieldContext = (
+  literalNodeId: Number,
+  targetType: Types.Type,
+  fieldName: String,
+  fieldType: Types.Type,
+  state: InferState,
+  unifyFn: (Types.Type, Types.Type, Constraints.Origin, InferState) => InferState,
+) => {
+  let rec collectCandidates = (
+    remaining: List<(String, Env.TypeInfo)>,
+    nextVar: Number,
+    acc: List<NominalRecordCandidate>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(acc), nextVar),
+      [(_name, info), ...rest] =>
+        match (info.recordFields) {
+          None => collectCandidates(rest, nextVar, acc),
+          Some(_) => {
+            let (paramTypes, _paramMap, nextVar1) = Layer1Expr.instantiateTypeParams(
+              info.typeParams,
+              nextVar
+            )
+            let nominalType = Types.TNominal(info.name, paramTypes)
+            match (resolveNominalRecordFields(info.name, paramTypes, state)) {
+              Some(fields) =>
+                if (hasRecordField(fields, fieldName)) {
+                  let candidate: NominalRecordCandidate = {
+                    typeName: info.name,
+                    nominalType,
+                    fields,
+                  }
+                  collectCandidates(rest, nextVar1, [candidate, ...acc])
+                } else {
+                  collectCandidates(rest, nextVar1, acc)
+                },
+              None => collectCandidates(rest, nextVar1, acc),
+            }
+          },
+        },
+    }
+  let (candidates, nextVar) = collectCandidates(Map.toList(state.env.types), state.nextVar, [])
+  let state1 = { ...state, nextVar }
+  match (candidates) {
+    [candidate] =>
+      match (findRecordFieldType(candidate.fields, fieldName)) {
+        Some(expectedFieldType) => {
+          let state2 = unifyFn(
+            targetType,
+            candidate.nominalType,
+            originForNode(literalNodeId, "record projection target"),
+            state1
+          )
+          unifyFn(
+            fieldType,
+            expectedFieldType,
+            originForNode(literalNodeId, "record projection field"),
+            state2
+          )
+        },
+        None =>
+          addTypeMark(
+            state1,
+            TypeMismatch,
+            originForNode(literalNodeId, "record projection missing field"),
+            CoreAst.Inconsistent,
+            "Type error: unknown record field " ++ fieldName
+          ),
+      },
+    [] =>
+      addTypeMark(
+        state1,
+        TypeMismatch,
+        originForNode(literalNodeId, "record projection"),
+        CoreAst.Inconsistent,
+        "Type error: projection expects a nominal record value"
+      ),
+    _ =>
+      addTypeMark(
+        state1,
+        TypeMismatch,
+        originForNode(literalNodeId, "record projection ambiguous"),
+        CoreAst.Inconsistent,
+        "Type error: record projection has ambiguous nominal context"
+      ),
+  }
+}
+
+let inferProjectionFromCarrierContext = (
+  literalNodeId: Number,
+  targetType: Types.Type,
+  fieldName: String,
+  fieldType: Types.Type,
+  state: InferState,
+  unifyFn: (Types.Type, Types.Type, Constraints.Origin, InferState) => InferState,
+) =>
+  match (classifyInfectiousNominal(targetType, state)) {
+    Some((valueType, wrap)) =>
+      match (apply(state, valueType)) {
+        Types.TNominal(valueName, valueArgs) =>
+          match (resolveNominalRecordFields(valueName, valueArgs, state)) {
+            Some(fields) =>
+              match (findRecordFieldType(fields, fieldName)) {
+                Some(existingType) =>
+                  unifyFn(
+                    fieldType,
+                    wrapResultWithCarrier(existingType, wrap, state),
+                    originForNode(literalNodeId, "record projection field"),
+                    state
+                  ),
+                None =>
+                  addTypeMark(
+                    state,
+                    TypeMismatch,
+                    originForNode(literalNodeId, "record projection missing field"),
+                    CoreAst.Inconsistent,
+                    "Type error: unknown record field " ++ fieldName
+                  ),
+              },
+            None =>
+              addTypeMark(
+                state,
+                TypeMismatch,
+                originForNode(literalNodeId, "record projection nominal"),
+                CoreAst.Inconsistent,
+                "Type error: projection expects a nominal record value"
+              ),
+          },
+        _ =>
+          addTypeMark(
+            state,
+            TypeMismatch,
+            originForNode(literalNodeId, "record projection nominal"),
+            CoreAst.Inconsistent,
+            "Type error: projection expects a nominal record value"
+          ),
+      },
+    None =>
+      addTypeMark(
+        state,
+        TypeMismatch,
+        originForNode(literalNodeId, "record projection nominal"),
+        CoreAst.Inconsistent,
+        "Type error: projection expects a nominal record value"
+      ),
+  }
+
 let validateRecordLiteralAgainstNominal = (
   literalNodeId: Number,
   fields: List<(String, Types.Type)>,
@@ -660,24 +1309,71 @@ let rec unify = (
     },
     (Types.TNominal(nameL, argsL), Types.TNominal(nameR, argsR)) =>
       if (nameL == nameR) {
-        let rec unifyNominalArgs = (
-          xs: List<Types.Type>,
-          ys: List<Types.Type>,
-          st: InferState,
-        ) => match ((xs, ys)) {
-        ([], []) => st,
-        ([x, ...xRest], [y, ...yRest]) =>
-          unifyNominalArgs(xRest, yRest, unify(x, y, origin, st)),
-        _ =>
-          addTypeMark(
-            st,
-            TypeMismatch,
-            origin,
-            CoreAst.Inconsistent,
-            "Type error: nominal arity mismatch"
-          ),
+        match (Env.lookupType(state1.env, nameL)) {
+          Some(typeInfo) =>
+            match (typeInfo.infection) {
+              Some(_) => {
+                let rec unifyNominalArgs = (
+                  xs: List<Types.Type>,
+                  ys: List<Types.Type>,
+                  st: InferState,
+                ) => match ((xs, ys)) {
+                  ([], []) => st,
+                  ([x, ...xRest], [y, ...yRest]) =>
+                    unifyNominalArgs(xRest, yRest, unify(x, y, origin, st)),
+                  _ =>
+                    addTypeMark(
+                      st,
+                      TypeMismatch,
+                      origin,
+                      CoreAst.Inconsistent,
+                      "Type error: nominal arity mismatch"
+                    ),
+                }
+                unifyNominalArgs(argsL, argsR, state1)
+              },
+              None => {
+                let rec unifyNominalArgs = (
+                  xs: List<Types.Type>,
+                  ys: List<Types.Type>,
+                  st: InferState,
+                ) => match ((xs, ys)) {
+                ([], []) => st,
+                ([x, ...xRest], [y, ...yRest]) =>
+                  unifyNominalArgs(xRest, yRest, unify(x, y, origin, st)),
+                _ =>
+                  addTypeMark(
+                    st,
+                    TypeMismatch,
+                    origin,
+                    CoreAst.Inconsistent,
+                    "Type error: nominal arity mismatch"
+                  ),
+                }
+                unifyNominalArgs(argsL, argsR, state1)
+              },
+            },
+          None => {
+            let rec unifyNominalArgs = (
+              xs: List<Types.Type>,
+              ys: List<Types.Type>,
+              st: InferState,
+            ) => match ((xs, ys)) {
+            ([], []) => st,
+            ([x, ...xRest], [y, ...yRest]) =>
+              unifyNominalArgs(xRest, yRest, unify(x, y, origin, st)),
+            _ =>
+              addTypeMark(
+                st,
+                TypeMismatch,
+                origin,
+                CoreAst.Inconsistent,
+                "Type error: nominal arity mismatch"
+              ),
+            }
+            unifyNominalArgs(argsL, argsR, state1)
+          },
         }
-        unifyNominalArgs(argsL, argsR, state1)
       } else {
         addTypeMark(
           state1,
@@ -768,6 +1464,19 @@ let lookupEnv = (name: CoreAst.Name, state: InferState) => {
   }
 }
 
+let lookupQualifiedProjection = (
+  baseName: CoreAst.Name,
+  fieldName: String,
+  state: InferState,
+) =>
+  match (Env.lookupValue(state.env, baseName.text ++ "." ++ fieldName)) {
+    Some(scheme) => {
+      let (inst, nextVar) = Types.instantiate(scheme, state.nextVar)
+      Some((Types.applySubstType(state.subst, inst), { ...state, nextVar }))
+    },
+    None => None,
+  }
+
 let cloneEnvValues = (values: Types.Env) => {
   let cloned = Types.emptyEnv()
   Map.forEach((name, scheme) => {
@@ -811,10 +1520,19 @@ let rec withPatternBindings = (
       withBinding(name.text, monoScheme, state, fn)
     },
     CoreAst.Pin(name) => {
-      let applied = apply(state, expectedType)
-      Map.set(pattern.node.id, applied, state.nodeTypes)
-      Map.set(name.node.id, applied, state.nodeTypes)
-      withBinding(name.text, monoScheme, state, fn)
+      let (pinType, state1) = lookupEnv(name, state)
+      let state2 = unifyForNode(
+        pattern.node.id,
+        "pinned pattern",
+        expectedType,
+        pinType,
+        state1
+      )
+      let appliedPattern = apply(state2, expectedType)
+      let appliedName = apply(state2, pinType)
+      Map.set(pattern.node.id, appliedPattern, state2.nodeTypes)
+      Map.set(name.node.id, appliedName, state2.nodeTypes)
+      fn(state2)
     },
     CoreAst.Lit(_) => {
       let litType = match (pattern.kind) {
@@ -1070,6 +1788,236 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
             CoreAst.Ident(fnName) when fnName.text == "project" =>
               match (arg.kind) {
                 CoreAst.Lit(CoreAst.Str(fieldName)) => {
+                  match (targetExpr.kind) {
+                    CoreAst.Ident(baseName) =>
+                      match (lookupQualifiedProjection(baseName, fieldName, state)) {
+                        Some((qualifiedType, state1)) => {
+                          let tRecorded = recordNodeType(expr.node.id, qualifiedType, state1)
+                          (tRecorded, state1)
+                        },
+                        None => {
+                          let (targetType, state1) = inferExpr(targetExpr, state)
+                          let (fieldType, state2) = freshVar(state1)
+                          let state3 = match (apply(state2, targetType)) {
+                            Types.TNominal(typeName, typeArgs) =>
+                              match (resolveNominalRecordFields(typeName, typeArgs, state2)) {
+                                Some(fields) =>
+                                  match (findRecordFieldType(fields, fieldName)) {
+                                    Some(existingType) =>
+                                      unifyForNode(
+                                        expr.node.id,
+                                        "record projection field",
+                                        fieldType,
+                                        existingType,
+                                        state2
+                                      ),
+                                    None =>
+                                      addTypeMark(
+                                        state2,
+                                        TypeMismatch,
+                                        originForNode(expr.node.id, "record projection missing field"),
+                                        CoreAst.Inconsistent,
+                                        "Type error: unknown record field " ++ fieldName
+                                      ),
+                                  },
+                                None =>
+                                  inferProjectionFromCarrierContext(
+                                    expr.node.id,
+                                    targetType,
+                                    fieldName,
+                                    fieldType,
+                                    state2,
+                                    unify
+                                  ),
+                              },
+                            Types.TVar(_) => inferProjectionFromFieldContext(
+                              expr.node.id,
+                              targetType,
+                              fieldName,
+                              fieldType,
+                              state2,
+                              unify
+                            ),
+                            Types.THole(_) => inferProjectionFromFieldContext(
+                              expr.node.id,
+                              targetType,
+                              fieldName,
+                              fieldType,
+                              state2,
+                              unify
+                            ),
+                            _ =>
+                              addTypeMark(
+                                state2,
+                                TypeMismatch,
+                                originForNode(expr.node.id, "record projection"),
+                                CoreAst.Inconsistent,
+                                "Type error: projection expects a nominal record value"
+                              ),
+                          }
+                          let resolved = apply(state3, fieldType)
+                          let tRecorded = recordNodeType(expr.node.id, resolved, state3)
+                          (tRecorded, state3)
+                        },
+                      },
+                    _ => {
+                      let (targetType, state1) = inferExpr(targetExpr, state)
+                      let (fieldType, state2) = freshVar(state1)
+                      let state3 = match (apply(state2, targetType)) {
+                        Types.TNominal(typeName, typeArgs) =>
+                          match (resolveNominalRecordFields(typeName, typeArgs, state2)) {
+                            Some(fields) =>
+                              match (findRecordFieldType(fields, fieldName)) {
+                                Some(existingType) =>
+                                  unifyForNode(
+                                    expr.node.id,
+                                    "record projection field",
+                                    fieldType,
+                                    existingType,
+                                    state2
+                                  ),
+                                None =>
+                                  addTypeMark(
+                                    state2,
+                                    TypeMismatch,
+                                    originForNode(expr.node.id, "record projection missing field"),
+                                    CoreAst.Inconsistent,
+                                    "Type error: unknown record field " ++ fieldName
+                                  ),
+                              },
+                            None =>
+                              inferProjectionFromCarrierContext(
+                                expr.node.id,
+                                targetType,
+                                fieldName,
+                                fieldType,
+                                state2,
+                                unify
+                              ),
+                          },
+                        Types.TVar(_) => inferProjectionFromFieldContext(
+                          expr.node.id,
+                          targetType,
+                          fieldName,
+                          fieldType,
+                          state2,
+                          unify
+                        ),
+                        Types.THole(_) => inferProjectionFromFieldContext(
+                          expr.node.id,
+                          targetType,
+                          fieldName,
+                          fieldType,
+                          state2,
+                          unify
+                        ),
+                        _ =>
+                          addTypeMark(
+                            state2,
+                            TypeMismatch,
+                            originForNode(expr.node.id, "record projection"),
+                            CoreAst.Inconsistent,
+                            "Type error: projection expects a nominal record value"
+                          ),
+                      }
+                      let resolved = apply(state3, fieldType)
+                      let tRecorded = recordNodeType(expr.node.id, resolved, state3)
+                      (tRecorded, state3)
+                    },
+                  }
+                },
+                _ => {
+                  let (tUnknown, state1) = freshVar(state)
+                  let state2 = addTypeMark(
+                    state1,
+                    TypeMismatch,
+                    originForNode(expr.node.id, "record projection field"),
+                    CoreAst.Inconsistent,
+                    "Type error: record projection expects string field name"
+                  )
+                  let tRecorded = recordNodeType(expr.node.id, tUnknown, state2)
+                  (tRecorded, state2)
+                },
+              },
+            _ => {
+              inferFunctionApplication(expr.node.id, callee, arg, state)
+            },
+          },
+        (CoreAst.Ident(fnName), CoreAst.Tuple([targetExpr, fieldExpr])) when fnName.text == "project" =>
+          match (fieldExpr.kind) {
+            CoreAst.Lit(CoreAst.Str(fieldName)) => {
+              match (targetExpr.kind) {
+                CoreAst.Ident(baseName) =>
+                  match (lookupQualifiedProjection(baseName, fieldName, state)) {
+                    Some((qualifiedType, state1)) => {
+                      let tRecorded = recordNodeType(expr.node.id, qualifiedType, state1)
+                      (tRecorded, state1)
+                    },
+                    None => {
+                      let (targetType, state1) = inferExpr(targetExpr, state)
+                      let (fieldType, state2) = freshVar(state1)
+                      let state3 = match (apply(state2, targetType)) {
+                        Types.TNominal(typeName, typeArgs) =>
+                          match (resolveNominalRecordFields(typeName, typeArgs, state2)) {
+                            Some(fields) =>
+                              match (findRecordFieldType(fields, fieldName)) {
+                                Some(existingType) =>
+                                  unifyForNode(
+                                    expr.node.id,
+                                    "record projection field",
+                                    fieldType,
+                                    existingType,
+                                    state2
+                                  ),
+                                None =>
+                                  addTypeMark(
+                                    state2,
+                                    TypeMismatch,
+                                    originForNode(expr.node.id, "record projection missing field"),
+                                    CoreAst.Inconsistent,
+                                    "Type error: unknown record field " ++ fieldName
+                                  ),
+                              },
+                            None =>
+                              addTypeMark(
+                                state2,
+                                TypeMismatch,
+                                originForNode(expr.node.id, "record projection nominal"),
+                                CoreAst.Inconsistent,
+                                "Type error: projection expects a nominal record value"
+                              ),
+                          },
+                        Types.TVar(_) => inferProjectionFromFieldContext(
+                          expr.node.id,
+                          targetType,
+                          fieldName,
+                          fieldType,
+                          state2,
+                          unify
+                        ),
+                        Types.THole(_) => inferProjectionFromFieldContext(
+                          expr.node.id,
+                          targetType,
+                          fieldName,
+                          fieldType,
+                          state2,
+                          unify
+                        ),
+                        _ =>
+                          addTypeMark(
+                            state2,
+                            TypeMismatch,
+                            originForNode(expr.node.id, "record projection"),
+                            CoreAst.Inconsistent,
+                            "Type error: projection expects a nominal record value"
+                          ),
+                      }
+                      let resolved = apply(state3, fieldType)
+                      let tRecorded = recordNodeType(expr.node.id, resolved, state3)
+                      (tRecorded, state3)
+                    },
+                  },
+                _ => {
                   let (targetType, state1) = inferExpr(targetExpr, state)
                   let (fieldType, state2) = freshVar(state1)
                   let state3 = match (apply(state2, targetType)) {
@@ -1103,6 +2051,22 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                             "Type error: projection expects a nominal record value"
                           ),
                       },
+                    Types.TVar(_) => inferProjectionFromFieldContext(
+                      expr.node.id,
+                      targetType,
+                      fieldName,
+                      fieldType,
+                      state2,
+                      unify
+                    ),
+                    Types.THole(_) => inferProjectionFromFieldContext(
+                      expr.node.id,
+                      targetType,
+                      fieldName,
+                      fieldType,
+                      state2,
+                      unify
+                    ),
                     _ =>
                       addTypeMark(
                         state2,
@@ -1116,87 +2080,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                   let tRecorded = recordNodeType(expr.node.id, resolved, state3)
                   (tRecorded, state3)
                 },
-                _ => {
-                  let (tUnknown, state1) = freshVar(state)
-                  let state2 = addTypeMark(
-                    state1,
-                    TypeMismatch,
-                    originForNode(expr.node.id, "record projection field"),
-                    CoreAst.Inconsistent,
-                    "Type error: record projection expects string field name"
-                  )
-                  let tRecorded = recordNodeType(expr.node.id, tUnknown, state2)
-                  (tRecorded, state2)
-                },
-              },
-            _ => {
-              let (tCallee, state1) = inferExpr(callee, state)
-              let (tArg, state2) = inferExpr(arg, state1)
-              let (tRes, state3) = freshVar(state2)
-              let state4 = unifyForNode(
-                expr.node.id,
-                "function application",
-                tCallee,
-                Types.TFun(tArg, tRes),
-                state3
-              )
-              let state5 = match (callee.kind) {
-                CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, tArg, state4),
-                _ => state4,
               }
-              let tApplied = apply(state5, tRes)
-              let tRecorded = recordNodeType(expr.node.id, tApplied, state5)
-              (tRecorded, state5)
-            },
-          },
-        (CoreAst.Ident(fnName), CoreAst.Tuple([targetExpr, fieldExpr])) when fnName.text == "project" =>
-          match (fieldExpr.kind) {
-            CoreAst.Lit(CoreAst.Str(fieldName)) => {
-              let (targetType, state1) = inferExpr(targetExpr, state)
-              let (fieldType, state2) = freshVar(state1)
-              let state3 = match (apply(state2, targetType)) {
-                Types.TNominal(typeName, typeArgs) =>
-                  match (resolveNominalRecordFields(typeName, typeArgs, state2)) {
-                    Some(fields) =>
-                      match (findRecordFieldType(fields, fieldName)) {
-                        Some(existingType) =>
-                          unifyForNode(
-                            expr.node.id,
-                            "record projection field",
-                            fieldType,
-                            existingType,
-                            state2
-                          ),
-                        None =>
-                          addTypeMark(
-                            state2,
-                            TypeMismatch,
-                            originForNode(expr.node.id, "record projection missing field"),
-                            CoreAst.Inconsistent,
-                            "Type error: unknown record field " ++ fieldName
-                          ),
-                      },
-                    None =>
-                      addTypeMark(
-                        state2,
-                        TypeMismatch,
-                        originForNode(expr.node.id, "record projection nominal"),
-                        CoreAst.Inconsistent,
-                        "Type error: projection expects a nominal record value"
-                      ),
-                  },
-                _ =>
-                  addTypeMark(
-                    state2,
-                    TypeMismatch,
-                    originForNode(expr.node.id, "record projection"),
-                    CoreAst.Inconsistent,
-                    "Type error: projection expects a nominal record value"
-                  ),
-              }
-              let resolved = apply(state3, fieldType)
-              let tRecorded = recordNodeType(expr.node.id, resolved, state3)
-              (tRecorded, state3)
             },
             _ => {
               let (tUnknown, state1) = freshVar(state)
@@ -1278,55 +2162,15 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                   (tRecorded, state2)
                 },
                 None => {
-                  let (tCallee, state1) = inferExpr(callee, state)
-                  let (tArg, state2) = inferExpr(arg, state1)
-                  let (tRes, state3) = freshVar(state2)
-                  let state4 = unifyForNode(
-                    expr.node.id,
-                    "function application",
-                    tCallee,
-                    Types.TFun(tArg, tRes),
-                    state3
-                  )
-                  let tApplied = apply(state4, tRes)
-                  let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
-                  (tRecorded, state4)
+                  inferFunctionApplication(expr.node.id, callee, arg, state)
                 },
               },
             None => {
-              let (tCallee, state1) = inferExpr(callee, state)
-              let (tArg, state2) = inferExpr(arg, state1)
-              let (tRes, state3) = freshVar(state2)
-              let state4 = unifyForNode(
-                expr.node.id,
-                "function application",
-                tCallee,
-                Types.TFun(tArg, tRes),
-                state3
-              )
-              let tApplied = apply(state4, tRes)
-              let tRecorded = recordNodeType(expr.node.id, tApplied, state4)
-              (tRecorded, state4)
+              inferFunctionApplication(expr.node.id, callee, arg, state)
             },
           },
         _ => {
-          let (tCallee, state1) = inferExpr(callee, state)
-          let (tArg, state2) = inferExpr(arg, state1)
-          let (tRes, state3) = freshVar(state2)
-          let state4 = unifyForNode(
-            expr.node.id,
-            "function application",
-            tCallee,
-            Types.TFun(tArg, tRes),
-            state3
-          )
-          let state5 = match (callee.kind) {
-            CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, tArg, state4),
-            _ => state4,
-          }
-          let tApplied = apply(state5, tRes)
-          let tRecorded = recordNodeType(expr.node.id, tApplied, state5)
-          (tRecorded, state5)
+          inferFunctionApplication(expr.node.id, callee, arg, state)
         },
       }
     },
@@ -1474,6 +2318,64 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
     },
   }
 }
+and inferFunctionApplication = (
+  exprNodeId: Number,
+  callee: CoreAst.Expr,
+  arg: CoreAst.Expr,
+  state: InferState,
+) => {
+  let rec calleeIsFnLiteral = (expr: CoreAst.Expr) =>
+    match (expr.kind) {
+      CoreAst.Fn(_) => true,
+      CoreAst.Mark(_, inner) => calleeIsFnLiteral(inner),
+      _ => false,
+    }
+  let (tCallee, state1) = inferExpr(callee, state)
+  let (tArg, state2) = inferExpr(arg, state1)
+  let (normalizedArgType, wraps) = normalizeArgForCallee(tCallee, tArg, state2)
+  let (selectedWrapOpt, state2a) =
+    if (calleeIsFnLiteral(callee)) {
+      (None, state2)
+    } else {
+      chooseCarrierWrap(wraps, exprNodeId, state2)
+    }
+  let (tRes, state3) = freshVar(state2a)
+  let state4 = unifyForNode(
+    exprNodeId,
+    "function application",
+    tCallee,
+    Types.TFun(normalizedArgType, tRes),
+    state3
+  )
+  let state5 = match (callee.kind) {
+    CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, normalizedArgType, state4),
+    _ => state4,
+  }
+  let state6 = match (callee.kind) {
+    CoreAst.Ident(name) =>
+      applyOpRuleAtCall(exprNodeId, name.text, tCallee, tArg, tRes, state5),
+    _ => state5,
+  }
+  let tAppliedBase = apply(state6, tRes)
+  let (tApplied, state7) = match (selectedWrapOpt) {
+    Some(wrap) => (
+      wrapResultWithCarrier(tAppliedBase, wrap, state6),
+      noteEffectEvent(
+        state6,
+        exprNodeId,
+        "propagation",
+        "charged by "
+          ++ wrap.typeName
+          ++ " (domain "
+          ++ wrap.domain
+          ++ ") via argument propagation"
+      ),
+    ),
+    None => (tAppliedBase, state6),
+  }
+  let tRecorded = recordNodeType(exprNodeId, tApplied, state7)
+  (tRecorded, state7)
+}
 and inferExprList = (exprs: List<CoreAst.Expr>, state: InferState) => {
   match (exprs) {
     [] => ([], state),
@@ -1571,7 +2473,13 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
     },
     _ => state3a,
   }
-  (appliedValueType, state3)
+  let state4 = emitTypeInfectionConstraints(
+    binding.node.id,
+    "binding infection",
+    appliedValueType,
+    state3
+  )
+  (appliedValueType, state4)
 }
 
 let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
@@ -1677,7 +2585,10 @@ let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
         registerTypeDecl,
         (decl, stDecl) => match (decl) {
           CoreAst.RecordDecl(recordDecl) => registerRecordDecl(recordDecl, stDecl),
-          _ => stDecl,
+          _ => {
+            let nextRegistry = InfectionRegistry.mergeDecl(stDecl.infectionRegistry, decl)
+            { ...stDecl, infectionRegistry: nextRegistry }
+          },
         }
       ),
     (_item, st) => st
@@ -1834,6 +2745,29 @@ provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) => 
     Env.defineValue(baseEnv, name, scheme)
     void
   }, env)
+  let state = { ...makeInitialState(), env: baseEnv }
+  let inferred = inferTopItems(program.items, state)
+  solveConstraints(inferred)
+}
+
+provide let inferProgramWithTypingEnv = (
+  program: CoreAst.Program,
+  env: Types.Env,
+  importedTypes: Map.Map<String, Env.TypeInfo>,
+) => {
+  let baseEnv = seedBuiltinValues(Env.empty())
+  Map.forEach((name, scheme) => {
+    Env.defineValue(baseEnv, name, scheme)
+    void
+  }, env)
+  List.forEach(((typeName, info): (String, Env.TypeInfo)) => {
+    if (Env.lookupType(baseEnv, typeName) == None) {
+      Env.registerType(baseEnv, info)
+      void
+    } else {
+      void
+    }
+  }, Map.toList(importedTypes))
   let state = { ...makeInitialState(), env: baseEnv }
   let inferred = inferTopItems(program.items, state)
   solveConstraints(inferred)

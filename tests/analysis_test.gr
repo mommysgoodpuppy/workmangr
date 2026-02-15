@@ -55,5 +55,42 @@ test("typeInferenceDiagnostics uses mark span for unknown identifiers", () => {
   }
 })
 
+test("analysis diagnostics keep stable contract fields", () => {
+  Error.clearErrors()
+  let source =
+    "
+let bad = (x) => { if (1) { x } else { x } };
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let hasAny = List.length(diagnostics) > 0
+  let allTypeInferenceStage = List.every(
+    (diag: Error.CompilerError) => match (diag.stage) {
+      Error.TypeInference => true,
+      _ => false,
+    },
+    diagnostics
+  )
+  let allErrorSeverity = List.every(
+    (diag: Error.CompilerError) => diag.severity == Error.SError,
+    diagnostics
+  )
+  let allSpansSane = List.every(
+    (diag: Error.CompilerError) => {
+      diag.span.start <= diag.span.end
+        && diag.span.line >= 1
+        && diag.span.col >= 1
+        && diag.message != ""
+    },
+    diagnostics
+  )
+  all([
+    assertTrue(hasAny),
+    assertTrue(allTypeInferenceStage),
+    assertTrue(allErrorSeverity),
+    assertTrue(allSpansSane),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

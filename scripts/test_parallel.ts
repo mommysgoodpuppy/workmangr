@@ -105,6 +105,23 @@ async function runLspCompileSmoke(): Promise<void> {
   }
 }
 
+async function runApiRuntimeSmoke(): Promise<void> {
+  const fixturePath = "api_runtime_smoke.wm";
+  const child = new Deno.Command("grain", {
+    args: ["--dir", ".", "--include-dirs", "src", "src/api/api.gr", "--", fixturePath],
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const { code, stdout, stderr } = await child.output();
+  const output = new TextDecoder().decode(stdout) + new TextDecoder().decode(stderr);
+  if (code !== 0) {
+    throw new Error(`API runtime smoke failed:\\n${output}`);
+  }
+  if (!output.includes('"tokens":')) {
+    throw new Error(`API runtime smoke produced unexpected output:\\n${output}`);
+  }
+}
+
 async function runParallel(files: string[], jobs: number): Promise<FileResult[]> {
   const results: FileResult[] = [];
   let idx = 0;
@@ -152,6 +169,7 @@ function summarize(results: FileResult[]) {
 
 async function main() {
   await runLspCompileSmoke();
+  await runApiRuntimeSmoke();
   const { paths, jobs, filter } = parseArgs(Deno.args);
   let files = await discover(paths);
   if (filter) files = files.filter((f) => f.includes(filter));

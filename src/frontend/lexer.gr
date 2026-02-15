@@ -35,6 +35,8 @@ provide enum TokenKind {
   RParen, // )
   LBrace, // {
   RBrace, // }
+  LBracket, // [
+  RBracket, // ]
   FatArrow, // =>
   Question, // ?
   Pipe, // |
@@ -92,6 +94,8 @@ provide let tokenKindToString = kind => match (kind) {
   RParen => ")",
   LBrace => "{",
   RBrace => "}",
+  LBracket => "[",
+  RBracket => "]",
   FatArrow => "=>",
   Question => "?",
   Pipe => "|",
@@ -960,6 +964,34 @@ let lexInternal = (source, profiling: Bool) => {
                 pos.index,
                 pos.index + 1,
                 mateIndex
+              ),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          '[' => {
+            tokens = [
+              makeToken(
+                LBracket,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
+              ),
+              ...tokens
+            ]
+            pos = advancePosition(pos, ch)
+          },
+          ']' => {
+            tokens = [
+              makeToken(
+                RBracket,
+                pos.line,
+                pos.col,
+                pos.index,
+                pos.index + 1,
+                None
               ),
               ...tokens
             ]

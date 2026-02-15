@@ -240,6 +240,14 @@ let rec exprToPattern = (expr: SurfaceAst.Expr) => {
           ),
       }
     },
+    _ =>
+      Error.createPanicError(
+        Error.Lowering,
+        expr.node.span,
+        "Unsupported expression in pattern position",
+        [],
+        severity=Error.SError
+      ),
   }
 }
 
@@ -547,6 +555,21 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
   }
 }
 
+let lowerRuleValuePart = (part: SurfaceAst.RuleValuePart) => match (part) {
+  SurfaceAst.RuleName(name) => CoreAst.RuleName(name),
+  SurfaceAst.RuleList(items) => CoreAst.RuleList(items),
+  SurfaceAst.RulePairList(pairs) => CoreAst.RulePairList(pairs),
+}
+
+let lowerRuleEntry = (entry: SurfaceAst.RuleEntry) =>
+  {
+    node: lowerNode(entry.node),
+    key: lowerName(entry.key),
+    value: mapOption(entry.value, (value: SurfaceAst.RuleValue) =>
+      { parts: List.map(lowerRuleValuePart, value.parts) }: CoreAst.RuleValue
+    ),
+  }: CoreAst.RuleEntry
+
 let lowerDecl = (d: SurfaceAst.Decl) => match (d) {
   SurfaceAst.LetDecl(ld) =>
     CoreAst.LetDecl(
@@ -606,6 +629,41 @@ let lowerDecl = (d: SurfaceAst.Decl) => match (d) {
     ),
   SurfaceAst.PrefixDecl(pd) =>
     CoreAst.PrefixDecl({ node: lowerNode(pd.node), name: lowerName(pd.name) }),
+  SurfaceAst.DomainDecl(dd) =>
+    CoreAst.DomainDecl(
+      {
+        node: lowerNode(dd.node),
+        name: lowerName(dd.name),
+        entries: List.map(lowerRuleEntry, dd.entries),
+        defaultEntries: mapOption(dd.defaultEntries, (entries: List<SurfaceAst.RuleEntry>) =>
+          List.map(lowerRuleEntry, entries)
+        ),
+      },
+    ),
+  SurfaceAst.PolicyDecl(pd) =>
+    CoreAst.PolicyDecl(
+      {
+        node: lowerNode(pd.node),
+        name: lowerName(pd.name),
+        entries: List.map(lowerRuleEntry, pd.entries),
+      },
+    ),
+  SurfaceAst.OpDecl(od) =>
+    CoreAst.OpDecl(
+      {
+        node: lowerNode(od.node),
+        name: lowerName(od.name),
+        entries: List.map(lowerRuleEntry, od.entries),
+      },
+    ),
+  SurfaceAst.AnnotateDecl(ad) =>
+    CoreAst.AnnotateDecl(
+      {
+        node: lowerNode(ad.node),
+        target: lowerName(ad.target),
+        policies: List.map(lowerName, ad.policies),
+      },
+    ),
 }
 
 let lowerDeclGroup = (dg: SurfaceAst.DeclGroup) =>

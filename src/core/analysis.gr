@@ -196,6 +196,10 @@ let buildNodeSpanIndex = (program: CoreAst.Program) => {
         },
         CoreAst.InfixDecl(infixDecl) => indexNodeSpan(index, infixDecl.node),
         CoreAst.PrefixDecl(prefixDecl) => indexNodeSpan(index, prefixDecl.node),
+        CoreAst.DomainDecl(domainDecl) => indexNodeSpan(index, domainDecl.node),
+        CoreAst.PolicyDecl(policyDecl) => indexNodeSpan(index, policyDecl.node),
+        CoreAst.OpDecl(opDecl) => indexNodeSpan(index, opDecl.node),
+        CoreAst.AnnotateDecl(annotateDecl) => indexNodeSpan(index, annotateDecl.node),
       }, group.decls)
     },
     _ => void,

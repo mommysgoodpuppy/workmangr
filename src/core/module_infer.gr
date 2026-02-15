@@ -3,6 +3,8 @@ module ModuleInfer
 from "list" include List
 from "map" include Map
 from "array" include Array
+from "char" include Char
+from "string" include String
 
 from "./analysis.gr" include Analysis
 from "./core_ast.gr" include CoreAst
@@ -16,6 +18,7 @@ from "../module/module_system.gr" include ModuleSystem
 from "./layer1/expr.gr" include Layer1Expr
 
 provide record TypeAtOffset {
+  nodeId: Number,
   span: Source.Span,
   ty: Types.Type,
 }
@@ -69,7 +72,7 @@ let buildTypeEntries = (
     match (Map.get(nodeId, nodeSpans)) {
       Some(span) => {
         let appliedType = Types.applySubstType(infer.subst, inferredType)
-        Some({ span, ty: appliedType }: TypeAtOffset)
+        Some({ nodeId, span, ty: appliedType }: TypeAtOffset)
       },
       None => None,
     }, Map.toList(infer.nodeTypes))
@@ -102,6 +105,13 @@ provide let typeAtOffsetInSummary = (summary: ModuleSummary, offset: Number) => 
   choose(summary.typeEntries)
 }
 
+provide let effectNotesAtNodeInSummary = (summary: ModuleSummary, nodeId: Number) =>
+  match (Map.get(nodeId, summary.infer.effectEventsByNode)) {
+    Some(events) =>
+      List.map((event: Infer.EffectEvent) => event.message, List.reverse(events)),
+    None => [],
+  }
+
 let typeDiagnosticsForProgram = (
   program: CoreAst.Program,
   infer: Infer.InferState,
@@ -115,7 +125,21 @@ let collectImportedEnv = (
   lowered: CoreAst.Program,
   summaries: Map.Map<String, ModuleSummary>,
 ) => {
+  let capitalizeHead = (name: String) =>
+    if (String.length(name) == 0) {
+      name
+    } else {
+      let ch = String.charAt(0, name)
+      let code = Char.code(ch)
+      if (code >= Char.code('a') && code <= Char.code('z')) {
+        let upper = Char.fromCode(code - (Char.code('a') - Char.code('A')))
+        Char.toString(upper) ++ String.slice(1, name)
+      } else {
+        name
+      }
+    }
   let env = Map.make()
+  let importedTypes: Map.Map<String, Env.TypeInfo> = Map.make()
   let providerValues = (summary: ModuleSummary) => {
     let explicit = Map.toList(summary.valueExports)
     if (List.length(explicit) > 0) {
@@ -124,6 +148,11 @@ let collectImportedEnv = (
       summary.infer.topBindings
     }
   }
+  let providerTypes = (summary: ModuleSummary) => summary.typeExports
+  let mergeProviderTypes = (summary: ModuleSummary) =>
+    List.forEach(((typeName, info): (String, Env.TypeInfo)) => {
+      Map.set(typeName, info, importedTypes)
+    }, Map.toList(providerTypes(summary)))
   let importDecls = List.filterMap((item: CoreAst.TopItem) =>
     match (item) {
       CoreAst.Import(importDecl) => Some(importDecl),
@@ -132,6 +161,7 @@ let collectImportedEnv = (
   let applyWildcardImport = (providerPath: String) => {
     match (Map.get(providerPath, summaries)) {
       Some(summary) => {
+        mergeProviderTypes(summary)
         let values = providerValues(summary)
         List.forEach(((name, scheme)) => {
           Map.set(name, scheme, env)
@@ -160,6 +190,7 @@ let collectImportedEnv = (
         } else {
         match (Map.get(providerPath, summaries)) {
           Some(summary) => {
+            mergeProviderTypes(summary)
             let values = providerValues(summary)
             if (importDecl.names != []) {
               List.forEach((item: CoreAst.ImportName) => {
@@ -177,8 +208,16 @@ let collectImportedEnv = (
               match (importDecl.alias) {
                 Some(alias) =>
                   List.forEach(((name, scheme)) => {
-                    let qualified = alias.text ++ "." ++ name
-                    Map.set(qualified, scheme, env)
+                    let capAlias = capitalizeHead(alias.text)
+                    let aliases = if (capAlias == alias.text) {
+                      [alias.text]
+                    } else {
+                      [alias.text, capAlias]
+                    }
+                    List.forEach((aliasName: String) => {
+                      let qualified = aliasName ++ "." ++ name
+                      Map.set(qualified, scheme, env)
+                    }, aliases)
                   }, Map.toList(values)),
                 None =>
                   List.forEach(((name, scheme)) => {
@@ -195,7 +234,7 @@ let collectImportedEnv = (
     }
   }
   loop(importDecls, node.imports)
-  env
+  (env, importedTypes)
 }
 
 let collectExplicitExports = (program: CoreAst.Program) => {
@@ -386,8 +425,16 @@ provide let inferGraphWithCache = (
           None => {
             recomputed += 1
             let lowered = Lower.lowerProgram(node.program)
-            let importedEnv = collectImportedEnv(node, lowered, summaries)
-            let infer = Infer.inferProgramWithEnv(lowered, importedEnv)
+            let (importedValues, importedTypes) = collectImportedEnv(
+              node,
+              lowered,
+              summaries
+            )
+            let infer = Infer.inferProgramWithTypingEnv(
+              lowered,
+              importedValues,
+              importedTypes
+            )
             let typeEntries = buildTypeEntries(lowered, infer)
             let typeDiagnostics = typeDiagnosticsForProgram(lowered, infer)
             let parseDiagnostics = match (Map.get(moduleId, graph.diagnosticsById)) {

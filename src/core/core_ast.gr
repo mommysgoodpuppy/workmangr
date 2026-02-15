@@ -150,6 +150,10 @@ provide enum rec Decl {
   RecordDecl(RecordDecl),
   InfixDecl(InfixDecl),
   PrefixDecl(PrefixDecl),
+  DomainDecl(DomainDecl),
+  PolicyDecl(PolicyDecl),
+  OpDecl(OpDecl),
+  AnnotateDecl(AnnotateDecl),
 }
 and provide record LetDecl {
   node: Node,
@@ -186,6 +190,40 @@ and provide enum InfixAssociativity {
 and provide record PrefixDecl {
   node: Node,
   name: Name,
+}
+and provide enum RuleValuePart {
+  RuleName(String),
+  RuleList(List<String>),
+  RulePairList(List<(String, String)>),
+}
+and provide record RuleValue {
+  parts: List<RuleValuePart>,
+}
+and provide record RuleEntry {
+  node: Node,
+  key: Name,
+  value: Option<RuleValue>,
+}
+and provide record DomainDecl {
+  node: Node,
+  name: Name,
+  entries: List<RuleEntry>,
+  defaultEntries: Option<List<RuleEntry>>,
+}
+and provide record PolicyDecl {
+  node: Node,
+  name: Name,
+  entries: List<RuleEntry>,
+}
+and provide record OpDecl {
+  node: Node,
+  name: Name,
+  entries: List<RuleEntry>,
+}
+and provide record AnnotateDecl {
+  node: Node,
+  target: Name,
+  policies: List<Name>,
 }
 
 provide record rec ImportDecl {

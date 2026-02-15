@@ -248,5 +248,62 @@ test("module graph keeps absolute unix paths absolute", () => {
   ])
 })
 
+test("module graph canonicalizes equivalent entry path spellings", () => {
+  let overrides = Map.make()
+  Map.set("entry.wm", "let main = 1;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    "./pkg/../entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+
+  all([
+    assertEquals("entry.wm", graph.entry),
+    assertTrue(Map.get("entry.wm", graph.nodes) != None),
+  ])
+})
+
+test("module graph canonicalizes windows-style entry path spellings", () => {
+  let overrides = Map.make()
+  Map.set("entry.wm", "let main = 1;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    ".\\pkg\\..\\entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+
+  all([
+    assertEquals("entry.wm", graph.entry),
+    assertTrue(Map.get("entry.wm", graph.nodes) != None),
+  ])
+})
+
+test("module identity is shared across equivalent import spellings", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { x };\nfrom \"././dep\" import { x as y };\nlet main = x;",
+    overrides
+  )
+  Map.set("dep.wm", "let x = 1;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+
+  let nodeCount = List.length(Map.toList(graph.nodes))
+  let entryImports = match (Map.get("entry.wm", graph.nodes)) {
+    Some(node) => node.imports,
+    None => [],
+  }
+
+  all([
+    assertEquals(2, nodeCount),
+    assertTrue(Map.get("dep.wm", graph.nodes) != None),
+    assertEquals(["dep.wm", "dep.wm"], entryImports),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

@@ -7,7 +7,10 @@ from "string" include String
 
 from "../core/core_ast.gr" include CoreAst
 from "../core/analysis.gr" include Analysis
+from "../core/env.gr" include Env
+from "../core/error.gr" include Error
 from "../core/infer.gr" include Infer
+from "../core/layer1/expr.gr" include Layer1Expr
 from "../core/source.gr" include Source
 from "../core/types.gr" include Types
 
@@ -18,6 +21,7 @@ record NodeSummary {
   col: Number,
   excerpt: String,
   typeStr: String,
+  effectInfo: Option<String>,
 }
 
 let getLineText = (source: String, line: Number) => {
@@ -30,14 +34,91 @@ let getLineText = (source: String, line: Number) => {
   }
 }
 
+let rec bindTypeParams = (
+  names: List<String>,
+  args: List<Types.Type>,
+  paramMap: Map.Map<String, Types.Type>,
+) =>
+  match ((names, args)) {
+    ([name, ...nameRest], [arg, ...argRest]) => {
+      Map.set(name, arg, paramMap)
+      bindTypeParams(nameRest, argRest, paramMap)
+    },
+    _ => void,
+  }
+
+let renderTypeWithContext = (
+  ty: Types.Type,
+  analysis: Analysis.Analysis,
+) => {
+  let rec render = (t: Types.Type) =>
+    match (Types.applySubstType(analysis.infer.subst, t)) {
+      Types.TFun(paramTy, resultTy) => {
+        let renderedParam = match (paramTy) {
+          Types.TFun(_, _) => "(" ++ render(paramTy) ++ ")",
+          _ => render(paramTy),
+        }
+        renderedParam ++ " -> " ++ render(resultTy)
+      },
+      Types.TTuple(items) =>
+        "(" ++ Array.join(", ", Array.fromList(List.map(render, items))) ++ ")",
+      Types.TNominal(typeName, args) => {
+        let base = if (args == []) {
+          typeName
+        } else {
+          typeName ++ "<" ++ Array.join(", ", Array.fromList(List.map(render, args))) ++ ">"
+        }
+        match (Env.lookupType(analysis.infer.env, typeName)) {
+          Some(typeInfo) =>
+            match (typeInfo.recordFields) {
+              Some(fields) => {
+                let paramMap: Map.Map<String, Types.Type> = Map.make()
+                bindTypeParams(typeInfo.typeParams, args, paramMap)
+                let renderedFields = List.map(((fieldName, fieldTyExpr): (CoreAst.Name, CoreAst.TypeExpr)) => {
+                  let loweredFieldTy = Layer1Expr.typeExprToType(fieldTyExpr, paramMap)
+                  fieldName.text ++ ": " ++ render(loweredFieldTy)
+                }, fields)
+                let fieldSummary = "{" ++ Array.join(", ", Array.fromList(renderedFields)) ++ "}"
+                let nominalWithShape = if (args == []) {
+                  let shapeArgs = List.map(((fieldName, fieldTyExpr): (CoreAst.Name, CoreAst.TypeExpr)) => {
+                    let loweredFieldTy = Layer1Expr.typeExprToType(fieldTyExpr, paramMap)
+                    render(loweredFieldTy)
+                  }, fields)
+                  typeName ++ "<" ++ Array.join(", ", Array.fromList(shapeArgs)) ++ ">"
+                } else {
+                  base
+                }
+                nominalWithShape ++ fieldSummary
+              },
+              None => base,
+            },
+          None => base,
+        }
+      },
+      other => Types.typeToString(other),
+    }
+  render(ty)
+}
+
 let summarizeNode = (source: String, node: CoreAst.Expr, analysis: Analysis.Analysis) => {
   match (Map.get(node.node.id, analysis.infer.nodeTypes)) {
     None => None,
     Some(nodeType) => {
       let pos = Source.offsetToLineCol(source, node.node.span.start)
       let excerpt = Source.slice(source, node.node.span)
-      let appliedType = Types.applySubstType(analysis.infer.subst, nodeType)
-      let typeStr = Types.typeToString(appliedType)
+      let typeStr = renderTypeWithContext(nodeType, analysis)
+      let effectInfo = match (Map.get(node.node.id, analysis.infer.effectEventsByNode)) {
+        Some(events) =>
+          Some(
+            Array.join(
+              "; ",
+              Array.fromList(
+                List.map((event: Infer.EffectEvent) => event.message, List.reverse(events))
+              )
+            )
+          ),
+        None => None,
+      }
       Some({
         id: node.node.id,
         span: node.node.span,
@@ -45,10 +126,123 @@ let summarizeNode = (source: String, node: CoreAst.Expr, analysis: Analysis.Anal
         col: pos.col,
         excerpt,
         typeStr,
+        effectInfo,
       })
     },
   }
 }
+
+let summarizePattern = (source: String, pattern: CoreAst.Pattern, analysis: Analysis.Analysis) => {
+  match (Map.get(pattern.node.id, analysis.infer.nodeTypes)) {
+    None => None,
+    Some(nodeType) => {
+      let pos = Source.offsetToLineCol(source, pattern.node.span.start)
+      let excerpt = Source.slice(source, pattern.node.span)
+      let typeStr = renderTypeWithContext(nodeType, analysis)
+      Some({
+        id: pattern.node.id,
+        span: pattern.node.span,
+        line: pos.line,
+        col: pos.col,
+        excerpt,
+        typeStr,
+        effectInfo: None,
+      })
+    },
+  }
+}
+
+let rec collectPatternNodes = (pattern: CoreAst.Pattern) =>
+  match (pattern.kind) {
+    CoreAst.Mark(_, inner) => [pattern, ...collectPatternNodes(inner)],
+    CoreAst.Constructor(_, args) => {
+      let rec collectArgs = (items: List<CoreAst.Pattern>) =>
+        match (items) {
+          [] => [],
+          [h, ...t] => List.append(collectPatternNodes(h), collectArgs(t)),
+        }
+      [pattern, ...collectArgs(args)]
+    },
+    CoreAst.Tuple(items) => {
+      let rec collectItems = (rest: List<CoreAst.Pattern>) =>
+        match (rest) {
+          [] => [],
+          [h, ...t] => List.append(collectPatternNodes(h), collectItems(t)),
+        }
+      [pattern, ...collectItems(items)]
+    },
+    CoreAst.List(items, tail) => {
+      let rec collectItems = (rest: List<CoreAst.Pattern>) =>
+        match (rest) {
+          [] => [],
+          [h, ...t] => List.append(collectPatternNodes(h), collectItems(t)),
+        }
+      let collected = collectItems(items)
+      let withTail = match (tail) {
+        None => collected,
+        Some(t) => List.append(collected, collectPatternNodes(t)),
+      }
+      [pattern, ...withTail]
+    },
+    _ => [pattern]
+  }
+
+let rec collectPatternsFromExpr = (expr: CoreAst.Expr) =>
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => collectPatternsFromExpr(inner),
+    CoreAst.Fn(fnExpr) => {
+      let rec collectFromItems = (items: List<CoreAst.FnItem>) =>
+        match (items) {
+          [] => [],
+          [h, ...t] => {
+            let fromHead = match (h.kind) {
+              CoreAst.Clause(clause) =>
+                List.append(collectPatternNodes(clause.param), collectPatternsFromExpr(clause.body)),
+              _ => [],
+            }
+            List.append(fromHead, collectFromItems(t))
+          }
+        }
+      collectFromItems(fnExpr.items)
+    },
+    CoreAst.Apply(callee, arg) =>
+      List.append(collectPatternsFromExpr(callee), collectPatternsFromExpr(arg)),
+    CoreAst.Let(binding, body) =>
+      List.append(
+        collectPatternNodes(binding.name),
+        List.append(collectPatternsFromExpr(binding.value), collectPatternsFromExpr(body))
+      ),
+    CoreAst.If(cond, thenExpr, elseOpt) => {
+      let base = List.append(collectPatternsFromExpr(cond), collectPatternsFromExpr(thenExpr))
+      match (elseOpt) {
+        None => base,
+        Some(e) => List.append(base, collectPatternsFromExpr(e)),
+      }
+    },
+    CoreAst.Tuple(items) => {
+      let rec collectItems = (rest: List<CoreAst.Expr>) =>
+        match (rest) {
+          [] => [],
+          [h, ...t] => List.append(collectPatternsFromExpr(h), collectItems(t)),
+        }
+      collectItems(items)
+    },
+    CoreAst.RecordLit(items) => {
+      let rec collectItems = (rest: List<CoreAst.RecordItem>) =>
+        match (rest) {
+          [] => [],
+          [h, ...t] => {
+            let fromHead = match (h) {
+              CoreAst.Field(_, value) => collectPatternsFromExpr(value),
+              CoreAst.Spread(value) => collectPatternsFromExpr(value),
+            }
+            List.append(fromHead, collectItems(t))
+          }
+        }
+      collectItems(items)
+    },
+    _ => []
+  }
 
 let rec collectExprs = (expr: CoreAst.Expr) =>
   match (expr.kind) {
@@ -126,6 +320,64 @@ let rec collectAllExprs = (items: List<CoreAst.TopItem>) => {
   }
 }
 
+let rec collectAllPatterns = (items: List<CoreAst.TopItem>) => {
+  match (items) {
+    [] => [],
+    [item, ...rest] => {
+      let itemPatterns = match (item) {
+        CoreAst.DeclGroup(dg) => {
+          let rec collectFromDecls = (decls: List<CoreAst.Decl>) => {
+            match (decls) {
+              [] => [],
+              [decl, ...restDecls] => {
+                let declPatterns = match (decl) {
+                  CoreAst.LetDecl(ld) => {
+                    let rec collectFromBindings = (bindings: List<CoreAst.LetBinding>) => {
+                      match (bindings) {
+                        [] => [],
+                        [b, ...restBindings] =>
+                          List.append(
+                            collectPatternNodes(b.name),
+                            List.append(
+                              collectPatternsFromExpr(b.value),
+                              collectFromBindings(restBindings)
+                            )
+                          )
+                      }
+                    }
+                    collectFromBindings(ld.bindings)
+                  },
+                  _ => []
+                }
+                List.append(declPatterns, collectFromDecls(restDecls))
+              }
+            }
+          }
+          collectFromDecls(dg.decls)
+        },
+        _ => []
+      }
+      List.append(itemPatterns, collectAllPatterns(rest))
+    }
+  }
+}
+
+let dedupeSummaries = (summaries: List<NodeSummary>) => {
+  let seen: Map.Map<Number, Bool> = Map.make()
+  let rec loop = (items: List<NodeSummary>, acc: List<NodeSummary>) =>
+    match (items) {
+      [] => List.reverse(acc),
+      [h, ...t] =>
+        if (Map.get(h.id, seen) == None) {
+          Map.set(h.id, true, seen)
+          loop(t, [h, ...acc])
+        } else {
+          loop(t, acc)
+        }
+    }
+  loop(summaries, [])
+}
+
 let groupByLine = (summaries: List<NodeSummary>) => {
   let groups: Map.Map<Number, List<NodeSummary>> = Map.make()
   List.forEach(
@@ -156,12 +408,16 @@ let sortByCol = (items: List<NodeSummary>) =>
 let printLineSummaries = (
   source: String,
   groups: Map.Map<Number, List<NodeSummary>>,
+  lineFilter: Option<Number>,
 ) => {
   let lineKeys = Map.keys(groups)
   let lines = List.sort(compare=((a, b) => a - b), lineKeys)
 
   List.forEach(
     (lineNum) => {
+      if (lineFilter != None && lineFilter != Some(lineNum)) {
+        void
+      } else {
       let lineText = getLineText(source, lineNum)
       print("Line " ++ toString(lineNum) ++ ": " ++ lineText)
 
@@ -178,10 +434,15 @@ let printLineSummaries = (
             "    //(nodeId:" ++ toString(item.id) ++ ")",
           )
           print("  type: " ++ item.typeStr)
+          match (item.effectInfo) {
+            Some(info) => print("  effects: " ++ info),
+            None => void,
+          }
         },
         lineItems,
       )
       print("")
+      }
     },
     lines,
   )
@@ -196,19 +457,77 @@ let printTopBindings = (analysis: Analysis.Analysis) => {
   List.forEach(
     (pair) => {
       let (name, scheme): (String, Types.Scheme) = pair
-      let applied = Types.applySubstType(analysis.infer.subst, scheme.ty)
-      print(name ++ " : " ++ Types.typeToString(applied))
+      print(name ++ " : " ++ renderTypeWithContext(scheme.ty, analysis))
     },
     bindings,
   )
 }
 
-provide let report = (source: String, analysis: Analysis.Analysis) => {
+let printDiagnostics = (
+  source: String,
+  analysis: Analysis.Analysis,
+  lineFilter: Option<Number>,
+) => {
+  let nodeSpans = Analysis.buildNodeSpans(analysis.program)
+  let diagnostics: List<Error.CompilerError> =
+    Analysis.typeInferenceDiagnostics(analysis.infer.marks, nodeSpans)
+  let filtered = match (lineFilter) {
+    None => diagnostics,
+    Some(lineNum) =>
+      List.filter(
+        (diag: Error.CompilerError) => diag.span.line == lineNum,
+        diagnostics
+      ),
+  }
+  if (filtered == []) {
+    void
+  } else {
+    print("=== Diagnostics ===")
+    List.forEach((diag: Error.CompilerError) => {
+      let lineText = getLineText(source, diag.span.line)
+      print(
+        toString(diag.span.line)
+          ++ ":"
+          ++ toString(diag.span.col)
+          ++ " "
+          ++ diag.message
+      )
+      if (lineText != "") {
+        print("  " ++ lineText)
+      } else {
+        void
+      }
+    }, filtered)
+    print("")
+  }
+}
+
+provide let reportWithLine = (
+  source: String,
+  analysis: Analysis.Analysis,
+  lineFilter: Option<Number>,
+) => {
   let exprs = collectAllExprs(analysis.program.items)
-  let maybeSummaries = List.map((expr) => summarizeNode(source, expr, analysis), exprs)
-  let summaries = List.filterMap((x) => x, maybeSummaries)
+  let patterns = collectAllPatterns(analysis.program.items)
+  let exprSummaries = List.filterMap(
+    (x) => x,
+    List.map((expr) => summarizeNode(source, expr, analysis), exprs)
+  )
+  let patternSummaries = List.filterMap(
+    (x) => x,
+    List.map((pattern) => summarizePattern(source, pattern, analysis), patterns)
+  )
+  let summaries = dedupeSummaries(List.append(exprSummaries, patternSummaries))
 
   let groups = groupByLine(summaries)
-  printLineSummaries(source, groups)
-  printTopBindings(analysis)
+  printLineSummaries(source, groups, lineFilter)
+  printDiagnostics(source, analysis, lineFilter)
+  match (lineFilter) {
+    Some(_) => void,
+    None => printTopBindings(analysis),
+  }
+}
+
+provide let report = (source: String, analysis: Analysis.Analysis) => {
+  reportWithLine(source, analysis, None)
 }

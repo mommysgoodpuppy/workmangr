@@ -1,7 +1,7 @@
 module Layer1Patterns
 
+from "array" include Array
 from "list" include List
-from "runtime/unsafe/panic" include Panic
 
 from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
@@ -86,13 +86,26 @@ provide record MatchArmInfo {
   constructor: Env.ConstructorInfo,
 }
 
+provide record MatchAnalysisDiagnostic {
+  nodeId: Number,
+  message: String,
+}
+
+provide record MatchArmAnalysis {
+  armInfos: Option<List<MatchArmInfo>>,
+  diagnostics: List<MatchAnalysisDiagnostic>,
+}
+
+let mkDiag = (nodeId: Number, message: String) =>
+  { nodeId, message }: MatchAnalysisDiagnostic
+
 provide let analyzeMatchArms = (fnExpr: CoreAst.FnExpr, env: Env.TypingEnv) => {
   let (seeds, hasWildcard) = collectConstructorSeeds(
     fnExpr.items,
     ctorName => Env.lookupConstructorOwner(env, ctorName)
   )
   if (seeds == []) {
-    None
+    { armInfos: None, diagnostics: [] }: MatchArmAnalysis
   } else {
     let owners = dedupeStrings(
       List.filterMap((entry: (Number, String, Option<String>, Bool)) => {
@@ -102,9 +115,9 @@ provide let analyzeMatchArms = (fnExpr: CoreAst.FnExpr, env: Env.TypingEnv) => {
       []
     )
     match (owners) {
-      [] => None,
+      [] => { armInfos: None, diagnostics: [] },
       [typeName] => match (Env.lookupConstructors(env, typeName)) {
-        None => None,
+        None => { armInfos: None, diagnostics: [] },
         Some(expectedConstructors) => {
           let typedSeeds = List.filter(
             (entry: (Number, String, Option<String>, Bool)) => {
@@ -119,9 +132,25 @@ provide let analyzeMatchArms = (fnExpr: CoreAst.FnExpr, env: Env.TypingEnv) => {
           )
           if (typedSeeds == []) {
             if (hasWildcard) {
-              None
+              { armInfos: None, diagnostics: [] }
             } else {
-              Panic.panic("Match missing constructors for type " ++ typeName)
+              let expectedNames = Array.join(
+                ", ",
+                Array.fromList(List.map((ctor: Env.ConstructorInfo) => ctor.name, expectedConstructors))
+              )
+              {
+                armInfos: None,
+                diagnostics: [
+                  mkDiag(
+                    fnExpr.node.id,
+                    "Type error: non-exhaustive match for type "
+                      ++ typeName
+                      ++ " (missing: "
+                      ++ expectedNames
+                      ++ ")"
+                  ),
+                ],
+              }
             }
           } else {
             let actualNames = dedupeStrings(
@@ -140,9 +169,6 @@ provide let analyzeMatchArms = (fnExpr: CoreAst.FnExpr, env: Env.TypingEnv) => {
                 expectedConstructors
               )
             }
-            if (missing != []) {
-              Panic.panic("Match missing constructors for type " ++ typeName)
-            }
             let armInfos = List.filterMap(
               (entry: (Number, String, Option<String>, Bool)) => {
                 let (clauseId, ctorName, _, _) = entry
@@ -158,15 +184,41 @@ provide let analyzeMatchArms = (fnExpr: CoreAst.FnExpr, env: Env.TypingEnv) => {
               },
               typedSeeds
             )
-            if (armInfos == []) {
-              None
+            let diagList = if (missing == []) {
+              []
             } else {
-              Some(armInfos)
+              let missingNames = Array.join(
+                ", ",
+                Array.fromList(List.map((ctor: Env.ConstructorInfo) => ctor.name, missing))
+              )
+              [
+                mkDiag(
+                  fnExpr.node.id,
+                  "Type error: non-exhaustive match for type "
+                    ++ typeName
+                    ++ " (missing: "
+                    ++ missingNames
+                    ++ ")"
+                ),
+              ]
+            }
+            {
+              armInfos: if (armInfos == []) { None } else { Some(armInfos) },
+              diagnostics: diagList,
             }
           }
         },
       },
-      _ => Panic.panic("Match clauses reference multiple nominal types"),
+      _ =>
+        {
+          armInfos: None,
+          diagnostics: [
+            mkDiag(
+              fnExpr.node.id,
+              "Type error: match clauses reference multiple nominal types",
+            ),
+          ],
+        },
     }
   }
 }
