@@ -6,6 +6,7 @@ use Test.*
 from "list" include List
 from "../src/core/surface_ast.gr" include SurfaceAst
 use SurfaceAst.*
+from "../src/core/source.gr" include Source
 from "../src/core/error.gr" include Error
 use Error.{ clearErrors, getMarkedErrors }
 from "../src/frontend/parser.gr" include Parser
@@ -449,6 +450,65 @@ test("backend-target directive syntax with args is rejected in canonical parser"
     assertTrue(hasDirective),
     assertTrue(hasError),
     assertFalse(parsed.program.core),
+  ])
+})
+
+test("parser supports less-than comparisons inside match conditions", () => {
+  clearErrors()
+  let source = "let abs = (n) => { match(n < 0) { true => { 0 - n }, false => { n } } };"
+  let parsed = Parser.parse(source)
+  let hasLessThanInMatch = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.InfixChain({ rest: [({ text: "=>", _ }, rhs)], _ }) =>
+            match (rhs.kind) {
+              SurfaceAst.Block(block) => match (block.body.kind) {
+                SurfaceAst.Match(matchExpr) => match (matchExpr.scrutinee) {
+                  Some({ kind: SurfaceAst.Paren({ kind: SurfaceAst.InfixChain({ rest: [({ text: "<", _ }, _)], _ }), _ }), _ }) => true,
+                  _ => false,
+                },
+                _ => false,
+              },
+              _ => false,
+            },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(hasLessThanInMatch),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("parser keeps full postfix call span for rhs of infix expression", () => {
+  clearErrors()
+  let source = "let z = abs(finalLoc.x) + abs(finalLoc.y);"
+  let parsed = Parser.parse(source)
+  let rhsSpanText = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.InfixChain({ rest: [(_op, rhs)], _ }) =>
+            Some(Source.slice(source, rhs.node.span)),
+          _ => None,
+        },
+        _ => None,
+      },
+      _ => None,
+    },
+    _ => None,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertEquals(Some("abs(finalLoc.y)"), rhsSpanText),
+    assertFalse(hasErrors),
   ])
 })
 
