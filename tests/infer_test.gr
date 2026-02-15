@@ -478,6 +478,43 @@ let out = strip(IOk(1));
   assertEquals("Number", Types.typeToString(outScheme.ty))
 })
 
+test("IResult-producing let binding generalizes and remains infectious", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let lift = (x) => { IOk(x) };
+let n = lift(1);
+let b = lift(true);
+"
+  let state = inferSource(source)
+  let liftScheme = expectTopBinding(state, "lift")
+  let nScheme = expectTopBinding(state, "n")
+  let bScheme = expectTopBinding(state, "b")
+  let hasTypeMismatch = List.some(
+    (entry: Infer.TypeMark) => entry.reason == Infer.TypeMismatch,
+    state.marks
+  )
+  let liftIsPolyInPayload = match (liftScheme.ty) {
+    Types.TFun(Types.TVar(payloadIn), Types.TNominal("IResult", [Types.TVar(payloadOut), _])) =>
+      payloadIn == payloadOut && Types.containsVar(liftScheme.quantifiers, payloadIn),
+    _ => false,
+  }
+  let nTypeOk = match (nScheme.ty) {
+    Types.TNominal("IResult", [Types.TNumber, _]) => true,
+    _ => false,
+  }
+  let bTypeOk = match (bScheme.ty) {
+    Types.TNominal("IResult", [Types.TBool, _]) => true,
+    _ => false,
+  }
+  all([
+    assertTrue(liftIsPolyInPayload),
+    assertTrue(nTypeOk),
+    assertTrue(bTypeOk),
+    assertFalse(hasTypeMismatch),
+  ])
+})
+
 test("propagation records effect event metadata at call site", () => {
   let source =
     "

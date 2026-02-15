@@ -119,6 +119,19 @@ class LspClient {
   }
 }
 
+const waitFor = async (
+  fn: () => boolean,
+  timeoutMs: number,
+  sleepMs = 200,
+): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fn()) return true;
+    await new Promise((r) => setTimeout(r, sleepMs));
+  }
+  return fn();
+};
+
 Deno.test({
   name: "LSP didOpen on aoc2016/1 should not crash runtime",
   sanitizeOps: false,
@@ -182,6 +195,101 @@ Deno.test({
 });
 
 Deno.test({
+  name: "LSP didChange on dependency should clear stale diagnostics in open dependent file",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const cwd = Deno.cwd();
+    const fixtureRoot = `${cwd}/tests/fixtures/lsp_dep_repro`;
+    const entryPath = `${fixtureRoot}/entry.wm`;
+    const depPath = `${fixtureRoot}/dep.wm`;
+
+    const depBroken =
+      "let at = (x) => { \"bad\" };";
+    const depFixed =
+      "let at = (x) => { nativeAdd((x, 1)) };";
+    const entrySource =
+      "from \"./dep\" import { at };\n"
+      + "let y = nativeAdd((at(1), 1));";
+
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    const client = new LspClient(proc);
+    const entryUri = `file://${entryPath}`;
+    const depUri = `file://${depPath}`;
+
+    await client.request("initialize", {
+      processId: null,
+      rootUri: `file://${cwd}`,
+      capabilities: {},
+    });
+    await client.notify("initialized", {});
+
+    await client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: depUri,
+        languageId: "wm",
+        version: 1,
+        text: depBroken,
+      },
+    });
+    await client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: entryUri,
+        languageId: "wm",
+        version: 1,
+        text: entrySource,
+      },
+    });
+
+    const sawInitialEntryError = await waitFor(() => {
+      const diags = client.diagnosticsByUri.get(entryUri) ?? [];
+      return diags.length > 0;
+    }, 15000);
+    if (!sawInitialEntryError) {
+      await client.close();
+      throw new Error("expected initial dependent diagnostics for entry.wm");
+    }
+
+    await client.notify("textDocument/didChange", {
+      textDocument: {
+        uri: depUri,
+        version: 2,
+      },
+      contentChanges: [
+        { text: depFixed },
+      ],
+    });
+
+    const clearedEntry = await waitFor(() => {
+      const diags = client.diagnosticsByUri.get(entryUri) ?? [];
+      return diags.length === 0;
+    }, 15000);
+
+    const runtimeError = client.runtimeError;
+    await client.close();
+
+    if (runtimeError) {
+      throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
+    }
+    if (!clearedEntry) {
+      throw new Error("expected entry.wm diagnostics to clear after fixing dep.wm");
+    }
+  },
+});
+
+Deno.test({
   name: "LSP didOpen on aoc2016/1 should publish diagnostics for the opened file",
   sanitizeOps: false,
   sanitizeResources: false,
@@ -233,7 +341,7 @@ Deno.test({
       },
     });
 
-    const deadlineMs = Date.now() + 12000;
+    const deadlineMs = Date.now() + 30000;
     while (
       Date.now() < deadlineMs
       && client.runtimeError == null

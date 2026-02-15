@@ -470,5 +470,127 @@ let x = {
   )
 })
 
+test("match clause order and guard are preserved in lowered function bundle", () => {
+  let source = "
+let classify = (x) => {
+  match(x) {
+    Some(v) when cond(v) => { first(v) }
+    Some(v) => { second(v) }
+    _ => { fallback(x) }
+  }
+};
+"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Fn(fnOuter) => match (fnOuter.items) {
+          [item] => match (item.kind) {
+            CoreAst.Clause(outerClause) =>
+              match (outerClause.body.kind) {
+                CoreAst.Apply(bundleExpr, _) =>
+                  match (bundleExpr.kind) {
+                    CoreAst.Fn(bundle) =>
+                      match (bundle.items) {
+                        [item1, item2, item3] =>
+                          match ((item1.kind, item2.kind, item3.kind)) {
+                            (
+                              CoreAst.Clause(c1),
+                              CoreAst.Clause(c2),
+                              CoreAst.Clause(c3),
+                            ) =>
+                              if (c1.guard == None || c2.guard != None || c3.guard != None) {
+                                Err("expected guard on first clause only")
+                              } else {
+                                let calleeName = (expr: CoreAst.Expr) =>
+                                  match (expr.kind) {
+                                    CoreAst.Apply(callee, _) =>
+                                      match (callee.kind) {
+                                        CoreAst.Ident({ text, _ }) => Ok(text),
+                                        _ => Err("expected ident callee in clause body apply"),
+                                      },
+                                    _ => Err("expected clause body apply"),
+                                  }
+                                let firstName = calleeName(c1.body)
+                                let secondName = calleeName(c2.body)
+                                let fallbackName = calleeName(c3.body)
+                                match ((firstName, secondName, fallbackName)) {
+                                  (Ok("first"), Ok("second"), Ok("fallback")) => Ok(void),
+                                  _ =>
+                                    Err(
+                                      "expected clause body order first -> second -> fallback"
+                                    ),
+                                }
+                              },
+                            _ => Err("expected lowered clause items"),
+                          },
+                        _ => Err("expected three lowered match clauses"),
+                      },
+                    _ => Err("expected lowered match bundle function"),
+                  },
+                _ => Err("expected match lowered to apply"),
+              },
+            _ => Err("expected outer clause"),
+          },
+          _ => Err("expected single outer item"),
+        },
+        _ => Err("expected outer fn"),
+      }
+    },
+  )
+})
+
+test("call argument lowering preserves nested evaluation shape order", () => {
+  let source = "let x = f(g(first), h(second));"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(calleeF, argTuple) =>
+          match ((calleeF.kind, argTuple.kind)) {
+            (
+              CoreAst.Ident({ text: "f", _ }),
+              CoreAst.Tuple([arg1, arg2]),
+            ) =>
+              match ((arg1.kind, arg2.kind)) {
+                (
+                  CoreAst.Apply(gCallee, gArg),
+                  CoreAst.Apply(hCallee, hArg),
+                ) =>
+                  match ((gCallee.kind, gArg.kind, hCallee.kind, hArg.kind)) {
+                    (
+                      CoreAst.Ident({ text: "g", _ }),
+                      CoreAst.Ident({ text: "first", _ }),
+                      CoreAst.Ident({ text: "h", _ }),
+                      CoreAst.Ident({ text: "second", _ }),
+                    ) => Ok(void),
+                    _ => Err("expected nested args g(first), h(second)"),
+                  },
+                _ => Err("expected tuple args lowered as g(...) then h(...)"),
+              },
+            _ => Err("expected f applied to 2-tuple args"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
 let results = runTests()
 printResultsAndExit(results)

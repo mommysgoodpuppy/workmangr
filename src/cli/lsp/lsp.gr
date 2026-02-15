@@ -139,6 +139,7 @@ let moduleSummaryCache: ModuleInfer.SummaryCache = ModuleInfer.emptySummaryCache
 let publishedDiagnosticsFingerprint: Map.Map<String, String> = Map.make()
 let lineStartsCache: Map.Map<String, List<Number>> = Map.make()
 let lineStartsCacheVersion: Map.Map<String, Number> = Map.make()
+let openEntryDependencies: Map.Map<String, List<String>> = Map.make()
 let mut graphEpoch = 0
 
 record InferenceSnapshot {
@@ -679,14 +680,12 @@ let joinStrings = (sep: String, parts: List<String>) => {
 
 let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) => {
   let nextFingerprint = diagnosticFingerprint(diagnostics)
-  let prevFingerprint = match (Map.get(uri, publishedDiagnosticsFingerprint)) {
-    Some(fp) => fp,
-    None => "",
-  }
-  if (nextFingerprint == prevFingerprint) {
-    debug("[LSP diag] skip unchanged uri=" ++ uri)
-    false
-  } else {
+  match (Map.get(uri, publishedDiagnosticsFingerprint)) {
+    Some(prevFingerprint) when nextFingerprint == prevFingerprint => {
+      debug("[LSP diag] skip unchanged uri=" ++ uri)
+      false
+    },
+    _ => {
     if (List.length(diagnostics) > 0) {
       debug(
         "[LSP diag] publish uri="
@@ -708,6 +707,7 @@ let publishDiagnostics = (uri: String, diagnostics: List<Error.CompilerError>) =
     sendNotification("textDocument/publishDiagnostics", params)
     Map.set(uri, nextFingerprint, publishedDiagnosticsFingerprint)
     true
+    },
   }
 }
 
@@ -920,6 +920,8 @@ let publishGraphDiagnostics = (
 ) => {
   let publishStart = nowNs()
   let (entryPath, graph, inferred) = buildInferenceForEntry(entryUri, docs, caller="diag")
+  let graphNodeIds = List.map(((moduleId, _node)) => moduleId, Map.toList(graph.nodes))
+  Map.set(entryUri, graphNodeIds, openEntryDependencies)
   let uriLookup = pathUriLookup(docs)
   List.forEach(((moduleId, node)) => {
     Map.set(moduleId, node, cachedGraphNodes)
@@ -972,6 +974,38 @@ let publishGraphDiagnostics = (
   let publishEnd = nowNs()
   timing("publishGraphDiagnostics", publishStart, publishEnd)
   nextPublished
+}
+
+let publishDiagnosticsForAffectedOpenDocs = (
+  triggerUri: String,
+  docs: Map.Map<String, String>,
+  publishedUris: Map.Map<String, Bool>,
+) => {
+  let changedModulePath = toWorkspacePath(uriToPath(triggerUri))
+  let affectedOpenUris = List.filterMap(((uri, _)) =>
+    if (uri == triggerUri) {
+      None
+    } else {
+      match (Map.get(uri, openEntryDependencies)) {
+        Some(moduleIds) =>
+          if (List.some((moduleId: String) => moduleId == changedModulePath, moduleIds)) {
+            Some(uri)
+          } else {
+            None
+          },
+        None => None,
+      }
+    }, Map.toList(docs))
+  let orderedUris = [triggerUri, ...affectedOpenUris]
+  let rec loop = (uris: List<String>, acc: Map.Map<String, Bool>) =>
+    match (uris) {
+      [] => acc,
+      [uri, ...rest] => {
+        let next = publishGraphDiagnostics(uri, docs, acc)
+        loop(rest, next)
+      },
+    }
+  loop(orderedUris, publishedUris)
 }
 
 let handleInitialize = (idText: String) => {
@@ -1375,7 +1409,7 @@ let handleMessage = (
                             void
                           }
                           if (!isInlayWorker) {
-                            publishGraphDiagnostics(uri, docs, publishedUris)
+                            publishDiagnosticsForAffectedOpenDocs(uri, docs, publishedUris)
                           } else {
                             publishedUris
                           }
@@ -1405,6 +1439,7 @@ let handleMessage = (
                     Map.remove(uri, docVersions)
                     Map.remove(uri, lineStartsCache)
                     Map.remove(uri, lineStartsCacheVersion)
+                    Map.remove(uri, openEntryDependencies)
                     invalidateInferenceCache()
                     if (isInlayWorker) {
                       invalidateInlayCache(uri)
