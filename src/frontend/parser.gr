@@ -1202,6 +1202,25 @@ and parseInfix: Parser<SurfaceAst.Expr> = state => {
       )
       (node, state3)
     },
+    Lexer.LAngle => {
+      let (id, stateAfterId) = freshId(state1)
+      let opTok = currentToken(stateAfterId)
+      let (_, state2) = expectSimple(Lexer.LAngle, stateAfterId)
+      let (opId, state2b) = freshId(state2)
+      let (rhs, state3) = parseInfix(state2b)
+      let span = spanFromTokens(expr.node.span, rhs.node.span)
+      let node = makeExpr(
+        id,
+        span,
+        InfixChain(
+          {
+            first: expr,
+            rest: [({ node: { id: opId, span: opTok.span }, text: "<" }, rhs)],
+          },
+        )
+      )
+      (node, state3)
+    },
     _ => (expr, state1),
   }
 }
@@ -1252,7 +1271,9 @@ and parsePostfix = (
         (target, state)
       } else {
         let postfix = Postfix({ target, segments: List.reverse(segments) })
-        let newExpr = makeExpr(target.node.id, target.node.span, postfix)
+        let lastConsumedTok = previousToken(state)
+        let postfixSpan = spanFromTokens(target.node.span, lastConsumedTok.span)
+        let newExpr = makeExpr(target.node.id, postfixSpan, postfix)
         (newExpr, state)
       }
     },
