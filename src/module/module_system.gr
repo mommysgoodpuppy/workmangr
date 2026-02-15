@@ -286,6 +286,48 @@ let readSource = (moduleId: String, options: BuildOptions) => {
     } else {
       "./" ++ candidate
     }
+  let isWindowsDrivePath = (path: String) =>
+    String.length(path) > 1 && String.charAt(1, path) == ':'
+  let pathVariants = (candidate: String) => {
+    if (!isWindowsDrivePath(candidate)) {
+      [candidate]
+    } else {
+      let slash = String.replaceAll("\\", "/", candidate)
+      let back = String.replaceAll("/", "\\", candidate)
+      if (candidate == slash && candidate == back) {
+        [candidate]
+      } else if (candidate == slash) {
+        [candidate, back]
+      } else if (candidate == back) {
+        [candidate, slash]
+      } else if (slash == back) {
+        [candidate, slash]
+      } else {
+        [candidate, slash, back]
+      }
+    }
+  }
+  let tryReadCandidate = (candidate: String) => {
+    let rec loop = (variants: List<String>) => {
+      match (variants) {
+        [] => Err(Fs.NoSuchFileOrDirectory),
+        [variant] => {
+          let path = wasiPath(variant)
+          ensureFsPrimed()
+          Fs.Utf8.readFile(Path.fromString(path))
+        },
+        [variant, ...rest] => {
+          let path = wasiPath(variant)
+          ensureFsPrimed()
+          match (Fs.Utf8.readFile(Path.fromString(path))) {
+            Ok(source) => Ok(source),
+            Err(_) => loop(rest),
+          }
+        },
+      }
+    }
+    loop(pathVariants(candidate))
+  }
   let tryRead = (candidates: List<String>) => {
     let rec loop = (remaining: List<String>) => {
       match (remaining) {
@@ -294,14 +336,10 @@ let readSource = (moduleId: String, options: BuildOptions) => {
           Fs.Utf8.readFile(Path.fromString("__workman_missing_module__.wm"))
         },
         [candidate] => {
-          let path = wasiPath(candidate)
-          ensureFsPrimed()
-          Fs.Utf8.readFile(Path.fromString(path))
+          tryReadCandidate(candidate)
         },
         [candidate, ...rest] => {
-          let path = wasiPath(candidate)
-          ensureFsPrimed()
-          match (Fs.Utf8.readFile(Path.fromString(path))) {
+          match (tryReadCandidate(candidate)) {
             Ok(source) => Ok(source),
             Err(_) => loop(rest),
           }

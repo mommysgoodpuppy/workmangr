@@ -255,3 +255,92 @@ Deno.test({
     void targetDiagnostics;
   },
 });
+
+const toFileUri = (path: string) => `file:///${path.replaceAll("\\", "/").replace(":", "%3A")}`;
+const lowerDrive = (path: string) =>
+  path.length > 1 && path[1] === ":" ? `${path[0].toLowerCase()}${path.slice(1)}` : path;
+
+Deno.test({
+  name: "LSP windows external didOpen should not fail reading opened absolute module",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    if (Deno.build.os !== "windows") return;
+
+    const cwd = Deno.cwd().replaceAll("\\", "/");
+    const workmanRoot = lowerDrive(
+      Deno.env.get("WORKMAN_V0_ROOT")?.replaceAll("\\", "/") ?? "c:/GIT/workman",
+    );
+    const stdRoot = lowerDrive(`${workmanRoot}/std`);
+    const target = lowerDrive(`${workmanRoot}/examples/aoc.wm`);
+    const workmanParent = lowerDrive(workmanRoot.replace(/\/[^/]+$/, ""));
+
+    try {
+      await Deno.stat(target);
+      await Deno.stat(stdRoot);
+    } catch {
+      return;
+    }
+
+    const source = await Deno.readTextFile(target);
+    const targetUri = toFileUri(target);
+    const rootUri = toFileUri(cwd);
+
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--dir", workmanRoot,
+        "--dir", stdRoot,
+        "--dir", workmanParent,
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+        "--std-root", stdRoot,
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    const client = new LspClient(proc);
+    await client.request("initialize", {
+      processId: null,
+      rootUri,
+      capabilities: {},
+    });
+    await client.notify("initialized", {});
+    await client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: targetUri,
+        languageId: "wm",
+        version: 1,
+        text: source,
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 2000));
+    const runtimeError = client.runtimeError;
+    const allDiagnostics = Array.from(client.diagnosticsByUri.values()).flat();
+    await client.close();
+
+    if (runtimeError) {
+      throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
+    }
+    const failedStdRead = allDiagnostics.find((diag) => {
+      if (!diag || typeof diag !== "object") return false;
+      const message = (diag as { message?: unknown }).message;
+      return typeof message === "string"
+        && message.includes("Failed to read module")
+        && (
+          message.includes("/examples/aoc.wm")
+          || message.includes("/std/prelude.wm")
+        );
+    });
+    if (failedStdRead) {
+      throw new Error(
+        "unexpected absolute module read failure for opened Windows file URI",
+      );
+    }
+  },
+});
