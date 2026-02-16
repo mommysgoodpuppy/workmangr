@@ -1,7 +1,6 @@
 module Solver
 
 from "list" include List
-from "map" include Map
 
 from "./types.gr" include Types
 from "./constraints.gr" include Constraints

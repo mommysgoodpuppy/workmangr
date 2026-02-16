@@ -19,8 +19,6 @@ from "../core/error.gr" include Error
 from "../frontend/lexer.gr" include Lexer
 from "../frontend/lower.gr" include Lower
 from "../frontend/parser.gr" include Parser
-from "../frontend/lower.gr" include Lower
-from "../frontend/frontend.gr" include Frontend
 from "./core_indexer.gr" include CoreIndexer
 from "../frontend/formatter.gr" include Formatter
 from "./nodestore.gr" include NodeStore as NS

@@ -12,7 +12,6 @@ from "wasi/time" include Time
 from "int64" include Int64
 from "runtime/unsafe/panic" include Panic
 use Panic.{ panic }
-from "../util.gr" include Util
 
 from "../core/source.gr" include Source
 from "../core/error.gr" include Error

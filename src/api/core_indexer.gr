@@ -1,8 +1,6 @@
 module CoreIndexer
 
 from "list" include List
-from "option" include Option
-from "string" include String
 from "../core/core_ast.gr" include CoreAst
 from "./nodestore.gr" include NodeStore as NS
 

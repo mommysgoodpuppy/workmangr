@@ -12,9 +12,6 @@ from "./lexer.gr" include Lexer
 from "../core/source.gr" include Source
 from "../core/error.gr" include Error
 
-from "../util.gr" include Util
-use Util.{ testStr }
-
 provide record ParseResult {
   program: SurfaceAst.Program,
   tokens: List<Lexer.Token>,

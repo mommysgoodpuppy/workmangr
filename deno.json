@@ -3,7 +3,6 @@
     "test:notparallel": "grain compile submodules/graintest/lib/runner.gr -o runner.wasm && wasmtime --dir . runner.wasm -- --batch | pwsh -NoProfile -NonInteractive -Command '$content = [Console]::In.ReadToEnd(); Invoke-Expression $content'",
     "test": "deno run --allow-read --allow-run --allow-env scripts/test_parallel.ts",
     "test:wmc-conformance": "deno run --allow-run scripts/test_wmc_conformance.ts",
-    "test:backend-preservation": "deno test --allow-read --allow-run --allow-env tests/backend_preservation_scaffold_test.ts",
     "test:unix": "grain compile lib/runner.gr -o runner.wasm && wasmtime --dir . runner.wasm -- --shell ./tests | sh",
     "test:discover": "wasmtime --dir . runner.wasm -- ./tests",
     "clean": "deno run -A scripts/clean_grain_cache.ts"

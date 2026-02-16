@@ -7,7 +7,6 @@ from "number" include Number
 from "path" include Path
 from "string" include String
 from "wasi/process" include Process
-from "list" include List
 
 from "../core/analysis.gr" include Analysis
 from "../core/module_infer.gr" include ModuleInfer
