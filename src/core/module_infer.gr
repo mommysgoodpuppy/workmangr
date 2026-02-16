@@ -424,7 +424,10 @@ provide let inferGraphWithCache = (
           },
           None => {
             recomputed += 1
+            Error.clearErrors()
             let lowered = Lower.lowerProgram(node.program)
+            let loweringDiagnostics = Error.getErrors()
+            Error.clearErrors()
             let (importedValues, importedTypes) = collectImportedEnv(
               node,
               lowered,
@@ -441,7 +444,8 @@ provide let inferGraphWithCache = (
               Some(diags) => diags,
               None => [],
             }
-            let combined = List.append(parseDiagnostics, typeDiagnostics)
+            let parseAndLower = List.append(parseDiagnostics, loweringDiagnostics)
+            let combined = List.append(parseAndLower, typeDiagnostics)
             Map.set(moduleId, combined, diagnosticsById)
 
             let (ownValues, ownTypes) = buildOwnExports(lowered, infer)

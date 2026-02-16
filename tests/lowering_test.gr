@@ -5,7 +5,9 @@ use Test.*
 
 from "../src/frontend/frontend.gr" include Frontend
 from "../src/core/core_ast.gr" include CoreAst
+from "../src/core/error.gr" include Error
 from "list" include List
+from "string" include String
 
 setSourceFile("./tests/lowering_test.gr")
 
@@ -136,6 +138,52 @@ test("constructor argument identifier lowers as binder var not pin", () => {
           _ => Err("expected single outer item"),
         },
         _ => Err("expected outer fn"),
+      }
+    },
+  )
+})
+
+test("unsupported => parameter expression lowers to marked wildcard and diagnostic", () => {
+  Error.clearErrors()
+  let source = "let f = (x.y) => {1};"
+  let program = Frontend.parseAndLower(source)
+  let diagnostics = Error.getErrors()
+
+  let hasLoweringError = List.some((diag: Error.CompilerError) =>
+    diag.stage == Error.Lowering
+      && String.contains("Unsupported expression in pattern position", diag.message),
+    diagnostics
+  )
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      if (!hasLoweringError) {
+        Err("expected lowering diagnostic for unsupported => parameter")
+      } else {
+        match (binding.value.kind) {
+          CoreAst.Fn(fnExpr) => match (fnExpr.items) {
+            [item] => match (item.kind) {
+              CoreAst.Clause(clause) => match (clause.param.kind) {
+                CoreAst.Mark(CoreAst.UnsupportedExpr, inner) =>
+                  match (inner.kind) {
+                    CoreAst.Wildcard => Ok(void),
+                    _ => Err("expected wildcard fallback inside mark"),
+                  },
+                _ => Err("expected marked fallback parameter pattern"),
+              },
+              _ => Err("expected fn clause"),
+            },
+            _ => Err("expected single fn clause"),
+          },
+          _ => Err("expected lowered function"),
+        }
       }
     },
   )

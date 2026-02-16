@@ -438,6 +438,81 @@ test("module infer cache keeps downstream typed summary stable for non-export de
   ])
 })
 
+test("module infer cache fully reuses summaries when graph and exports are unchanged", () => {
+  let overrides = Map.make()
+  Map.set("dep.wm", "export let id = (x) => { x };", overrides)
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { id };\nlet main = (x) => { id(x) };",
+    overrides
+  )
+
+  let options = { ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  let graph1 = ModuleSystem.buildGraph("entry", options=options)
+  let (_result1, cache1, _reused1, _recomputed1) = ModuleInfer.inferGraphWithCache(
+    graph1,
+    ModuleInfer.emptySummaryCache()
+  )
+  let graph2 = ModuleSystem.buildGraph("entry", options=options)
+  let (_result2, _cache2, reused2, recomputed2) = ModuleInfer.inferGraphWithCache(graph2, cache1)
+  let nodeCount = List.length(graph2.topo)
+  all([
+    assertEquals(0, recomputed2),
+    assertEquals(nodeCount, reused2),
+  ])
+})
+
+test("module infer cache invalidates dependents when dependency export signature changes", () => {
+  let overrides1 = Map.make()
+  Map.set("dep.wm", "export let at = (x) => { x };", overrides1)
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { at };\nlet main = at(true);",
+    overrides1
+  )
+
+  let options1 = { ...ModuleSystem.defaultOptions(), sourceOverrides: overrides1 }
+  let graph1 = ModuleSystem.buildGraph("entry", options=options1)
+  let (result1, cache1, _reused1, _recomputed1) = ModuleInfer.inferGraphWithCache(
+    graph1,
+    ModuleInfer.emptySummaryCache()
+  )
+  let entry1 = expectModule(result1, "entry.wm")
+  let main1 = match (Map.get("main", entry1.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing main export in first pass"),
+  }
+
+  let overrides2 = Map.make()
+  Map.set(
+    "dep.wm",
+    "export let at = (x) => { nativeAdd((x, 1)) };",
+    overrides2
+  )
+  Map.set(
+    "entry.wm",
+    "from \"./dep\" import { at };\nlet main = at(true);",
+    overrides2
+  )
+
+  let options2 = { ...ModuleSystem.defaultOptions(), sourceOverrides: overrides2 }
+  let graph2 = ModuleSystem.buildGraph("entry", options=options2)
+  let (result2, _cache2, reused2, recomputed2) = ModuleInfer.inferGraphWithCache(graph2, cache1)
+  let entry2 = expectModule(result2, "entry.wm")
+  let main2 = match (Map.get("main", entry2.valueExports)) {
+    Some(scheme) => scheme,
+    None => fail("missing main export in second pass"),
+  }
+  let beforeType = Types.typeToString(main1.ty)
+  let afterType = Types.typeToString(main2.ty)
+  all([
+    assertEquals("Bool", beforeType),
+    assertTrue(afterType != beforeType),
+    assertTrue(recomputed2 >= 2),
+    assertTrue(reused2 <= List.length(graph2.topo))
+  ])
+})
+
 test("module infer typeAtOffset resolves innermost span type", () => {
   let entrySource =
     "let id = (x) => { x };\nlet main = id(1);"
@@ -633,6 +708,64 @@ test("type-only reexports preserve Option Result and IResult constructor availab
     assertEquals("Number", Types.typeToString(pickRes.ty)),
     assertEquals("Number", Types.typeToString(pickIRes.ty)),
   ])
+})
+
+test("module infer surfaces lowering diagnostics for unsupported => parameter pattern", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let f = (x.y) => { 1 };",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let byId = match (Map.get("entry.wm", result.diagnosticsById)) {
+    Some(diags) => diags,
+    None => [],
+  }
+  let hasLowering = List.some(
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.Lowering
+        && String.contains("Unsupported expression in pattern position", diag.message),
+    entry.diagnostics
+  )
+  let hasLoweringById = List.some(
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.Lowering
+        && String.contains("Unsupported expression in pattern position", diag.message),
+    byId
+  )
+  all([assertTrue(hasLowering), assertTrue(hasLoweringById)])
+})
+
+test("module infer surfaces empty-function-clause diagnostics without crashing", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let f = match { };\nlet x = f(1);",
+    overrides
+  )
+
+  let result = ModuleInfer.inferEntry(
+    "entry",
+    options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+  )
+  let entry = expectModule(result, "entry.wm")
+  let _ = match (Map.get("x", entry.valueExports)) {
+    Some(_scheme) => true,
+    None => fail("missing x binding"),
+  }
+  let hasEmptyFnDiag = List.some(
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.TypeInference
+        && String.contains("empty function clauses", diag.message),
+    entry.diagnostics
+  )
+  assertTrue(hasEmptyFnDiag)
 })
 
 test("workman examples aoc.wm has no diagnostics", () => {

@@ -157,96 +157,110 @@ let rec lowerTypeExpr = (typeExpr: SurfaceAst.TypeExpr) => {
   { node: lowerNode(typeExpr.node), kind }: CoreAst.TypeExpr
 }
 
+let emitUnsupportedPatternExpr = (
+  expr: SurfaceAst.Expr,
+  message: String,
+  clues: List<Error.ErrorClue> =[],
+) => {
+  let mark: SurfaceAst.Mark = {
+    node: expr.node,
+    kind: SurfaceAst.UnexpectedToken("unsupported expression"),
+    expected: SurfaceAst.ExpectPattern,
+  }
+  let _ = Error.createMarkedError(
+    Error.Lowering,
+    mark,
+    message,
+    void,
+    clues=clues,
+    severity=Error.SError
+  )
+  {
+    node: lowerNode(expr.node),
+    kind: CoreAst.Mark(CoreAst.UnsupportedExpr, makeWildcardPattern(expr.node)),
+    resolvedConstructor: None,
+  }: CoreAst.Pattern
+}
+
 let rec exprToPattern = (expr: SurfaceAst.Expr) => {
   match (expr.kind) {
-    SurfaceAst.Ident({ text, _ }) when text == "_" => {
-      {
-        node: expr.node,
-        kind: SurfaceAst.Wildcard,
-        attach: { leading: [], trailing: [], dangling: [] },
-      }: SurfaceAst.Pattern
-    },
+    SurfaceAst.Ident({ text, _ }) when text == "_" => makeWildcardPattern(expr.node),
     SurfaceAst.Ident(name) => {
+      let loweredName = lowerName(name)
       {
-        node: expr.node,
-        kind: SurfaceAst.Var(name),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }: SurfaceAst.Pattern
+        node: lowerNode(expr.node),
+        kind: CoreAst.Var(loweredName),
+        resolvedConstructor: None,
+      }: CoreAst.Pattern
     },
     SurfaceAst.Paren(inner) => exprToPattern(inner),
     SurfaceAst.Tuple(exprs) => {
-      let rec convert = (es: List<SurfaceAst.Expr>) => {
-        match (es) {
-          [] => [],
-          [head, ...tail] => [exprToPattern(head), ...convert(tail)],
-        }
-      }
       {
-        node: expr.node,
-        kind: SurfaceAst.Tuple(convert(exprs)),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }: SurfaceAst.Pattern
+        node: lowerNode(expr.node),
+        kind: CoreAst.Tuple(List.map(exprToPattern, exprs)),
+        resolvedConstructor: None,
+      }: CoreAst.Pattern
     },
     SurfaceAst.Lit(lit) => {
       {
-        node: expr.node,
-        kind: SurfaceAst.Lit(lit),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }: SurfaceAst.Pattern
+        node: lowerNode(expr.node),
+        kind: CoreAst.Lit(lowerAtomLiteral(lit)),
+        resolvedConstructor: None,
+      }: CoreAst.Pattern
     },
     SurfaceAst.RecordLit(_) =>
-      Error.createPanicError(
-        Error.Lowering,
-        expr.node.span,
+      emitUnsupportedPatternExpr(
+        expr,
         "Record patterns are not supported",
-        [],
-        severity=Error.SError
       ),
     SurfaceAst.Postfix(postfix) => {
       match (postfix.target.kind) {
         SurfaceAst.Ident(name) => {
           match (postfix.segments) {
             [SurfaceAst.Call(args)] => {
-              let rec convertArgs = (es: List<SurfaceAst.Expr>) => {
-                match (es) {
-                  [] => [],
-                  [head, ...tail] =>
-                    [exprToPattern(head), ...convertArgs(tail)],
-                }
-              }
+              let loweredName = lowerName(name)
               {
-                node: expr.node,
-                kind: SurfaceAst.Constructor(name, convertArgs(args)),
-                attach: { leading: [], trailing: [], dangling: [] },
-              }: SurfaceAst.Pattern
+                node: lowerNode(expr.node),
+                kind: CoreAst.Constructor(
+                  loweredName,
+                  List.map(exprToPattern, args),
+                ),
+                resolvedConstructor: Some(loweredName),
+              }: CoreAst.Pattern
             },
             _ =>
-              Error.createPanicError(
-                Error.Lowering,
-                expr.node.span,
-                "Unsupported postfix segments in => clause",
-                [],
-                severity=Error.SError
+              emitUnsupportedPatternExpr(
+                expr,
+                "Unsupported expression in pattern position",
+                clues=[
+                  Error.Note(
+                    "pattern position expects identifier, tuple, constructor pattern, or wildcard",
+                  ),
+                ],
               ),
           }
         },
         _ =>
-          Error.createPanicError(
-            Error.Lowering,
-            expr.node.span,
-            "Unsupported postfix target in => clause",
-            [],
-            severity=Error.SError
+          emitUnsupportedPatternExpr(
+            expr,
+            "Unsupported expression in pattern position",
+            clues=[
+              Error.Note(
+                "pattern position expects identifier, tuple, constructor pattern, or wildcard",
+              ),
+            ],
           ),
       }
     },
     _ =>
-      Error.createPanicError(
-        Error.Lowering,
-        expr.node.span,
+      emitUnsupportedPatternExpr(
+        expr,
         "Unsupported expression in pattern position",
-        [],
-        severity=Error.SError
+        clues=[
+          Error.Note(
+            "pattern position expects identifier, tuple, constructor pattern, or wildcard",
+          ),
+        ],
       ),
   }
 }
@@ -381,7 +395,7 @@ and lowerArrow = (
 ) => {
   let paramPattern = exprToPattern(lhs)
   let loweredRhs = lowerExpr(rhs)
-  let loweredParam = lowerPattern(paramPattern)
+  let loweredParam = paramPattern
   let clause: CoreAst.FnClause = {
     node: lowerNode(exprNode),
     param: loweredParam,
@@ -423,7 +437,7 @@ and lowerMatchExpr = (exprNode: SurfaceAst.Node, m: SurfaceAst.MatchExpr) => {
     (Some(scrutinee), true) => {
       let loweredScrutinee = lowerExpr(scrutinee)
       let param = exprToPattern(scrutinee)
-      let loweredParam = lowerPattern(param)
+      let loweredParam = param
       let innerApply = makeExpr(
         exprNode,
         CoreAst.Apply(bundleExpr, loweredScrutinee)

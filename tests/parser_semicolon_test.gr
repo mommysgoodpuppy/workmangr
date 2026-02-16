@@ -4,6 +4,7 @@ from "../submodules/graintest/lib/test.gr" include Test
 use Test.*
 
 from "list" include List
+from "string" include String
 from "../src/core/surface_ast.gr" include SurfaceAst
 use SurfaceAst.*
 from "../src/core/source.gr" include Source
@@ -408,12 +409,23 @@ test("raw-like directives remain non-canonical in WMC parser mode", () => {
     }, parsed.items)
   let hasRaw = List.some((name: String) => name == "raw", directiveNames)
   let hasBackend = List.some((name: String) => name == "backend", directiveNames)
-  let hasErrors = List.length(getMarkedErrors()) > 0
+  let marked = getMarkedErrors()
+  let hasRawWarning = List.some(
+    (entry: Error.MarkedError) =>
+      String.contains("Directive @raw is non-canonical and ignored", entry.error.message),
+    marked
+  )
+  let hasBackendWarning = List.some(
+    (entry: Error.MarkedError) =>
+      String.contains("Directive @backend is non-canonical and ignored", entry.error.message),
+    marked
+  )
   all([
     assertTrue(hasRaw),
     assertTrue(hasBackend),
     assertFalse(parsed.core),
-    assertFalse(hasErrors),
+    assertTrue(hasRawWarning),
+    assertTrue(hasBackendWarning),
   ])
 })
 
@@ -508,6 +520,78 @@ test("parser keeps full postfix call span for rhs of infix expression", () => {
   let hasErrors = List.length(getMarkedErrors()) > 0
   all([
     assertEquals(Some("abs(finalLoc.y)"), rhsSpanText),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("parser keeps module-qualified call separate from plain field projection", () => {
+  clearErrors()
+  let source = "let a = List.length(xs);\nlet b = rec.field;"
+  let parsed = Parser.parse(source)
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(g1), SurfaceAst.DeclGroup(g2)] => {
+      let aOk = match (g1.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.Postfix({ target, segments }) =>
+              match ((target.kind, segments)) {
+                (
+                  SurfaceAst.Ident({ text: "List", _ }),
+                  [
+                    SurfaceAst.Project({ text: "length", _ }),
+                    SurfaceAst.Call([{ kind: SurfaceAst.Ident({ text: "xs", _ }), _ }]),
+                  ],
+                ) => true,
+                _ => false,
+              },
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      let bOk = match (g2.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.Postfix({ target, segments }) =>
+              match ((target.kind, segments)) {
+                (
+                  SurfaceAst.Ident({ text: "rec", _ }),
+                  [SurfaceAst.Project({ text: "field", _ })],
+                ) => true,
+                _ => false,
+              },
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      aOk && bOk
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(shapeOk),
+    assertFalse(hasErrors),
+  ])
+})
+
+test("parser accepts constructor-style nominal record literal syntax", () => {
+  clearErrors()
+  let source = "let op = Operation{ direction, distance, step = 1 };"
+  let parsed = Parser.parse(source)
+  let hasBinding = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => List.length(ld.bindings) == 1,
+      _ => false,
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([
+    assertTrue(hasBinding),
     assertFalse(hasErrors),
   ])
 })

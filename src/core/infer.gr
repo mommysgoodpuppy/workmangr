@@ -4,7 +4,6 @@ from "list" include List
 from "map" include Map
 from "array" include Array
 from "string" include String
-from "runtime/unsafe/panic" include Panic
 from "bytes" include Bytes
 from "wasi/file" include File
 from "wasi/process" include Process
@@ -85,6 +84,11 @@ let inferDebug = (message: String) => {
 }
 
 let mapSize = (m) => List.length(Map.toList(m))
+
+let isReservedValueName = (name: String) => name == "Panic"
+
+let reservedNameError = (name: String) =>
+  "Type error: reserved identifier " ++ name ++ " cannot be declared"
 
 let renderType = (t: Types.Type, state: InferState) =>
   Types.typeToReadableString(Types.applySubstType(state.subst, t))
@@ -269,6 +273,15 @@ let addTypeMark = (
   }
   { ...state, marks: updatedMarks, marksByNode: updatedByNode }
 }
+
+let addReservedNameMark = (state: InferState, node: CoreAst.Node, name: String) =>
+  addTypeMark(
+    state,
+    TypeMismatch,
+    originForNode(node.id, "reserved identifier"),
+    CoreAst.Inconsistent,
+    reservedNameError(name)
+  )
 
 let noteHoleObservation = (
   state: InferState,
@@ -1421,7 +1434,14 @@ let handleMatchApplication = (
       [] => state,
       [first, ..._] => {
         match (Env.lookupType(state.env, first.typeName)) {
-          None => Panic.panic("Unknown nominal type " ++ first.typeName),
+          None =>
+            addTypeMark(
+              state,
+              Internal,
+              originForNode(fnExpr.node.id, "match scrutinee"),
+              CoreAst.Internal("unknown nominal type"),
+              "Type error: unknown nominal type " ++ first.typeName
+            ),
           Some(typeInfo) => {
             let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
               typeInfo.typeParams,
@@ -1732,10 +1752,18 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
         },
         fnExpr.items
       )
-      if (clauses == []) {
-        Panic.panic("Type error: empty function clauses")
+      let stateFn = if (clauses == []) {
+        addTypeMark(
+          stateWithMatch,
+          Internal,
+          originForNode(expr.node.id, "function clauses"),
+          CoreAst.Internal("empty function clauses"),
+          "Type error: empty function clauses"
+        )
+      } else {
+        stateWithMatch
       }
-      let (paramType, state1) = freshVar(stateWithMatch)
+      let (paramType, state1) = freshVar(stateFn)
       let (resultType, state2) = freshVar(state1)
 
       let rec inferClauses = (remaining: List<CoreAst.FnClause>, st: InferState) =>
@@ -2483,6 +2511,12 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
 }
 
 let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
+  let declaredNameOpt = match (binding.name.kind) {
+    CoreAst.Var(name) => Some(name),
+    CoreAst.Pin(name) => Some(name),
+    CoreAst.Constructor(name, _) => Some(name),
+    _ => None,
+  }
   let (tValue, state1) = inferBindingValue(binding, state)
   logState("letBinding.preGeneralize", state1, nodeId=binding.node.id)
   let scheme = Types.generalize(
@@ -2491,16 +2525,66 @@ let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
     tValue
   )
   let name = Layer1Expr.bindingName(binding)
-  Env.defineValue(state1.env, name, scheme)
-  Map.set(name, scheme, state1.topBindings)
-  state1
+  match (declaredNameOpt) {
+    Some(nameDecl) when isReservedValueName(nameDecl.text) =>
+      addReservedNameMark(state1, nameDecl.node, nameDecl.text),
+    _ =>
+      if (isReservedValueName(name)) {
+        addReservedNameMark(state1, binding.name.node, name)
+      } else {
+        Env.defineValue(state1.env, name, scheme)
+        Map.set(name, scheme, state1.topBindings)
+        state1
+      },
+  }
 }
 
 let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferState) => {
+  let rec collectAllowed = (
+    remaining: List<CoreAst.LetBinding>,
+    keptRev: List<CoreAst.LetBinding>,
+    st: InferState,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(keptRev), st),
+      [binding, ...rest] => {
+        let declaredNameOpt = match (binding.name.kind) {
+          CoreAst.Var(nameDecl) => Some(nameDecl),
+          CoreAst.Pin(nameDecl) => Some(nameDecl),
+          CoreAst.Constructor(nameDecl, _) => Some(nameDecl),
+          _ => None,
+        }
+        match (declaredNameOpt) {
+          Some(nameDecl) when isReservedValueName(nameDecl.text) =>
+            collectAllowed(
+              rest,
+              keptRev,
+              addReservedNameMark(st, nameDecl.node, nameDecl.text)
+            ),
+          _ => {
+            let name = Layer1Expr.bindingName(binding)
+            if (isReservedValueName(name)) {
+              collectAllowed(
+                rest,
+                keptRev,
+                addReservedNameMark(st, binding.name.node, name)
+              )
+            } else {
+              collectAllowed(rest, [binding, ...keptRev], st)
+            }
+          },
+        }
+      },
+    }
+
+  let (allowedBindings, state0) = collectAllowed(bindings, [], state)
+  if (allowedBindings == []) {
+    state0
+  } else {
   let baseValues = cloneEnvValues(Env.snapshotValues(state.env))
-  let seed = Layer1Bindings.seedRecursivePlaceholders(bindings, state.nextVar)
+  let seed = Layer1Bindings.seedRecursivePlaceholders(allowedBindings, state0.nextVar)
   let placeholders = seed.placeholders
-  let state1 = { ...state, nextVar: seed.nextVar }
+  let state1 = { ...state0, nextVar: seed.nextVar }
   List.forEach(((name, placeholderType): (String, Types.Type)) => {
     Env.defineValue(
       state1.env,
@@ -2515,11 +2599,21 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
       [] => st,
       [binding, ...rest] => {
         let name = Layer1Expr.bindingName(binding)
-        let placeholderType = match (Layer1Bindings.lookupPlaceholder(name, placeholders)) {
-          Some(t) => t,
-          None => Panic.panic("Missing placeholder for recursive binding " ++ name),
+        let (placeholderType, st0) = match (Layer1Bindings.lookupPlaceholder(name, placeholders)) {
+          Some(t) => (t, st),
+          None => {
+            let (fallback, st1) = freshVar(st)
+            let st2 = addTypeMark(
+              st1,
+              Internal,
+              originForNode(binding.node.id, "recursive placeholder"),
+              CoreAst.Internal("missing recursive placeholder"),
+              "Type error: missing placeholder for recursive binding " ++ name
+            )
+            (fallback, st2)
+          },
         }
-        let (valueType, st1) = inferBindingValue(binding, st)
+        let (valueType, st1) = inferBindingValue(binding, st0)
         let st2 = unifyForNode(
           binding.node.id,
           "recursive binding",
@@ -2531,7 +2625,7 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
       },
     }
 
-  let state2 = inferBodies(bindings, state1)
+  let state2 = inferBodies(allowedBindings, state1)
   logState("rec.preFinalize", state2)
 
   let rec finalize = (remaining: List<(String, Types.Type)>, st: InferState) =>
@@ -2546,9 +2640,48 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
     }
 
   finalize(placeholders, state2)
+  }
 }
 
 let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
+  if (isReservedValueName(decl.name.text)) {
+    addReservedNameMark(state, decl.name.node, decl.name.text)
+  } else {
+    let hasReservedCtor = match (decl.body) {
+      CoreAst.Variant(ctors) => {
+        let rec existsReservedCtor = (
+          items: List<(CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)>
+        ) =>
+          match (items) {
+            [] => false,
+            [(ctorName, _payload, _ann), ...rest] =>
+              isReservedValueName(ctorName.text) || existsReservedCtor(rest),
+          }
+        existsReservedCtor(ctors)
+      },
+      _ => false,
+    }
+    if (hasReservedCtor) {
+      let offendingNode = match (decl.body) {
+        CoreAst.Variant(ctors) => {
+          let rec firstReservedCtorNode = (
+            items: List<(CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)>
+          ) =>
+            match (items) {
+              [] => decl.name.node,
+              [(ctorName, _payload, _ann), ...rest] =>
+                if (isReservedValueName(ctorName.text)) {
+                  ctorName.node
+                } else {
+                  firstReservedCtorNode(rest)
+                },
+            }
+          firstReservedCtorNode(ctors)
+        },
+        _ => decl.name.node,
+      }
+      addReservedNameMark(state, offendingNode, "Panic")
+    } else {
   let prepared = Layer1Decl.prepareTypeDecl(decl, state.nextVar)
   let env1 = Env.registerType(state.env, prepared.info)
   List.forEach(((name, scheme): (String, Types.Scheme)) => {
@@ -2556,6 +2689,8 @@ let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
     void
   }, prepared.constructorSchemes)
   { ...state, nextVar: prepared.nextVar, env: env1 }
+    }
+  }
 }
 
 let registerRecordDecl = (decl: CoreAst.RecordDecl, state: InferState) => {

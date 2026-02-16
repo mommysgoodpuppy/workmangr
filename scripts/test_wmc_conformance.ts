@@ -37,9 +37,41 @@ const runOne = async (test: GateTest) => {
   return ok;
 };
 
+const runLspRegression = async () => {
+  const start = performance.now();
+  const child = new Deno.Command("deno", {
+    args: [
+      "test",
+      "--allow-run",
+      "--allow-read",
+      "--allow-env",
+      "tests/lsp_crash_repro_test.ts",
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const { code, stdout, stderr } = await child.output();
+  const elapsed = ((performance.now() - start) / 1000).toFixed(2);
+  const output = decoder.decode(stdout) + decoder.decode(stderr);
+  const ok = code === 0;
+  const prefix = ok ? "[PASS]" : "[FAIL]";
+  console.log(`${prefix} lsp-regression (tests/lsp_crash_repro_test.ts) ${elapsed}s`);
+  if (!ok) {
+    console.log(`--- tests/lsp_crash_repro_test.ts output ---`);
+    console.log(output);
+  }
+  return ok;
+};
+
 let failures = 0;
 for (const test of tests) {
   const ok = await runOne(test);
+  if (!ok) {
+    failures += 1;
+  }
+}
+{
+  const ok = await runLspRegression();
   if (!ok) {
     failures += 1;
   }

@@ -1966,6 +1966,26 @@ and parseDirectiveTopItem = (state: ParseState) => {
     "after directive"
   )
   let (dirId, state5) = freshId(state4)
+  let _ = if (nameText == "raw" || nameText == "backend") {
+    let markNode: SurfaceAst.Node = { id: dirId, span: nameTok.span }
+    let mark: SurfaceAst.Mark = {
+      node: markNode,
+      kind: SurfaceAst.InvalidTopLevel("non-canonical directive"),
+      expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDirective),
+    }
+    Error.createMarkedError(
+      Error.Parsing,
+      mark,
+      "Directive @" ++ nameText ++ " is non-canonical and ignored in canonical mode",
+      void,
+      clues=[
+        Error.Note("Canonical v1 only recognizes @core semantics."),
+      ],
+      severity=Error.Warning
+    )
+  } else {
+    void
+  }
   let directive: SurfaceAst.Directive = { name, args: [] }
   let topItem: SurfaceAst.TopItem = SurfaceAst.Directive(directive)
   let _ = directiveTok

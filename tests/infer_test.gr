@@ -1038,6 +1038,81 @@ let choose = (b) => {
   }
 })
 
+test("reserved Panic cannot be rebound by let declaration", () => {
+  let source =
+    "
+let Panic = (msg) => { msg };
+let y = Panic(\"boom\");
+"
+  let state = inferSource(source)
+  let hasReservedNameDiag = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("reserved identifier Panic cannot be declared", entry.message),
+    state.marks
+  )
+  assertTrue(hasReservedNameDiag)
+})
+
+test("reserved Panic cannot be declared as constructor name", () => {
+  let source =
+    "
+type X = Panic<String> | Other;
+let x = Panic(\"boom\");
+"
+  let state = inferSource(source)
+  let hasReservedNameDiag = List.some(
+    (entry: Infer.TypeMark) =>
+      String.contains("reserved identifier Panic cannot be declared", entry.message),
+    state.marks
+  )
+  assertTrue(hasReservedNameDiag)
+})
+
+test("imported env cannot override reserved Panic builtin", () => {
+  let source =
+    "
+let y = Panic(1);
+"
+  let importedEnv = Map.make()
+  let identityVar = Types.TVar(7001)
+  let shadowScheme: Types.Scheme = {
+    quantifiers: [7001],
+    ty: Types.TFun(identityVar, identityVar),
+  }
+  Map.set("Panic", shadowScheme, importedEnv)
+  let state = inferSourceWithEnv(source, importedEnv)
+  let hasStringConstraintMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && (
+          String.contains("cannot unify Number with String", entry.message)
+            || String.contains("cannot unify String with Number", entry.message)
+        ),
+    state.marks
+  )
+  assertTrue(hasStringConstraintMismatch)
+})
+
+test("empty function clauses emit diagnostic and inference continues", () => {
+  let source =
+    "
+let f = match { };
+let x = f(1);
+"
+  let state = inferSource(source)
+  let fScheme = expectTopBinding(state, "f")
+  let _ = expectTopBinding(state, "x")
+  let hasEmptyClauseDiag = List.some(
+    (entry: Infer.TypeMark) => String.contains("empty function clauses", entry.message),
+    state.marks
+  )
+  all([
+    assertTrue(hasEmptyClauseDiag),
+    assertFunctionShape(fScheme),
+    assertTrue(true),
+  ])
+})
+
 test("non-exhaustive match emits diagnostic and inference continues", () => {
   let source =
     "
