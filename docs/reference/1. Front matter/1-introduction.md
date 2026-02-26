@@ -20,6 +20,13 @@ what programs **mean**. Tooling and compilers may differ internally, but
 conforming implementations must agree on the observable behavior described
 here.
 
+Historical note (non-normative):
+- The earlier Workman v0 implementation was a research/experimental system used
+  to explore ideas.
+- v0 implementation behavior and architecture do **not** define canonical
+  Workman or WMC behavior unless explicitly adopted by this manual or a backend
+  profile contract.
+
 This manual is intended to be:
 - Tight where it matters (so different implementations behave the same).
 - Loose where evolution is desirable (so tooling can improve without “spec

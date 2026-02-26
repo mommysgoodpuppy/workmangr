@@ -118,8 +118,14 @@ Implementation-defined:
 
 These notes are for guidance only and do **not** define canonical behavior.
 
-- The Zig runtime currently uses a boxed `Value` union for all values
-  (`Int`, `Bool`, `String`, `Tuple`, `Record`, `Data`, `Func`).
+- Some current runtime-mode implementations (including a v0 Zig runtime backend)
+  use a boxed `Value` union for all values (`Int`, `Bool`, `String`, `Tuple`,
+  `Record`, `Data`, `Func`).
+- This is an implementation strategy note, not a recommended canonical backend
+  architecture.
+- In particular, the WMC profile targets compile-time specialization and
+  unboxed representations by default, using boxed values only as a fallback
+  when specialization is not possible (`../7. Interop and backend contracts/3-wmc-profile.md`).
 - The JS runtime currently represents numbers, strings, and booleans as native
   JS values, and uses objects for ADT values; non-exhaustive matches throw an
   error with metadata.

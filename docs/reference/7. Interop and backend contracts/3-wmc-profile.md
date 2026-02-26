@@ -2,7 +2,7 @@
 
 ## Scope
 
-Defines the intended implementation profile for WMC: a high-level Workman
+Defines the reference implementation direction for WMC: a high-level Workman
 language experience with performance-oriented compilation and explicit memory
 control, without relying on a large VM-style runtime.
 
@@ -44,12 +44,19 @@ declares a backend-specific extension.
 
 ### 2. Minimal runtime model
 
-WMC must not require a universal boxed-value VM runtime as the default execution
+WMC must not use a universal boxed-value VM runtime as the default execution
 model for canonical code.
 
-Boxed representations may still be used as a fallback when compile-time typing
-and analysis cannot prove a concrete representation, but this fallback must not
-define the primary runtime architecture.
+Normative:
+- WMC must use type-directed specialization and concrete/unboxed
+  representations by default whenever compile-time typing and analysis make
+  them safe.
+- A universal boxed representation is permitted only as a fallback for cases
+  where specialization cannot be proven correct or cannot yet be implemented.
+- The implementation must provide such fallback support, because full
+  specialization cannot be guaranteed in all cases.
+- Such fallback use must not define the primary runtime architecture, and must
+  not change canonical observable behavior.
 
 Implementations may still include small helper runtime libraries for:
 - allocation helpers
@@ -60,8 +67,14 @@ but these helpers must not redefine language semantics.
 
 ### 3. Type-directed specialization
 
-WMC should specialize representations and operations whenever static typing makes
-it safe.
+Normative:
+- WMC must specialize representations and operations whenever static typing and
+  analysis make it safe and the implementation has a corresponding specialized
+  lowering path.
+
+Implementation-defined (must be documented):
+- Which constructs currently fall back to boxed lowering because a specialized
+  lowering path is not yet implemented.
 
 Examples:
 - direct primitive operations instead of boxed operator dispatch
@@ -87,7 +100,8 @@ To satisfy this profile, implementations should include:
 3. An explicit match-lowering stage (decision-tree style), not ad hoc emitter
    pattern expansion.
 4. A representation-planning stage that decides boxed vs unboxed data from
-   typing and escape/lifetime information.
+   typing and escape/lifetime information, with boxed fallback treated as an
+   exceptional path rather than the default codegen strategy.
 
 ---
 
