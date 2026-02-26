@@ -147,10 +147,19 @@ const main = async () => {
     args: grainArgs,
     cwd: workmangrRoot,
     env,
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  }).spawn().status;
+    // `type`/`ast` are non-interactive. Piping stdio avoids TTY-specific hangs
+    // observed when running Grain/WASI under some terminals (e.g. pwsh).
+    stdin: "null",
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+
+  if (proc.stdout.length > 0) {
+    await Deno.stdout.write(proc.stdout);
+  }
+  if (proc.stderr.length > 0) {
+    await Deno.stderr.write(proc.stderr);
+  }
 
   Deno.exit(proc.code);
 };
