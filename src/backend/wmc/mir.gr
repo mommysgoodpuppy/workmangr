@@ -1,0 +1,54 @@
+module WmcMir
+
+from "list" include List
+
+from "../../core/core_ast.gr" include CoreAst
+from "./tcore.gr" include WmcTCore
+from "./match_lower.gr" include WmcMatchLower
+from "./tcore_norm.gr" include WmcTCoreNorm
+
+provide type BlockId = Number
+
+provide enum rec BodyExpr {
+  BELit(CoreAst.AtomLiteral),
+  BEIdent(String),
+  BEApply(BodyExpr, BodyExpr),
+  BELet(String, BodyExpr, BodyExpr),
+  BETuple(List<BodyExpr>),
+  BEMatch(MatchMir),
+  BEUnknown(String),
+}
+and provide enum Instr {
+  Bind(WmcMatchLower.PatternBinding),
+}
+and provide enum Terminator {
+  Fail,
+  Goto(BlockId),
+  Test(WmcMatchLower.PatternTest, BlockId, BlockId),
+  Guard(WmcTCoreNorm.Expr, BlockId, BlockId),
+  SwitchConstructor(List<(String, BlockId)>, BlockId),
+  SwitchTupleArity(List<(Number, BlockId)>, BlockId),
+  SelectClause(WmcMatchLower.MatchClause),
+  SelectExpr(WmcMatchLower.MatchClause, BodyExpr),
+}
+and provide record Block {
+  id: BlockId,
+  instrs: List<Instr>,
+  term: Terminator,
+}
+and provide record MatchMir {
+  node: WmcTCore.TypedNode,
+  scrutinee: WmcTCoreNorm.Expr,
+  entry: BlockId,
+  blocks: List<Block>,
+  clauses: List<WmcMatchLower.MatchClause>,
+}
+
+provide let findBlock = (mir: MatchMir, id: BlockId) => {
+  let rec loop = (rest: List<Block>) =>
+    match (rest) {
+      [] => None,
+      [block, ...tail] => if (block.id == id) { Some(block) } else { loop(tail) },
+    }
+  loop(mir.blocks)
+}

@@ -1,0 +1,146 @@
+module WmcMirDebug
+
+from "array" include Array
+from "list" include List
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/types.gr" include Types
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+from "./match_lower.gr" include WmcMatchLower
+from "./mir.gr" include WmcMir
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let rec occurrenceToString = (occ: WmcMatchLower.Occurrence) =>
+  match (occ) {
+    WmcMatchLower.ORoot => "root",
+    WmcMatchLower.OTupleElem(parent, index) =>
+      occurrenceToString(parent) ++ ".tuple[" ++ toString(index) ++ "]",
+    WmcMatchLower.OConstructorField(parent, ctor, index) =>
+      occurrenceToString(parent)
+        ++ "."
+        ++ ctor
+        ++ "["
+        ++ toString(index)
+        ++ "]",
+  }
+
+let literalToString = (lit: CoreAst.AtomLiteral) =>
+  match (lit) {
+    CoreAst.Int(n) => toString(n),
+    CoreAst.Bool(b) => toString(b),
+    CoreAst.Char(c) => "'" ++ toString(c) ++ "'",
+    CoreAst.Str(s) => "\"" ++ s ++ "\"",
+    CoreAst.Byte(n) => "byte(" ++ toString(n) ++ ")",
+    CoreAst.Unit => "Void",
+  }
+
+let patternTestToString = (test: WmcMatchLower.PatternTest) =>
+  match (test) {
+    WmcMatchLower.TestConstructor(occ, name) =>
+      "ctor " ++ occurrenceToString(occ) ++ " == " ++ name,
+    WmcMatchLower.TestTupleArity(occ, arity) =>
+      "tuple_arity " ++ occurrenceToString(occ) ++ " == " ++ toString(arity),
+    WmcMatchLower.TestLiteral(occ, lit) =>
+      "lit " ++ occurrenceToString(occ) ++ " == " ++ literalToString(lit),
+    WmcMatchLower.TestPin(occ, name) =>
+      "pin " ++ occurrenceToString(occ) ++ " == " ++ name,
+  }
+
+let bindingToString = (binding: WmcMatchLower.PatternBinding) =>
+  binding.name ++ " <- " ++ occurrenceToString(binding.occurrence)
+
+let clauseSummary = (clause: WmcMatchLower.MatchClause) => {
+  let body: WmcTCoreNorm.Expr = clause.body
+  let clauseTy = match (body.node.ty) {
+    Some(ty) => Types.typeToReadableString(ty),
+    None => "?",
+  }
+  "clause#"
+    ++ toString(clause.index)
+    ++ " bodyTy="
+    ++ clauseTy
+}
+
+let instrToString = (instr: WmcMir.Instr) =>
+  match (instr) {
+    WmcMir.Bind(binding) => "bind " ++ bindingToString(binding),
+  }
+
+let rec bodyExprToString = (expr: WmcMir.BodyExpr) =>
+  match (expr) {
+    WmcMir.BELit(lit) => literalToString(lit),
+    WmcMir.BEIdent(name) => name,
+    WmcMir.BEApply(callee, arg) =>
+      "apply(" ++ bodyExprToString(callee) ++ ", " ++ bodyExprToString(arg) ++ ")",
+    WmcMir.BELet(name, valueExpr, bodyExpr) =>
+      "let " ++ name ++ " = " ++ bodyExprToString(valueExpr) ++ " in " ++ bodyExprToString(bodyExpr),
+    WmcMir.BETuple(items) =>
+      "(" ++ joinStrings(", ", List.map(bodyExprToString, items)) ++ ")",
+    WmcMir.BEMatch(mir) =>
+      "<match entry=b"
+        ++ toString(mir.entry)
+        ++ " blocks="
+        ++ toString(List.length(mir.blocks))
+        ++ ">",
+    WmcMir.BEUnknown(tag) => "<unknown:" ++ tag ++ ">",
+  }
+
+let rec blockRefListString = (pairs: List<(String, WmcMir.BlockId)>) =>
+  "[" ++ joinStrings(", ", List.map(((tag, id)) => tag ++ "->b" ++ toString(id), pairs)) ++ "]"
+
+let rec numBlockRefListString = (pairs: List<(Number, WmcMir.BlockId)>) =>
+  "[" ++ joinStrings(", ", List.map(((n, id)) => toString(n) ++ "->b" ++ toString(id), pairs)) ++ "]"
+
+let termToString = (term: WmcMir.Terminator) =>
+  match (term) {
+    WmcMir.Fail => "fail",
+    WmcMir.Goto(id) => "goto b" ++ toString(id),
+    WmcMir.Test(test, onPass, onFail) =>
+      "test("
+        ++ patternTestToString(test)
+        ++ ") ? b"
+        ++ toString(onPass)
+        ++ " : b"
+        ++ toString(onFail),
+    WmcMir.Guard(_expr, onTrue, onFalse) =>
+      "guard(expr) ? b" ++ toString(onTrue) ++ " : b" ++ toString(onFalse),
+    WmcMir.SwitchConstructor(branches, defaultId) =>
+      "switch_ctor "
+        ++ blockRefListString(branches)
+        ++ " default b"
+        ++ toString(defaultId),
+    WmcMir.SwitchTupleArity(branches, defaultId) =>
+      "switch_tuple_arity "
+        ++ numBlockRefListString(branches)
+        ++ " default b"
+        ++ toString(defaultId),
+    WmcMir.SelectClause(clause) => "select " ++ clauseSummary(clause),
+    WmcMir.SelectExpr(clause, bodyExpr) =>
+      "select_expr " ++ clauseSummary(clause) ++ " = " ++ bodyExprToString(bodyExpr),
+  }
+
+let blockToLines = (block: WmcMir.Block) => {
+  let header = "b" ++ toString(block.id) ++ ":"
+  let instrLines = List.map((instr: WmcMir.Instr) => "  " ++ instrToString(instr), block.instrs)
+  let termLine = "  term " ++ termToString(block.term)
+  [header, ...List.append(instrLines, [termLine])]
+}
+
+provide let matchMirToString = (mir: WmcMir.MatchMir) => {
+  let scrutineeTy = match (mir.scrutinee.node.ty) {
+    Some(ty) => Types.typeToReadableString(ty),
+    None => "?",
+  }
+  let header = [
+    "match_mir entry=b" ++ toString(mir.entry),
+    "scrutinee_ty=" ++ scrutineeTy,
+    "blocks=" ++ toString(List.length(mir.blocks)),
+  ]
+  let body = List.flatten(List.map(blockToLines, mir.blocks))
+  joinStrings("\n", List.append(header, body))
+}

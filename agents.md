@@ -13,3 +13,4 @@ grain is highly particular about file use eg
 "grain --dir . --include-dirs src src/cli/cli.gr -- %1 %2"
 
 rare cases grain has cache errors that show as weird wasm stuff, to resolve delete .gro and .wasm files
+deno task clean does this 

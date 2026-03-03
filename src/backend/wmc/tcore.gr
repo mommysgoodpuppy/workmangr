@@ -1,0 +1,326 @@
+module WmcTCore
+
+from "list" include List
+from "map" include Map
+
+from "../../core/source.gr" include Source
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/types.gr" include Types
+from "../../core/infer.gr" include Infer
+from "../../core/error.gr" include Error
+from "../../core/module_infer.gr" include ModuleInfer
+from "../../core/layer1/expr.gr" include Layer1Expr
+
+provide record TypedNode {
+  id: Number,
+  span: Source.Span,
+  ty: Option<Types.Type>,
+}
+
+provide enum rec PatternKind {
+  PMark(CoreAst.Mark, Pattern),
+  PHole(CoreAst.Hole),
+  PWildcard,
+  PVar(String),
+  PPin(String),
+  PLit(CoreAst.AtomLiteral),
+  PConstructor(String, List<Pattern>),
+  PTuple(List<Pattern>),
+  PList(List<Pattern>, Option<Pattern>),
+  PAllErrors,
+}
+and provide record Pattern {
+  node: TypedNode,
+  kind: PatternKind,
+}
+
+provide enum rec ExprKind {
+  EMark(CoreAst.Mark, Expr),
+  ELit(CoreAst.AtomLiteral),
+  EIdent(String),
+  EApply(Expr, Expr),
+  EFn(FnExpr),
+  ELet(LetBinding, Expr),
+  EIf(Expr, Expr, Option<Expr>),
+  ETuple(List<Expr>),
+  ERecordLit(List<RecordItem>),
+  EHole(CoreAst.Hole),
+}
+and provide record Expr {
+  node: TypedNode,
+  kind: ExprKind,
+}
+and provide enum RecordItem {
+  RField(String, Expr),
+  RSpread(Expr),
+}
+and provide record FnClause {
+  node: TypedNode,
+  param: Pattern,
+  guard: Option<Expr>,
+  matchConstructor: Option<String>,
+  body: Expr,
+}
+and provide enum FnItemKind {
+  FClause(FnClause),
+  FInclude(String),
+  FHole(CoreAst.Hole),
+}
+and provide record FnItem {
+  node: TypedNode,
+  kind: FnItemKind,
+}
+and provide record FnExpr {
+  node: TypedNode,
+  items: List<FnItem>,
+}
+and provide record LetBinding {
+  node: TypedNode,
+  name: Pattern,
+  annotation: Option<CoreAst.TypeExpr>,
+  value: Expr,
+}
+
+provide record TopValueBinding {
+  name: String,
+  exported: Bool,
+  groupKind: CoreAst.LetGroupMods,
+  binding: LetBinding,
+}
+
+provide record Module {
+  moduleId: String,
+  values: List<TopValueBinding>,
+  typeDeclNames: List<String>,
+  recordDeclNames: List<String>,
+  diagnostics: List<Error.CompilerError>,
+}
+
+record ProjectCtx {
+  infer: Infer.InferState,
+}
+
+let mapOption = (opt, fn) => match (opt) {
+  None => None,
+  Some(v) => Some(fn(v)),
+}
+
+let typedNode = (ctx: ProjectCtx, node: CoreAst.Node) => {
+  let ty = match (Map.get(node.id, ctx.infer.nodeTypes)) {
+    Some(t) => Some(Types.applySubstType(ctx.infer.subst, t)),
+    None => None,
+  }
+  { id: node.id, span: node.span, ty }: TypedNode
+}
+
+let rec projectPattern = (ctx: ProjectCtx, pattern: CoreAst.Pattern) => {
+  let kind = match (pattern.kind) {
+    CoreAst.Mark(mark, inner) => PMark(mark, projectPattern(ctx, inner)),
+    CoreAst.Hole(hole) => PHole(hole),
+    CoreAst.Wildcard => PWildcard,
+    CoreAst.Var(name) => PVar(name.text),
+    CoreAst.Pin(name) => PPin(name.text),
+    CoreAst.Lit(lit) => PLit(lit),
+    CoreAst.Constructor(name, args) =>
+      PConstructor(name.text, List.map((p: CoreAst.Pattern) => projectPattern(ctx, p), args)),
+    CoreAst.Tuple(items) =>
+      PTuple(List.map((p: CoreAst.Pattern) => projectPattern(ctx, p), items)),
+    CoreAst.List(items, rest) =>
+      PList(
+        List.map((p: CoreAst.Pattern) => projectPattern(ctx, p), items),
+        mapOption(rest, (p: CoreAst.Pattern) => projectPattern(ctx, p)),
+      ),
+    CoreAst.AllErrors => PAllErrors,
+  }
+  { node: typedNode(ctx, pattern.node), kind }: Pattern
+}
+
+and projectExpr = (ctx: ProjectCtx, expr: CoreAst.Expr) => {
+  let kind = match (expr.kind) {
+    CoreAst.Mark(mark, inner) => EMark(mark, projectExpr(ctx, inner)),
+    CoreAst.Lit(lit) => ELit(lit),
+    CoreAst.Ident(name) => EIdent(name.text),
+    CoreAst.Apply(callee, arg) => EApply(projectExpr(ctx, callee), projectExpr(ctx, arg)),
+    CoreAst.Fn(fnExpr) => EFn(projectFnExpr(ctx, fnExpr)),
+    CoreAst.Let(binding, body) => ELet(projectLetBinding(ctx, binding), projectExpr(ctx, body)),
+    CoreAst.If(cond, thenExpr, elseOpt) =>
+      EIf(
+        projectExpr(ctx, cond),
+        projectExpr(ctx, thenExpr),
+        mapOption(elseOpt, (e: CoreAst.Expr) => projectExpr(ctx, e)),
+      ),
+    CoreAst.Tuple(items) =>
+      ETuple(List.map((e: CoreAst.Expr) => projectExpr(ctx, e), items)),
+    CoreAst.RecordLit(items) =>
+      ERecordLit(List.map((item: CoreAst.RecordItem) => projectRecordItem(ctx, item), items)),
+    CoreAst.Hole(hole) => EHole(hole),
+  }
+  { node: typedNode(ctx, expr.node), kind }: Expr
+}
+
+and projectRecordItem = (ctx: ProjectCtx, item: CoreAst.RecordItem) => match (item) {
+  CoreAst.Field(name, value) => RField(name.text, projectExpr(ctx, value)),
+  CoreAst.Spread(value) => RSpread(projectExpr(ctx, value)),
+}
+
+and projectLetBinding = (ctx: ProjectCtx, binding: CoreAst.LetBinding) => {
+  {
+    node: typedNode(ctx, binding.node),
+    name: projectPattern(ctx, binding.name),
+    annotation: binding.annotation,
+    value: projectExpr(ctx, binding.value),
+  }: LetBinding
+}
+
+and projectFnClause = (ctx: ProjectCtx, clause: CoreAst.FnClause) => {
+  {
+    node: typedNode(ctx, clause.node),
+    param: projectPattern(ctx, clause.param),
+    guard: mapOption(clause.guard, (g: CoreAst.Expr) => projectExpr(ctx, g)),
+    matchConstructor: mapOption(clause.matchConstructor, (n: CoreAst.Name) => n.text),
+    body: projectExpr(ctx, clause.body),
+  }: FnClause
+}
+
+and projectFnItem = (ctx: ProjectCtx, item: CoreAst.FnItem) => {
+  let kind = match (item.kind) {
+    CoreAst.Clause(clause) => FClause(projectFnClause(ctx, clause)),
+    CoreAst.Include(name) => FInclude(name.text),
+    CoreAst.Hole(hole) => FHole(hole),
+  }
+  { node: typedNode(ctx, item.node), kind }: FnItem
+}
+
+and projectFnExpr = (ctx: ProjectCtx, fnExpr: CoreAst.FnExpr) => {
+  {
+    node: typedNode(ctx, fnExpr.node),
+    items: List.map((item: CoreAst.FnItem) => projectFnItem(ctx, item), fnExpr.items),
+  }: FnExpr
+}
+
+let isExportedLetName = (group: CoreAst.DeclGroup, binding: CoreAst.LetBinding) => {
+  if (!group.exported) {
+    false
+  } else {
+    Layer1Expr.bindingName(binding) != "_"
+  }
+}
+
+let collectTopValueBindings = (ctx: ProjectCtx, program: CoreAst.Program) => {
+  let rec collectItems = (items: List<CoreAst.TopItem>, accRev: List<TopValueBinding>) =>
+    match (items) {
+      [] => List.reverse(accRev),
+      [item, ...rest] =>
+        match (item) {
+          CoreAst.DeclGroup(group) =>
+            collectItems(rest, collectDecls(group, group.decls, accRev)),
+          _ => collectItems(rest, accRev),
+        },
+    }
+
+  and collectDecls = (
+    group: CoreAst.DeclGroup,
+    decls: List<CoreAst.Decl>,
+    accRev: List<TopValueBinding>,
+  ) =>
+    match (decls) {
+      [] => accRev,
+      [decl, ...rest] =>
+        match (decl) {
+          CoreAst.LetDecl(letDecl) =>
+            collectDecls(group, rest, collectBindings(group, letDecl.bindings, accRev)),
+          _ => collectDecls(group, rest, accRev),
+        },
+    }
+
+  and collectBindings = (
+    group: CoreAst.DeclGroup,
+    bindings: List<CoreAst.LetBinding>,
+    accRev: List<TopValueBinding>,
+  ) =>
+    match (bindings) {
+      [] => accRev,
+      [binding, ...rest] => {
+        let name = Layer1Expr.bindingName(binding)
+        let nextAcc = if (name == "_") {
+          accRev
+        } else {
+          [
+            {
+              name,
+              exported: isExportedLetName(group, binding),
+              groupKind: match (group.kind) {
+                CoreAst.LetGroup(kind) => kind,
+                _ => CoreAst.Plain,
+              },
+              binding: projectLetBinding(ctx, binding),
+            }: TopValueBinding,
+            ...accRev,
+          ]
+        }
+        collectBindings(group, rest, nextAcc)
+      },
+    }
+
+  collectItems(program.items, [])
+}
+
+let collectTypeDeclNames = (program: CoreAst.Program) => {
+  let rec collectItems = (items: List<CoreAst.TopItem>, accRev: List<String>) =>
+    match (items) {
+      [] => List.reverse(accRev),
+      [item, ...rest] =>
+        match (item) {
+          CoreAst.DeclGroup(group) => collectItems(rest, collectDecls(group.decls, accRev)),
+          _ => collectItems(rest, accRev),
+        },
+    }
+
+  and collectDecls = (decls: List<CoreAst.Decl>, accRev: List<String>) =>
+    match (decls) {
+      [] => accRev,
+      [decl, ...rest] =>
+        match (decl) {
+          CoreAst.TypeDecl(typeDecl) => collectDecls(rest, [typeDecl.name.text, ...accRev]),
+          _ => collectDecls(rest, accRev),
+        },
+    }
+
+  collectItems(program.items, [])
+}
+
+let collectRecordDeclNames = (program: CoreAst.Program) => {
+  let rec collectItems = (items: List<CoreAst.TopItem>, accRev: List<String>) =>
+    match (items) {
+      [] => List.reverse(accRev),
+      [item, ...rest] =>
+        match (item) {
+          CoreAst.DeclGroup(group) => collectItems(rest, collectDecls(group.decls, accRev)),
+          _ => collectItems(rest, accRev),
+        },
+    }
+
+  and collectDecls = (decls: List<CoreAst.Decl>, accRev: List<String>) =>
+    match (decls) {
+      [] => accRev,
+      [decl, ...rest] =>
+        match (decl) {
+          CoreAst.RecordDecl(recordDecl) =>
+            collectDecls(rest, [recordDecl.name.text, ...accRev]),
+          _ => collectDecls(rest, accRev),
+        },
+    }
+
+  collectItems(program.items, [])
+}
+
+provide let fromModuleSummary = (summary: ModuleInfer.ModuleSummary) => {
+  let ctx: ProjectCtx = { infer: summary.infer }
+  {
+    moduleId: summary.moduleId,
+    values: collectTopValueBindings(ctx, summary.program),
+    typeDeclNames: collectTypeDeclNames(summary.program),
+    recordDeclNames: collectRecordDeclNames(summary.program),
+    diagnostics: summary.diagnostics,
+  }: Module
+}

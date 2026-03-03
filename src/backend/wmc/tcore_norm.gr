@@ -1,0 +1,501 @@
+module WmcTCoreNorm
+
+from "list" include List
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/error.gr" include Error
+from "./tcore.gr" include WmcTCore
+
+provide enum rec PatternKind {
+  NPHole(CoreAst.Hole),
+  NPWildcard,
+  NPVar(String),
+  NPPin(String),
+  NPLit(CoreAst.AtomLiteral),
+  NPConstructor(String, List<Pattern>),
+  NPTuple(List<Pattern>),
+  NPList(List<Pattern>, Option<Pattern>),
+  NPAllErrors,
+}
+and provide record Pattern {
+  node: WmcTCore.TypedNode,
+  kind: PatternKind,
+}
+and provide enum ExprKind {
+  NELit(CoreAst.AtomLiteral),
+  NEIdent(String),
+  NEApply(Expr, Expr),
+  NELet(String, Expr, Expr),
+  NELambda(String, Expr),
+  NETuple(List<Expr>),
+  NEMatch(MatchExpr),
+  NEUnknown(String),
+}
+and provide record Expr {
+  node: WmcTCore.TypedNode,
+  kind: ExprKind,
+}
+and provide record MatchClause {
+  index: Number,
+  node: WmcTCore.TypedNode,
+  param: Pattern,
+  guard: Option<Expr>,
+  body: Expr,
+  matchConstructor: Option<String>,
+}
+and provide record MatchExpr {
+  node: WmcTCore.TypedNode,
+  bundleNode: WmcTCore.TypedNode,
+  scrutinee: Expr,
+  clauses: List<MatchClause>,
+}
+
+provide record TopValueBinding {
+  name: String,
+  exported: Bool,
+  groupKind: CoreAst.LetGroupMods,
+  node: WmcTCore.TypedNode,
+  pattern: Pattern,
+  annotation: Option<CoreAst.TypeExpr>,
+  value: Expr,
+}
+
+provide record Module {
+  moduleId: String,
+  values: List<TopValueBinding>,
+  typeDeclNames: List<String>,
+  recordDeclNames: List<String>,
+  diagnostics: List<Error.CompilerError>,
+}
+
+provide enum NormalizationIssueKind {
+  UnsupportedMatchBundleInclude(String),
+  UnsupportedMatchBundleHole,
+}
+
+provide record NormalizationIssue {
+  node: WmcTCore.TypedNode,
+  kind: NormalizationIssueKind,
+  message: String,
+}
+
+provide record MatchSearchResult {
+  matches: List<MatchExpr>,
+  issues: List<NormalizationIssue>,
+}
+
+provide record NormalizedModuleResult {
+  normalized: Module,
+  issues: List<NormalizationIssue>,
+}
+
+provide let zeroArgThunkParamName = "__wm_unit"
+
+let reverseWithIndex = (items) => {
+  let mut indexedRev = []
+  let mut rest = items
+  let mut idx = 0
+  while (rest != []) {
+    match (rest) {
+      [] => void,
+      [item, ...tail] => {
+        indexedRev = [(idx, item), ...indexedRev]
+        idx += 1
+        rest = tail
+      },
+    }
+  }
+  List.reverse(indexedRev)
+}
+
+let mapOption = (opt, fn) => match (opt) {
+  None => None,
+  Some(v) => Some(fn(v)),
+}
+
+let rec _normalizePattern = (pattern: WmcTCore.Pattern) => {
+  let kind = match (pattern.kind) {
+    WmcTCore.PMark(_, inner) => {
+      let innerNorm: Pattern = _normalizePattern(inner)
+      innerNorm.kind
+    },
+    WmcTCore.PHole(hole) => NPHole(hole),
+    WmcTCore.PWildcard => NPWildcard,
+    WmcTCore.PVar(name) => NPVar(name),
+    WmcTCore.PPin(name) => NPPin(name),
+    WmcTCore.PLit(lit) => NPLit(lit),
+    WmcTCore.PConstructor(name, fields) =>
+      NPConstructor(name, List.map(_normalizePattern, fields)),
+    WmcTCore.PTuple(items) =>
+      NPTuple(List.map(_normalizePattern, items)),
+    WmcTCore.PList(items, rest) =>
+      NPList(List.map(_normalizePattern, items), mapOption(rest, _normalizePattern)),
+    WmcTCore.PAllErrors => NPAllErrors,
+  }
+  { node: pattern.node, kind }: Pattern
+}
+
+let boolPattern = (node: WmcTCore.TypedNode, value: Bool) =>
+  { node, kind: NPLit(CoreAst.Bool(value)) }: Pattern
+
+let rec normalizeExpr = (expr: WmcTCore.Expr) => {
+  let kind = match (_normalizeSimpleLambdaApply(expr)) {
+    Some(kind) => kind,
+    None => match (_normalizeMatchExpr(expr)) {
+    Some(m) => NEMatch(m),
+    None => match (expr.kind) {
+      WmcTCore.EMark(_, inner) => {
+        let innerNorm: Expr = normalizeExpr(inner)
+        innerNorm.kind
+      },
+      WmcTCore.ELit(lit) => NELit(lit),
+      WmcTCore.EIdent(name) => NEIdent(name),
+      WmcTCore.EApply(callee, arg) => NEApply(normalizeExpr(callee), normalizeExpr(arg)),
+      WmcTCore.ELet(binding, body) =>
+        match (_normalizePattern(binding.name).kind) {
+          NPVar(name) => NELet(name, normalizeExpr(binding.value), normalizeExpr(body)),
+          _ => NEUnknown("let_pattern"),
+        },
+      WmcTCore.EFn(fnExpr) =>
+        match (fnExpr.items) {
+          [
+            {
+              kind: WmcTCore.FClause(clause),
+              _,
+            },
+          ] =>
+            if (clause.guard != None || clause.matchConstructor != None) {
+              NEUnknown("fn_guard_or_ctor")
+            } else {
+              match (_normalizePattern(clause.param).kind) {
+                NPVar(param) => NELambda(param, normalizeExpr(clause.body)),
+                NPLit(CoreAst.Unit) =>
+                  NELambda(zeroArgThunkParamName, normalizeExpr(clause.body)),
+                _ => NEUnknown("fn_param_pattern"),
+              }
+            },
+          _ => NEUnknown("fn_multi"),
+        },
+      WmcTCore.ETuple(items) => NETuple(List.map(normalizeExpr, items)),
+      // Canonical if/else is boolean match sugar; normalize to explicit match.
+      WmcTCore.EIf(cond, thenExpr, Some(elseExpr)) => {
+        let condN = normalizeExpr(cond)
+        let thenN = normalizeExpr(thenExpr)
+        let elseN = normalizeExpr(elseExpr)
+        let node = expr.node
+        let bundleNode = expr.node
+        let clauses = [
+          {
+            index: 0,
+            node,
+            param: boolPattern(node, true),
+            guard: None,
+            body: thenN,
+            matchConstructor: None,
+          }: MatchClause,
+          {
+            index: 1,
+            node,
+            param: boolPattern(node, false),
+            guard: None,
+            body: elseN,
+            matchConstructor: None,
+          }: MatchClause,
+        ]
+        NEMatch({ node, bundleNode, scrutinee: condN, clauses }: MatchExpr)
+      },
+      WmcTCore.EIf(_, _, None) => NEUnknown("if_missing_else"),
+      // Keep the normalization boundary explicit for unsupported backend-body forms.
+      WmcTCore.ERecordLit(_) => NEUnknown("record"),
+      WmcTCore.EHole(_) => NEUnknown("hole"),
+    },
+    },
+  }
+  { node: expr.node, kind }: Expr
+}
+and normalizeFnBundleClauses = (fnExpr: WmcTCore.FnExpr) => {
+  let indexed = reverseWithIndex(fnExpr.items)
+  let rec loop = (rest: List<(Number, WmcTCore.FnItem)>, accRev: List<MatchClause>) =>
+    match (rest) {
+      [] => Some(List.reverse(accRev)),
+      [(idx, item), ...tail] =>
+        match (item.kind) {
+          WmcTCore.FClause(clause) =>
+            loop(
+              tail,
+              [
+                {
+                  index: idx,
+                  node: clause.node,
+                  param: _normalizePattern(clause.param),
+                  guard: mapOption(clause.guard, normalizeExpr),
+                  body: normalizeExpr(clause.body),
+                  matchConstructor: clause.matchConstructor,
+                }: MatchClause,
+                ...accRev,
+              ],
+            ),
+          // First normalization step rejects bundle artifacts for backend matching.
+          _ => None,
+        },
+  }
+  loop(indexed, [])
+}
+and _normalizeSimpleLambdaApply = (expr: WmcTCore.Expr) =>
+  match (expr.kind) {
+    WmcTCore.EApply(callee, arg) =>
+      match (callee.kind) {
+        WmcTCore.EFn(fnExpr) =>
+          match (fnExpr.items) {
+            [
+              {
+                kind: WmcTCore.FClause(clause),
+                _,
+              },
+            ] =>
+              if (clause.guard != None || clause.matchConstructor != None) {
+                None
+              } else {
+                match (_normalizePattern(clause.param).kind) {
+                  NPVar(name) => Some(NELet(name, normalizeExpr(arg), normalizeExpr(clause.body))),
+                  _ => None,
+                }
+              },
+            _ => None,
+          },
+        _ => None,
+      },
+    _ => None,
+  }
+and _normalizeMatchExpr = (expr: WmcTCore.Expr) =>
+  match (expr.kind) {
+    WmcTCore.EApply(callee, scrutinee) =>
+      match (callee.kind) {
+        WmcTCore.EFn(fnExpr) =>
+          match (normalizeFnBundleClauses(fnExpr)) {
+            Some(clauses) =>
+              Some({
+                node: expr.node,
+                bundleNode: fnExpr.node,
+                scrutinee: normalizeExpr(scrutinee),
+                clauses,
+              }: MatchExpr),
+            None => None,
+          },
+        _ => None,
+      },
+    _ => None,
+  }
+provide let normalizeMatchExpr = _normalizeMatchExpr
+provide let normalizePattern = _normalizePattern
+provide let normExpr = normalizeExpr
+
+provide let normalizeTopValueBinding = (binding: WmcTCore.TopValueBinding) =>
+  {
+    name: binding.name,
+    exported: binding.exported,
+    groupKind: binding.groupKind,
+    node: binding.binding.node,
+    pattern: _normalizePattern(binding.binding.name),
+    annotation: binding.binding.annotation,
+    value: normalizeExpr(binding.binding.value),
+  }: TopValueBinding
+
+provide let normalizeModule = (m: WmcTCore.Module) =>
+  {
+    moduleId: m.moduleId,
+    values: List.map(normalizeTopValueBinding, m.values),
+    typeDeclNames: m.typeDeclNames,
+    recordDeclNames: m.recordDeclNames,
+    diagnostics: m.diagnostics,
+  }: Module
+
+let rec normalizationIssuesInExpr = (expr: WmcTCore.Expr, accRev: List<NormalizationIssue>) =>
+  match (expr.kind) {
+    WmcTCore.EMark(_, inner) => normalizationIssuesInExpr(inner, accRev),
+    WmcTCore.ELit(_) => accRev,
+    WmcTCore.EIdent(_) => accRev,
+    WmcTCore.EApply(callee, arg) => {
+      let acc1 = match (callee.kind) {
+        WmcTCore.EFn(fnExpr) => normalizationIssuesInFnItems(fnExpr.items, accRev),
+        _ => accRev,
+      }
+      let acc2 = normalizationIssuesInExpr(callee, acc1)
+      normalizationIssuesInExpr(arg, acc2)
+    },
+    WmcTCore.EFn(fnExpr) => normalizationIssuesInFnItems(fnExpr.items, accRev),
+    WmcTCore.ELet(binding, body) => {
+      let acc1 = normalizationIssuesInExpr(binding.value, accRev)
+      normalizationIssuesInExpr(body, acc1)
+    },
+    WmcTCore.EIf(cond, thenExpr, elseOpt) => {
+      let acc1 = normalizationIssuesInExpr(cond, accRev)
+      let acc2 = normalizationIssuesInExpr(thenExpr, acc1)
+      match (elseOpt) {
+        None => acc2,
+        Some(elseExpr) => normalizationIssuesInExpr(elseExpr, acc2),
+      }
+    },
+    WmcTCore.ETuple(items) => normalizationIssuesInExprList(items, accRev),
+    WmcTCore.ERecordLit(items) => normalizationIssuesInRecordItems(items, accRev),
+    WmcTCore.EHole(_) => accRev,
+  }
+
+and normalizationIssuesInFnItems = (
+  items: List<WmcTCore.FnItem>,
+  accRev: List<NormalizationIssue>,
+) =>
+  match (items) {
+    [] => accRev,
+    [item, ...tail] => {
+      let nextAcc = match (item.kind) {
+        WmcTCore.FClause(clause) => {
+          let acc1 = match (clause.guard) {
+            None => accRev,
+            Some(g) => normalizationIssuesInExpr(g, accRev),
+          }
+          normalizationIssuesInExpr(clause.body, acc1)
+        },
+        WmcTCore.FInclude(name) =>
+          [
+            {
+              node: item.node,
+              kind: UnsupportedMatchBundleInclude(name),
+              message: "unsupported function-bundle include in backend normalization: " ++ name,
+            }: NormalizationIssue,
+            ...accRev,
+          ],
+        WmcTCore.FHole(_) =>
+          [
+            {
+              node: item.node,
+              kind: UnsupportedMatchBundleHole,
+              message: "unsupported function-bundle hole in backend normalization",
+            }: NormalizationIssue,
+            ...accRev,
+          ],
+      }
+      normalizationIssuesInFnItems(tail, nextAcc)
+    },
+  }
+
+and normalizationIssuesInExprList = (items: List<WmcTCore.Expr>, accRev: List<NormalizationIssue>) =>
+  match (items) {
+    [] => accRev,
+    [item, ...tail] => normalizationIssuesInExprList(tail, normalizationIssuesInExpr(item, accRev)),
+  }
+
+and normalizationIssuesInRecordItems = (
+  items: List<WmcTCore.RecordItem>,
+  accRev: List<NormalizationIssue>,
+) =>
+  match (items) {
+    [] => accRev,
+    [item, ...tail] => {
+      let nextAcc = match (item) {
+        WmcTCore.RField(_, value) => normalizationIssuesInExpr(value, accRev),
+        WmcTCore.RSpread(value) => normalizationIssuesInExpr(value, accRev),
+      }
+      normalizationIssuesInRecordItems(tail, nextAcc)
+    },
+  }
+
+let findNormalizationIssuesInExpr = (expr: WmcTCore.Expr) =>
+  List.reverse(normalizationIssuesInExpr(expr, []))
+
+let findNormalizationIssuesInTopValue = (binding: WmcTCore.TopValueBinding) =>
+  findNormalizationIssuesInExpr(binding.binding.value)
+
+let _normModuleDetailed = (m: WmcTCore.Module) => {
+  let issues = List.flatten(
+    List.map((binding: WmcTCore.TopValueBinding) => findNormalizationIssuesInTopValue(binding), m.values)
+  )
+  {
+    normalized: normalizeModule(m),
+    issues,
+  }: NormalizedModuleResult
+}
+provide let normalizeModuleDetailed = _normModuleDetailed
+provide let normModuleDetailed = _normModuleDetailed
+
+let findMatchesInNormalizedExpr = (expr: Expr) => {
+  let rec walkNorm = (current: Expr, accRev: List<MatchExpr>) => {
+    let withCurrent = match (current.kind) {
+      NEMatch(m) => [m, ...accRev],
+      _ => accRev,
+    }
+    match (current.kind) {
+      NELit(_) => withCurrent,
+      NEIdent(_) => withCurrent,
+      NEUnknown(_) => withCurrent,
+      NEApply(callee, arg) => {
+        let acc1 = walkNorm(callee, withCurrent)
+        walkNorm(arg, acc1)
+      },
+      NELet(_, valueExpr, bodyExpr) => {
+        let acc1 = walkNorm(valueExpr, withCurrent)
+        walkNorm(bodyExpr, acc1)
+      },
+      NELambda(_, bodyExpr) => walkNorm(bodyExpr, withCurrent),
+      NETuple(items) => walkNormExprList(items, withCurrent),
+      NEMatch(m) => {
+        let acc1 = walkNorm(m.scrutinee, withCurrent)
+        walkNormClauses(m.clauses, acc1)
+      },
+    }
+  }
+
+  and walkNormClauses = (clauses: List<MatchClause>, accRev: List<MatchExpr>) =>
+    match (clauses) {
+      [] => accRev,
+      [clause, ...tail] => {
+        let next = {
+          let acc1 = match (clause.guard) {
+              None => accRev,
+              Some(g) => walkNorm(g, accRev),
+            }
+            walkNorm(clause.body, acc1)
+        }
+        walkNormClauses(tail, next)
+      },
+    }
+
+  and walkNormExprList = (items: List<Expr>, accRev: List<MatchExpr>) =>
+    match (items) {
+      [] => accRev,
+      [item, ...tail] => walkNormExprList(tail, walkNorm(item, accRev)),
+    }
+
+  List.reverse(walkNorm(expr, []))
+}
+
+provide let findMatchesInExpr = (expr: WmcTCore.Expr) =>
+  findMatchesInNormalizedExpr(normalizeExpr(expr))
+
+let isExplicitBundleMatch = (m: MatchExpr) => m.bundleNode.id != m.node.id
+
+let topLevelLowerableMatches = (expr: Expr) =>
+  match (expr.kind) {
+    NEMatch(m) => if (isExplicitBundleMatch(m)) { [m] } else { [] },
+    NELambda(_, body) =>
+      match (body.kind) {
+        NEMatch(m) => if (isExplicitBundleMatch(m)) { [m] } else { [] },
+        _ => [],
+      },
+    _ => [],
+  }
+
+provide let findMatchesInTopValue = (binding: WmcTCore.TopValueBinding) =>
+  topLevelLowerableMatches(normalizeTopValueBinding(binding).value)
+
+provide let findMatchesInExprDetailed = (expr: WmcTCore.Expr) =>
+  {
+    matches: findMatchesInExpr(expr),
+    issues: findNormalizationIssuesInExpr(expr),
+  }: MatchSearchResult
+
+provide let findMatchesInTopValueDetailed = (binding: WmcTCore.TopValueBinding) =>
+  {
+    matches: findMatchesInTopValue(binding),
+    issues: findNormalizationIssuesInTopValue(binding),
+  }: MatchSearchResult

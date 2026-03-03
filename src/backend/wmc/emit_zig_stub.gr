@@ -1,0 +1,154 @@
+module WmcEmitZigStub
+
+from "list" include List
+
+from "../../core/core_ast.gr" include CoreAst
+from "./mir.gr" include WmcMir
+from "./match_lower.gr" include WmcMatchLower
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let rec occurrenceToString = (occ: WmcMatchLower.Occurrence) =>
+  match (occ) {
+    WmcMatchLower.ORoot => "root",
+    WmcMatchLower.OTupleElem(parent, index) =>
+      occurrenceToString(parent) ++ ".tuple[" ++ toString(index) ++ "]",
+    WmcMatchLower.OConstructorField(parent, ctor, index) =>
+      occurrenceToString(parent)
+        ++ "."
+        ++ ctor
+        ++ "["
+        ++ toString(index)
+        ++ "]",
+  }
+
+let literalToString = (lit: CoreAst.AtomLiteral) =>
+  match (lit) {
+    CoreAst.Int(n) => toString(n),
+    CoreAst.Bool(b) => toString(b),
+    CoreAst.Char(c) => "'" ++ toString(c) ++ "'",
+    CoreAst.Str(s) => "\"" ++ s ++ "\"",
+    CoreAst.Byte(n) => "byte(" ++ toString(n) ++ ")",
+    CoreAst.Unit => "Void",
+  }
+
+let patternTestComment = (test: WmcMatchLower.PatternTest) =>
+  match (test) {
+    WmcMatchLower.TestConstructor(occ, ctor) =>
+      "test ctor " ++ occurrenceToString(occ) ++ " == " ++ ctor,
+    WmcMatchLower.TestTupleArity(occ, arity) =>
+      "test tuple_arity " ++ occurrenceToString(occ) ++ " == " ++ toString(arity),
+    WmcMatchLower.TestLiteral(occ, lit) =>
+      "test lit " ++ occurrenceToString(occ) ++ " == " ++ literalToString(lit),
+    WmcMatchLower.TestPin(occ, name) =>
+      "test pin " ++ occurrenceToString(occ) ++ " == " ++ name,
+  }
+
+let rec bodyExprToString = (expr: WmcMir.BodyExpr) =>
+  match (expr) {
+    WmcMir.BELit(lit) => literalToString(lit),
+    WmcMir.BEIdent(name) => name,
+    WmcMir.BEApply(callee, arg) =>
+      "apply(" ++ bodyExprToString(callee) ++ ", " ++ bodyExprToString(arg) ++ ")",
+    WmcMir.BELet(name, valueExpr, bodyExpr) =>
+      "let " ++ name ++ " = " ++ bodyExprToString(valueExpr) ++ " in " ++ bodyExprToString(bodyExpr),
+    WmcMir.BETuple(items) =>
+      "(" ++ joinStrings(", ", List.map(bodyExprToString, items)) ++ ")",
+    WmcMir.BEMatch(mir) =>
+      "<match entry=b"
+        ++ toString(mir.entry)
+        ++ " blocks="
+        ++ toString(List.length(mir.blocks))
+        ++ ">",
+    WmcMir.BEUnknown(tag) => "<unknown:" ++ tag ++ ">",
+  }
+
+let indent = (s: String) => "  " ++ s
+let indent2 = (s: String) => "    " ++ s
+let indent3 = (s: String) => "      " ++ s
+
+let instrLines = (instrs: List<WmcMir.Instr>) =>
+  List.map((instr: WmcMir.Instr) =>
+    match (instr) {
+      WmcMir.Bind(binding) =>
+        indent3("// bind " ++ binding.name ++ " <- " ++ occurrenceToString(binding.occurrence)),
+    }, instrs)
+
+let switchMapString = (pairs: List<(String, WmcMir.BlockId)>) =>
+  joinStrings(", ", List.map(((tag, id)) => tag ++ "=>b" ++ toString(id), pairs))
+
+let tupleSwitchMapString = (pairs: List<(Number, WmcMir.BlockId)>) =>
+  joinStrings(", ", List.map(((n, id)) => toString(n) ++ "=>b" ++ toString(id), pairs))
+
+let termLines = (term: WmcMir.Terminator) =>
+  match (term) {
+    WmcMir.Fail => [
+      indent3("// fail"),
+      indent3("return;"),
+    ],
+    WmcMir.Goto(id) => [
+      indent3("__pc = " ++ toString(id) ++ ";"),
+      indent3("continue;"),
+    ],
+    WmcMir.Test(test, onPass, onFail) => [
+      indent3("// " ++ patternTestComment(test)),
+      indent3("// TODO: emit actual test"),
+      indent3("__pc = " ++ toString(onPass) ++ ";"),
+      indent3("// on failure -> b" ++ toString(onFail)),
+      indent3("continue;"),
+    ],
+    WmcMir.Guard(_expr, onTrue, onFalse) => [
+      indent3("// guard(expr)"),
+      indent3("// TODO: emit actual guard"),
+      indent3("__pc = " ++ toString(onTrue) ++ ";"),
+      indent3("// on false -> b" ++ toString(onFalse)),
+      indent3("continue;"),
+    ],
+    WmcMir.SwitchConstructor(branches, defaultId) => [
+      indent3("// switch_ctor " ++ switchMapString(branches) ++ " default b" ++ toString(defaultId)),
+      indent3("// TODO: inspect scrutinee tag"),
+      indent3("__pc = " ++ toString(defaultId) ++ ";"),
+      indent3("continue;"),
+    ],
+    WmcMir.SwitchTupleArity(branches, defaultId) => [
+      indent3("// switch_tuple_arity " ++ tupleSwitchMapString(branches) ++ " default b" ++ toString(defaultId)),
+      indent3("// TODO: inspect scrutinee tuple arity"),
+      indent3("__pc = " ++ toString(defaultId) ++ ";"),
+      indent3("continue;"),
+    ],
+    WmcMir.SelectClause(clause) => [
+      indent3("// select clause#" ++ toString(clause.index)),
+      indent3("return;"),
+    ],
+    WmcMir.SelectExpr(clause, bodyExpr) => [
+      indent3("// select_expr clause#" ++ toString(clause.index) ++ " = " ++ bodyExprToString(bodyExpr)),
+      indent3("return;"),
+    ],
+  }
+
+let blockLines = (block: WmcMir.Block) => {
+  let header = indent2(toString(block.id) ++ " => {")
+  let inner = List.append(instrLines(block.instrs), termLines(block.term))
+  List.append([header], List.append(inner, [indent2("},")]))
+}
+
+provide let emitMatchMir = (name: String, mir: WmcMir.MatchMir) => {
+  let blocksLines = List.flatten(List.map(blockLines, mir.blocks))
+  let header = [
+    "// WMC Zig stub (MIR-driven, debug-oriented)",
+    "pub fn " ++ name ++ "() void {",
+    indent("var __pc: i32 = " ++ toString(mir.entry) ++ ";"),
+    indent("while (true) {"),
+    indent2("switch (__pc) {"),
+  ]
+  let footer = [
+    indent2("else => return,"),
+    indent2("}"),
+    indent("}"),
+    "}",
+  ]
+  joinStrings("\n", List.append(header, List.append(blocksLines, footer)))
+}

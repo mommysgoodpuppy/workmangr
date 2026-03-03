@@ -189,6 +189,35 @@ test("unsupported => parameter expression lowers to marked wildcard and diagnost
   )
 })
 
+test("zero-arg => sugar lowers to unit-parameter function", () => {
+  let source = "let main = => { 1 + 1 };"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) =>
+      match (binding.value.kind) {
+        CoreAst.Fn(fnExpr) => match (fnExpr.items) {
+          [item] => match (item.kind) {
+            CoreAst.Clause(clause) => match (clause.param.kind) {
+              CoreAst.Lit(CoreAst.Unit) => Ok(void),
+              _ => Err("expected zero-arg sugar to lower as unit parameter"),
+            },
+            _ => Err("expected fn clause"),
+          },
+          _ => Err("expected single fn clause"),
+        },
+        _ => Err("expected lowered function"),
+      },
+  )
+})
+
 test("call with multiple args lowers to tuple", () => {
   let source = "let x = f(1, 2);"
   let program = Frontend.parseAndLower(source)

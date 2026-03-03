@@ -318,6 +318,46 @@ and lowerFnExpr = (fnExpr: SurfaceAst.FnExpr) => {
   )
   { node: lowerNode(fnExpr.node), items }: CoreAst.FnExpr
 }
+and lowerZeroArgThunkFnExpr = (fnExpr: SurfaceAst.FnExpr) => {
+  let lowered = lowerFnExpr(fnExpr)
+  match (lowered.items) {
+    [
+      {
+        kind: CoreAst.Clause(clause),
+        _,
+      },
+    ] =>
+      {
+        ...lowered,
+        items: [
+          {
+            node: clause.node,
+            kind: CoreAst.Clause(
+              {
+                ...clause,
+                param: {
+                  ...clause.param,
+                  kind: CoreAst.Lit(CoreAst.Unit),
+                  resolvedConstructor: None,
+                },
+              }: CoreAst.FnClause
+            ),
+          }: CoreAst.FnItem,
+        ],
+      }: CoreAst.FnExpr,
+    _ => lowered,
+  }
+}
+and isZeroArgThunkFnExpr = (fnExpr: SurfaceAst.FnExpr) =>
+  match (fnExpr.items) {
+    [
+      {
+        kind: SurfaceAst.Clause({ param: { kind: SurfaceAst.Wildcard, _ }, guard: None, _ }),
+        _,
+      },
+    ] => true,
+    _ => false,
+  }
 and normalizeCallArgs = (node: SurfaceAst.Node, args: List<CoreAst.Expr>) => {
   match (args) {
     [] => makeUnitExpr(node),
@@ -523,7 +563,11 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
       makeExpr(expr.node, CoreAst.Let(coreBinding, loweredBody))
     },
     SurfaceAst.Fn(fnExpr) =>
-      makeExpr(expr.node, CoreAst.Fn(lowerFnExpr(fnExpr))),
+      if (isZeroArgThunkFnExpr(fnExpr)) {
+        makeExpr(expr.node, CoreAst.Fn(lowerZeroArgThunkFnExpr(fnExpr)))
+      } else {
+        makeExpr(expr.node, CoreAst.Fn(lowerFnExpr(fnExpr)))
+      },
     SurfaceAst.Match(m) => lowerMatchExpr(expr.node, m),
     SurfaceAst.Block(block) => lowerExpr(block.body),
     SurfaceAst.Assign(asg) => lowerAssignExpr(expr.node, asg),

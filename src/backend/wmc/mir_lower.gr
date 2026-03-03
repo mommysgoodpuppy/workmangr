@@ -1,0 +1,138 @@
+module WmcMirLower
+
+from "list" include List
+
+from "./match_lower.gr" include WmcMatchLower
+from "./mir.gr" include WmcMir
+from "./tcore_norm.gr" include WmcTCoreNorm
+
+record BuildState {
+  nextId: Number,
+  blocksRev: List<WmcMir.Block>,
+}
+
+let emptyState = { nextId: 0, blocksRev: [] }: BuildState
+
+let freshBlockId = (state: BuildState) => (state.nextId, { ...state, nextId: state.nextId + 1 })
+
+let pushBlock = (state: BuildState, block: WmcMir.Block) =>
+  { ...state, blocksRev: [block, ...state.blocksRev] }
+
+let mkBlock = (
+  id: WmcMir.BlockId,
+  instrs: List<WmcMir.Instr>,
+  term: WmcMir.Terminator,
+) => ({ id, instrs, term }: WmcMir.Block)
+
+let rec lowerBodyExpr = (expr: WmcTCoreNorm.Expr) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELit(lit) => WmcMir.BELit(lit),
+    WmcTCoreNorm.NEIdent(name) => WmcMir.BEIdent(name),
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      WmcMir.BEApply(lowerBodyExpr(callee), lowerBodyExpr(arg)),
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      WmcMir.BELet(name, lowerBodyExpr(valueExpr), lowerBodyExpr(bodyExpr)),
+    WmcTCoreNorm.NELambda(_, _) => WmcMir.BEUnknown("lambda"),
+    WmcTCoreNorm.NETuple(items) =>
+      WmcMir.BETuple(List.map((item: WmcTCoreNorm.Expr) => lowerBodyExpr(item), items)),
+    WmcTCoreNorm.NEMatch(m) =>
+      WmcMir.BEMatch(_lowerMatchFromLowered(WmcMatchLower.lowerNormalizedMatch(m))),
+    WmcTCoreNorm.NEUnknown(tag) => WmcMir.BEUnknown(tag),
+  }
+
+and lowerTree = (tree: WmcMatchLower.DecisionTree, state: BuildState) =>
+  match (tree) {
+    WmcMatchLower.DTFail => {
+      let (id, state1) = freshBlockId(state)
+      let state2 = pushBlock(state1, mkBlock(id, [], WmcMir.Fail))
+      (id, state2)
+    },
+    WmcMatchLower.DTSelectClause(clause) => {
+      let (id, state1) = freshBlockId(state)
+      let bodyExpr = lowerBodyExpr(clause.body)
+      let state2 = pushBlock(state1, mkBlock(id, [], WmcMir.SelectExpr(clause, bodyExpr)))
+      (id, state2)
+    },
+    WmcMatchLower.DTBind(binding, next) => {
+      let (nextId, state1) = lowerTree(next, state)
+      let (id, state2) = freshBlockId(state1)
+      let block = mkBlock(id, [WmcMir.Bind(binding)], WmcMir.Goto(nextId))
+      (id, pushBlock(state2, block))
+    },
+    WmcMatchLower.DTTest(test, onPass, onFail) => {
+      let (passId, state1) = lowerTree(onPass, state)
+      let (failId, state2) = lowerTree(onFail, state1)
+      let (id, state3) = freshBlockId(state2)
+      let block = mkBlock(id, [], WmcMir.Test(test, passId, failId))
+      (id, pushBlock(state3, block))
+    },
+    WmcMatchLower.DTGuard(expr, onTrue, onFalse) => {
+      let (trueId, state1) = lowerTree(onTrue, state)
+      let (falseId, state2) = lowerTree(onFalse, state1)
+      let (id, state3) = freshBlockId(state2)
+      let block = mkBlock(id, [], WmcMir.Guard(expr, trueId, falseId))
+      (id, pushBlock(state3, block))
+    },
+    WmcMatchLower.DTSwitchConstructor(branches, defaultTree) => {
+      let (loweredBranchesRev, state1) = lowerCtorBranches(branches, [], state)
+      let (defaultId, state2) = lowerTree(defaultTree, state1)
+      let (id, state3) = freshBlockId(state2)
+      let block = mkBlock(
+        id,
+        [],
+        WmcMir.SwitchConstructor(List.reverse(loweredBranchesRev), defaultId),
+      )
+      (id, pushBlock(state3, block))
+    },
+    WmcMatchLower.DTSwitchTupleArity(branches, defaultTree) => {
+      let (loweredBranchesRev, state1) = lowerTupleBranches(branches, [], state)
+      let (defaultId, state2) = lowerTree(defaultTree, state1)
+      let (id, state3) = freshBlockId(state2)
+      let block = mkBlock(
+        id,
+        [],
+        WmcMir.SwitchTupleArity(List.reverse(loweredBranchesRev), defaultId),
+      )
+      (id, pushBlock(state3, block))
+    },
+  }
+
+and lowerCtorBranches = (
+  branches: List<(String, WmcMatchLower.DecisionTree)>,
+  accRev: List<(String, WmcMir.BlockId)>,
+  state: BuildState,
+) =>
+  match (branches) {
+    [] => (accRev, state),
+    [(tag, tree), ...tail] => {
+      let (branchId, state1) = lowerTree(tree, state)
+      lowerCtorBranches(tail, [(tag, branchId), ...accRev], state1)
+    },
+  }
+
+and lowerTupleBranches = (
+  branches: List<(Number, WmcMatchLower.DecisionTree)>,
+  accRev: List<(Number, WmcMir.BlockId)>,
+  state: BuildState,
+) =>
+  match (branches) {
+    [] => (accRev, state),
+    [(arity, tree), ...tail] => {
+      let (branchId, state1) = lowerTree(tree, state)
+      lowerTupleBranches(tail, [(arity, branchId), ...accRev], state1)
+    },
+  }
+
+and _lowerMatchFromLowered = (m: WmcMatchLower.LoweredMatch) => {
+  let (entry, state) = lowerTree(m.tree, emptyState)
+  {
+    node: m.node,
+    scrutinee: m.scrutinee,
+    entry,
+    blocks: List.reverse(state.blocksRev),
+    clauses: m.clauses,
+  }: WmcMir.MatchMir
+}
+
+provide let lowerMatch = _lowerMatchFromLowered
+provide let lowerExpr = lowerBodyExpr

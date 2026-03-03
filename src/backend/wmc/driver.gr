@@ -1,0 +1,84 @@
+module WmcDriver
+
+from "list" include List
+from "map" include Map
+from "string" include String
+
+from "../../core/module_infer.gr" include ModuleInfer
+from "../../module/module_system.gr" include ModuleSystem
+from "../../core/error.gr" include Error
+from "../../core/types.gr" include Types
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+
+provide record EntryPrototype {
+  entryModuleId: String,
+  entry: WmcTCore.Module,
+  normalizedEntry: WmcTCoreNorm.Module,
+  normalizationIssues: List<WmcTCoreNorm.NormalizationIssue>,
+}
+
+let joinStrings = (sep: String, parts: List<String>) => match (parts) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let hasFatalDiagnostic = (diags: List<Error.CompilerError>) =>
+  List.some((diag: Error.CompilerError) => diag.severity == Error.SError, diags)
+
+provide let buildEntryPrototype = (result: ModuleInfer.InferenceResult) => {
+  let entryModuleId = result.graph.entry
+  match (Map.get(entryModuleId, result.modules)) {
+    None => Err("missing entry module summary: " ++ entryModuleId),
+    Some(summary) => {
+      let entry = WmcTCore.fromModuleSummary(summary)
+      let norm = WmcTCoreNorm.normModuleDetailed(entry)
+      Ok({
+        entryModuleId,
+        entry,
+        normalizedEntry: norm.normalized,
+        normalizationIssues: norm.issues,
+      }: EntryPrototype)
+    },
+  }
+}
+
+provide let inferEntryPrototype = (
+  entryPath: String,
+  options: ModuleSystem.BuildOptions=ModuleSystem.defaultOptions(),
+) => {
+  let inferred = ModuleInfer.inferEntry(entryPath, options=options)
+  buildEntryPrototype(inferred)
+}
+
+provide let isBackendReadyEntry = (proto: EntryPrototype) =>
+  !hasFatalDiagnostic(proto.entry.diagnostics)
+
+provide let debugSummary = (proto: EntryPrototype) => {
+  let valueLines = List.map((binding: WmcTCore.TopValueBinding) => {
+    let tyText = match (binding.binding.value.node.ty) {
+      None => "?",
+      Some(ty) => Types.typeToReadableString(ty),
+    }
+    let exportTag = if (binding.exported) { "export " } else { "" }
+    exportTag ++ binding.name ++ ": " ++ tyText
+  }, proto.entry.values)
+
+  "WMC backend prototype entry="
+    ++ proto.entryModuleId
+    ++ " values="
+    ++ toString(List.length(proto.entry.values))
+    ++ " types="
+    ++ toString(List.length(proto.entry.typeDeclNames))
+    ++ " records="
+    ++ toString(List.length(proto.entry.recordDeclNames))
+    ++ " fatal="
+    ++ toString(hasFatalDiagnostic(proto.entry.diagnostics))
+    ++ " norm_issues="
+    ++ toString(List.length(proto.normalizationIssues))
+    ++ (if (valueLines == []) {
+      ""
+    } else {
+      "\n" ++ joinStrings("\n", valueLines)
+    })
+}

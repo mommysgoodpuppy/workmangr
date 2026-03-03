@@ -1,0 +1,439 @@
+module WmcZigEmitterTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "map" include Map
+from "string" include String
+
+from "../src/backend/wmc/driver.gr" include WmcDriver
+from "../src/backend/wmc/match_lower.gr" include WmcMatchLower
+from "../src/backend/wmc/mir_lower.gr" include WmcMirLower
+from "../src/backend/wmc/emit_zig.gr" include WmcEmitZig
+from "../src/backend/wmc/expr_inline.gr" include WmcExprInline
+from "../src/backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
+from "../src/backend/wmc/tcore.gr" include WmcTCore
+from "../src/backend/wmc/tcore_norm.gr" include WmcTCoreNorm
+from "../src/module/module_system.gr" include ModuleSystem
+
+setSourceFile("./tests/wmc_zig_emitter_test.gr")
+
+let findValue = (items: List<WmcTCore.TopValueBinding>, target: String) => {
+  let rec loop = (rest: List<WmcTCore.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [item, ...tail] =>
+        if (item.name == target) {
+          Some(item)
+        } else {
+          loop(tail)
+        },
+    }
+  loop(items)
+}
+
+let findNormValue = (items: List<WmcTCoreNorm.TopValueBinding>, target: String) => {
+  let rec loop = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [item, ...tail] =>
+        if (item.name == target) {
+          Some(item)
+        } else {
+          loop(tail)
+        },
+    }
+  loop(items)
+}
+
+test("Zig emitter allocates collision-safe bind names and emits source comments", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let classify = (x) => {\n  match(x) {\n    Some(Var(switch)) => { first(switch) }\n    Some(Var(switch)) => { second(switch) }\n    _ => { fallback(x) }\n  }\n};",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let classify = match (findValue(proto.entry.values, "classify")) {
+    Some(v) => v,
+    None => fail("missing classify"),
+  }
+  let lowered = match (WmcMatchLower.findMatchesInTopValue(classify)) {
+    [m] => m,
+    _ => fail("expected one match"),
+  }
+  let mir = WmcMirLower.lowerMatch(lowered)
+  let zig = WmcEmitZig.emitMatchMir(
+    mir,
+    options={ functionName: "__wm_match_classify", includeSourceComments: true }
+  )
+
+  let hasSourceComment = String.contains("// wm:", zig)
+  let hasSafeBind = String.contains("const __bind_switch", zig)
+  let avoidsRawReservedConst = !String.contains("const switch =", zig)
+  let hasBlockMachine = String.contains("switch (__pc)", zig)
+  let hasSelectExpr = String.contains("select_expr clause#", zig)
+
+  all([
+    assertTrue(hasSourceComment),
+    assertTrue(hasSafeBind),
+    assertTrue(avoidsRawReservedConst),
+    assertTrue(hasBlockMachine),
+    assertTrue(hasSelectExpr),
+  ])
+})
+
+test("Zig emitter executable subset emits bool test and i64 result selection", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let choose = (x) => {\n  match(x) {\n    true => { 1 }\n    false => { 2 }\n  }\n};",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let choose = match (findValue(proto.entry.values, "choose")) {
+    Some(v) => v,
+    None => fail("missing choose"),
+  }
+  let lowered = match (WmcMatchLower.findMatchesInTopValue(choose)) {
+    [m] => m,
+    _ => fail("expected one match"),
+  }
+  let mir = WmcMirLower.lowerMatch(lowered)
+  let zig = WmcEmitZig.emitMatchMirBoolToI64(
+    mir,
+    options={ functionName: "choose_bool", includeSourceComments: false }
+  )
+
+  all([
+    assertTrue(String.contains("pub fn choose_bool(__scrutinee: bool) i64", zig)),
+    assertTrue(String.contains("if (__scrutinee == true)", zig)),
+    assertTrue(String.contains("__result = 1;", zig) || String.contains("__result = 2;", zig)),
+    assertTrue(!String.contains("// TODO: emit actual test", zig)),
+  ])
+})
+
+test("Zig emitter executable subset constant-folds nested bool match body", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let chooseNested = (x) => {\n  match(x) {\n    true => { if true { 7 } else { 8 } }\n    false => { 0 }\n  }\n};",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let chooseNested = match (findValue(proto.entry.values, "chooseNested")) {
+    Some(v) => v,
+    None => fail("missing chooseNested"),
+  }
+  let lowered = match (WmcMatchLower.findMatchesInTopValue(chooseNested)) {
+    [m] => m,
+    _ => fail("expected one match"),
+  }
+  let mir = WmcMirLower.lowerMatch(lowered)
+  let zig = WmcEmitZig.emitMatchMirBoolToI64(
+    mir,
+    options={ functionName: "choose_nested_bool", includeSourceComments: false }
+  )
+
+  all([
+    assertTrue(String.contains("pub fn choose_nested_bool(__scrutinee: bool) i64", zig)),
+    assertTrue(String.contains("__result = 7;", zig)),
+    assertTrue(!String.contains("unsupported body expr in executable subset", zig)),
+  ])
+})
+
+test("Zig emitter executable subset handles nested bool match on root identifier", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let chooseNestedId = (x) => {\n  match(x) {\n    true => { if x { 7 } else { 8 } }\n    false => { 0 }\n  }\n};",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let chooseNestedId = match (findValue(proto.entry.values, "chooseNestedId")) {
+    Some(v) => v,
+    None => fail("missing chooseNestedId"),
+  }
+  let lowered = match (WmcMatchLower.findMatchesInTopValue(chooseNestedId)) {
+    [m] => m,
+    _ => fail("expected one match"),
+  }
+  let mir = WmcMirLower.lowerMatch(lowered)
+  let zig = WmcEmitZig.emitMatchMirBoolToI64(
+    mir,
+    options={ functionName: "choose_nested_id_bool", includeSourceComments: false }
+  )
+
+  all([
+    assertTrue(String.contains("pub fn choose_nested_id_bool(__scrutinee: bool) i64", zig)),
+    assertTrue(String.contains("__result = (if (__scrutinee == true)", zig)),
+    assertTrue(!String.contains("unsupported body expr in executable subset", zig)),
+  ])
+})
+
+test("Zig emitter executable subset specializes small numeric results to i8", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let chooseSmall = (x) => {\n  match(x) {\n    true => { 7 }\n    false => { -8 }\n  }\n};",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let chooseSmall = match (findValue(proto.entry.values, "chooseSmall")) {
+    Some(v) => v,
+    None => fail("missing chooseSmall"),
+  }
+  let lowered = match (WmcMatchLower.findMatchesInTopValue(chooseSmall)) {
+    [m] => m,
+    _ => fail("expected one match"),
+  }
+  let mir = WmcMirLower.lowerMatch(lowered)
+  let zig = WmcEmitZig.emitMatchMirBoolToSpecializedInt(
+    mir,
+    options={ functionName: "choose_small_bool", includeSourceComments: false }
+  )
+
+  all([
+    assertTrue(String.contains("pub fn choose_small_bool(__scrutinee: bool) i8", zig)),
+    assertTrue(String.contains("var __result: i8 = 0;", zig)),
+  ])
+})
+
+test("Zig emitter executable subset emits integer arithmetic from intAdd body", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let sumViaIf = if true { 1 + 1 } else { 0 };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let sumViaIf = match (findValue(proto.entry.values, "sumViaIf")) {
+    Some(v) => v,
+    None => fail("missing sumViaIf"),
+  }
+  let lowered = match (WmcMatchLower.findMatchesInTopValue(sumViaIf)) {
+    [m, ..._] => m,
+    [] => fail("expected at least one match"),
+  }
+  let mir = WmcMirLower.lowerMatch(lowered)
+  let zig = WmcEmitZig.emitMatchMirBoolToI64(
+    mir,
+    options={ functionName: "sum_via_if_bool", includeSourceComments: false }
+  )
+
+  all([
+    assertTrue(String.contains("__result = (1 + 1);", zig)),
+    assertTrue(!String.contains("unsupported body expr in executable subset", zig)),
+  ])
+})
+
+test("Zig emitter direct expr subset handles local let-bound arithmetic", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let localLet = { let y = 1 + 1; y };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let localLet = match (findNormValue(proto.normalizedEntry.values, "localLet")) {
+    Some(v) => v,
+    None => fail("missing localLet"),
+  }
+  let bodyExpr = WmcMirLower.lowerExpr(localLet.value)
+  let zig = match (
+    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
+      bodyExpr,
+      options={ functionName: "local_let_expr", includeSourceComments: false }
+    )
+  ) {
+    Some(z) => z,
+    None => fail("expected direct expr emitter to support local let arithmetic"),
+  }
+
+  all([
+    assertTrue(String.contains("pub fn local_let_expr()", zig)),
+    assertTrue(String.contains("return (1 + 1);", zig) || String.contains("return 2;", zig)),
+  ])
+})
+
+test("Zig emitter direct expr subset handles immediate lambda call via let normalization", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let lambdaCall = { ((x) => { x + 1 })(1) };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let lambdaCall = match (findNormValue(proto.normalizedEntry.values, "lambdaCall")) {
+    Some(v) => v,
+    None => fail("missing lambdaCall"),
+  }
+  let bodyExpr = WmcMirLower.lowerExpr(lambdaCall.value)
+  let zig = match (
+    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
+      bodyExpr,
+      options={ functionName: "lambda_call_expr", includeSourceComments: false }
+    )
+  ) {
+    Some(z) => z,
+    None => fail("expected direct expr emitter to support immediate lambda call"),
+  }
+
+  all([
+    assertTrue(String.contains("pub fn lambda_call_expr()", zig)),
+    assertTrue(String.contains("return ((1) + 1);", zig) || String.contains("return (1 + 1);", zig)),
+  ])
+})
+
+test("Zig emitter direct expr subset handles top-level simple function call via inlining", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let inc = (x) => { x + 1 };\nlet topCall = { inc(1) };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let topCall = match (findNormValue(proto.normalizedEntry.values, "topCall")) {
+    Some(v) => v,
+    None => fail("missing topCall"),
+  }
+  let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(proto.entry, topCall.value)
+  let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
+  let bodyExpr = WmcMirLower.lowerExpr(simplified)
+  let zig = match (
+    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
+      bodyExpr,
+      options={ functionName: "top_call_expr", includeSourceComments: false }
+    )
+  ) {
+    Some(z) => z,
+    None => fail("expected direct expr emitter to support top-level simple function call"),
+  }
+
+  all([
+    assertTrue(String.contains("pub fn top_call_expr()", zig)),
+    assertTrue(String.contains("return (1 + 1);", zig)),
+  ])
+})
+
+test("Zig emitter direct expr subset handles local lambda let-call via inlining", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let localFnCall = { let f = (x) => { x + 2 }; f(3) };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let localFnCall = match (findNormValue(proto.normalizedEntry.values, "localFnCall")) {
+    Some(v) => v,
+    None => fail("missing localFnCall"),
+  }
+  let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(proto.entry, localFnCall.value)
+  let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
+  let bodyExpr = WmcMirLower.lowerExpr(simplified)
+  let zig = match (
+    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
+      bodyExpr,
+      options={ functionName: "local_fn_call_expr", includeSourceComments: false }
+    )
+  ) {
+    Some(z) => z,
+    None => fail("expected direct expr emitter to support local lambda let-call"),
+  }
+
+  all([
+    assertTrue(String.contains("pub fn local_fn_call_expr()", zig)),
+    assertTrue(String.contains("return (3 + 2);", zig)),
+  ])
+})

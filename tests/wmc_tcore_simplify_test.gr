@@ -1,0 +1,81 @@
+module WmcTCoreSimplifyTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "map" include Map
+from "string" include String
+from "list" include List
+
+from "../src/backend/wmc/driver.gr" include WmcDriver
+from "../src/backend/wmc/tcore_norm.gr" include WmcTCoreNorm
+from "../src/backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
+from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/core_ast.gr" include CoreAst
+
+setSourceFile("./tests/wmc_tcore_simplify_test.gr")
+
+let findNormValue = (items: List<WmcTCoreNorm.TopValueBinding>, target: String) => {
+  let rec loop = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [item, ...tail] =>
+        if (item.name == target) {
+          Some(item)
+        } else {
+          loop(tail)
+        },
+    }
+  loop(items)
+}
+
+test("tcore_simplify A-normalizes non-atomic callee into let temp", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let mk = (u) => { (x) => { x + 1 } };\nlet run = { mk(0)(1) };",
+    overrides,
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides },
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+
+  let run = match (findNormValue(proto.normalizedEntry.values, "run")) {
+    Some(v) => v,
+    None => fail("missing run binding"),
+  }
+
+  let simplified = WmcTCoreSimplify.simplifyExpr(run.value)
+
+  let ok = match (simplified.kind) {
+    WmcTCoreNorm.NELet(tmp, valueExpr, bodyExpr) =>
+      if (!String.startsWith("__wm_tmp_", tmp)) {
+        false
+      } else {
+        match (valueExpr.kind) {
+          WmcTCoreNorm.NEApply(
+            { kind: WmcTCoreNorm.NEIdent("mk"), _ },
+            { kind: WmcTCoreNorm.NELit(CoreAst.Int(0)), _ },
+          ) =>
+            match (bodyExpr.kind) {
+              WmcTCoreNorm.NEApply(
+                { kind: WmcTCoreNorm.NEIdent(name), _ },
+                { kind: WmcTCoreNorm.NELit(CoreAst.Int(1)), _ },
+              ) => name == tmp,
+              _ => false,
+            },
+          _ => false,
+        }
+      },
+    _ => false,
+  }
+
+  assertTrue(ok)
+})
