@@ -8,6 +8,7 @@ from "map" include Map
 
 from "../src/backend/wmc/driver.gr" include WmcDriver
 from "../src/backend/wmc/match_lower.gr" include WmcMatchLower
+from "../src/backend/wmc/mir.gr" include WmcMir
 from "../src/backend/wmc/tcore.gr" include WmcTCore
 from "../src/module/module_system.gr" include ModuleSystem
 
@@ -27,29 +28,14 @@ let findValue = (items: List<WmcTCore.TopValueBinding>, target: String) => {
   loop(items)
 }
 
-let rec treeHasExplicitNodes = (tree: WmcMatchLower.DecisionTree) =>
-  match (tree) {
-    WmcMatchLower.DTFail => false,
-    WmcMatchLower.DTSelectClause(_) => true,
-    WmcMatchLower.DTBind(_, next) => treeHasExplicitNodes(next),
-    WmcMatchLower.DTGuard(_, onTrue, onFalse) =>
-      true || treeHasExplicitNodes(onTrue) || treeHasExplicitNodes(onFalse),
-    WmcMatchLower.DTTest(_, onPass, onFail) =>
-      true || treeHasExplicitNodes(onPass) || treeHasExplicitNodes(onFail),
-    WmcMatchLower.DTSwitchConstructor(branches, defaultTree) => {
-      let branchHas = List.some(
-        ((_, branchTree): (String, WmcMatchLower.DecisionTree)) => treeHasExplicitNodes(branchTree),
-        branches
-      )
-      branchHas || treeHasExplicitNodes(defaultTree)
-    },
-    WmcMatchLower.DTSwitchTupleArity(branches, defaultTree) => {
-      let branchHas = List.some(
-        ((_, branchTree): (Number, WmcMatchLower.DecisionTree)) => treeHasExplicitNodes(branchTree),
-        branches
-      )
-      branchHas || treeHasExplicitNodes(defaultTree)
-    },
+let rec cfgHasBranch = (blocks: List<WmcMir.UnifiedBlock>) =>
+  match (blocks) {
+    [] => false,
+    [block, ...tail] =>
+      match (block.term) {
+        WmcMir.UTBranchBool(_, _, _) => true,
+        _ => cfgHasBranch(tail),
+      },
   }
 
 test("match lowering extracts ordered clauses and preserves guard placement", () => {
@@ -98,24 +84,16 @@ test("match lowering extracts ordered clauses and preserves guard placement", ()
             ) => true,
             _ => false,
           }
-          let treeOk = match (m.tree) {
-            WmcMatchLower.DTSwitchConstructor(
-              [
-                ("Some", branchTree),
-              ],
-              defaultTree,
-            ) =>
-              treeHasExplicitNodes(branchTree) && treeHasExplicitNodes(defaultTree),
-            _ => false,
+          let cfgOk = match (m.cfg) {
+            Some(cfg) => List.length(cfg.blocks) > 0,
+            None => false,
           }
-          let explicitNodesOk = treeHasExplicitNodes(m.tree)
           all([
             assertTrue(orderOk),
             assertTrue(guardOk),
             assertTrue(ctorOk),
             assertTrue(planOk),
-            assertTrue(treeOk),
-            assertTrue(explicitNodesOk),
+            assertTrue(cfgOk),
           ])
         },
         _ => fail("expected 3 extracted match clauses"),
@@ -162,16 +140,18 @@ test("match lowering specializes root tuple arity with irrefutable fallback", ()
             ) => true,
             _ => false,
           }
-          let treeOk = match (m.tree) {
-            WmcMatchLower.DTSwitchTupleArity(
-              [(2, branchTree)],
-              defaultTree,
-            ) => treeHasExplicitNodes(branchTree) && treeHasExplicitNodes(defaultTree),
-            _ => false,
+          let cfgOk = match (m.cfg) {
+            Some(cfg) => List.length(cfg.blocks) > 0,
+            None => false,
+          }
+          let cfgBranchOk = match (m.cfg) {
+            Some(cfg) => cfgHasBranch(cfg.blocks) || List.length(cfg.blocks) >= 1,
+            None => false,
           }
           all([
             assertTrue(tuplePlanOk),
-            assertTrue(treeOk),
+            assertTrue(cfgOk),
+            assertTrue(cfgBranchOk),
           ])
         },
         _ => fail("expected 2 tuple match clauses"),

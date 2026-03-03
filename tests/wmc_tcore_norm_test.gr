@@ -180,3 +180,96 @@ test("findMatchesInTopValue ignores synthetic if-match inside thunk body", () =>
   let matches = WmcTCoreNorm.findMatchesInTopValue(main)
   assertTrue(List.length(matches) == 0)
 })
+
+test("tcore_norm backend normal form accepts canonical main thunk module", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let main = => { 1 + 1 };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+
+  assertTrue(WmcTCoreNorm.assertBackendNormalFormModule(proto.normalizedEntry))
+})
+
+test("tcore_norm canonicalizes intrinsic op names in normalized expressions", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let main = => { intAdd((1, 2)) };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+
+  let main = match (findNormValue(proto.normalizedEntry.values, "main")) {
+    Some(v) => v,
+    None => fail("missing main binding"),
+  }
+  let hasCanonicalPlus = match (main.value.kind) {
+    WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
+      match (body.kind) {
+        WmcTCoreNorm.NEApply(callee, _) =>
+          match (callee.kind) {
+            WmcTCoreNorm.NEIdent("+") => true,
+            _ => false,
+          },
+        _ => false,
+      },
+    _ => false,
+  }
+
+  all([
+    assertTrue(WmcTCoreNorm.assertBackendNormalFormModule(proto.normalizedEntry)),
+    assertTrue(List.length(proto.normalizationIssues) == 0),
+    assertTrue(hasCanonicalPlus),
+  ])
+})
+
+test("tcore_norm backend normal form requires main zero-arg thunk shape", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let main = 1 + 1;",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+
+  let hasMainShapeIssue = List.some((issue: WmcTCoreNorm.NormalizationIssue) =>
+    match (issue.kind) {
+      WmcTCoreNorm.BackendMainNotZeroArgThunk => true,
+      _ => false,
+    }, proto.normalizationIssues)
+
+  all([
+    assertTrue(!WmcTCoreNorm.assertBackendNormalFormModule(proto.normalizedEntry)),
+    assertTrue(hasMainShapeIssue),
+  ])
+})

@@ -3,6 +3,8 @@ module WmcMatchLower
 from "list" include List
 
 from "../../core/core_ast.gr" include CoreAst
+from "./mir.gr" include WmcMir
+from "./mir_lower.gr" include WmcMirLower
 from "./tcore.gr" include WmcTCore
 from "./tcore_norm.gr" include WmcTCoreNorm
 
@@ -46,7 +48,7 @@ enum rec StagedDecisionTree {
   STSwitchTupleArity(List<(Number, StagedDecisionTree)>, StagedDecisionTree),
 }
 
-provide enum rec DecisionTree {
+enum rec DecisionTree {
   DTFail,
   DTSwitchConstructor(List<(String, DecisionTree)>, DecisionTree),
   DTSwitchTupleArity(List<(Number, DecisionTree)>, DecisionTree),
@@ -61,8 +63,24 @@ provide record LoweredMatch {
   bundleNode: WmcTCore.TypedNode,
   scrutinee: WmcTCoreNorm.Expr,
   clauses: List<MatchClause>,
-  tree: DecisionTree,
+  cfg: Option<WmcMir.UnifiedCfgFunction>,
 }
+
+record BuildState {
+  nextId: Number,
+  blocksRev: List<WmcMir.UnifiedBlock>,
+}
+
+let emptyState = { nextId: 0, blocksRev: [] }: BuildState
+
+let freshId = (state: BuildState) =>
+  (state.nextId, { nextId: state.nextId + 1, blocksRev: state.blocksRev }: BuildState)
+
+let pushBlock = (state: BuildState, block: WmcMir.UnifiedBlock) =>
+  { nextId: state.nextId, blocksRev: [block, ...state.blocksRev] }: BuildState
+
+let mkBlock = (id: WmcMir.BlockId, assigns: List<WmcMir.UnifiedAssign>, term: WmcMir.UnifiedTerminator) =>
+  ({ id, assigns, term }: WmcMir.UnifiedBlock)
 
 record PatternPlanAcc {
   testsRev: List<PatternTest>,
@@ -321,14 +339,109 @@ let compileTree = (clauses: List<MatchClause>) => {
   }
 }
 
+let rec lowerTreeToCfg = (
+  tree: DecisionTree,
+  scrutineeVar: String,
+  resultName: String,
+  exitId: Number,
+  state: BuildState,
+) =>
+  match (tree) {
+    DTFail => {
+      let (id, state1) = freshId(state)
+      (id, pushBlock(state1, mkBlock(id, [], WmcMir.UTFail)))
+    },
+    DTSelectClause(clause) =>
+      match (WmcMirLower.lowerExprToCfgFragmentNoArg(clause.body, resultName, exitId, state.nextId)) {
+        None => {
+          let (id, state1) = freshId(state)
+          (id, pushBlock(state1, mkBlock(id, [], WmcMir.UTFail)))
+        },
+        Some(fragment) => {
+          let state1 = {
+            nextId: fragment.nextId,
+            blocksRev: List.append(List.reverse(fragment.blocks), state.blocksRev),
+          }: BuildState
+          (fragment.entry, state1)
+        },
+      },
+    DTBind(_binding, next) =>
+      // Binding-to-value transport is pending runtime data model support.
+      lowerTreeToCfg(next, scrutineeVar, resultName, exitId, state),
+    DTTest(test, onPass, onFail) => {
+      let (passId, state1) = lowerTreeToCfg(onPass, scrutineeVar, resultName, exitId, state)
+      let (failId, state2) = lowerTreeToCfg(onFail, scrutineeVar, resultName, exitId, state1)
+      let (id, state3) = freshId(state2)
+      let term = match (test) {
+        TestLiteral(ORoot, CoreAst.Bool(true)) =>
+          WmcMir.UTBranchBool(scrutineeVar, passId, failId),
+        TestLiteral(ORoot, CoreAst.Bool(false)) =>
+          WmcMir.UTBranchBool(scrutineeVar, failId, passId),
+        _ => WmcMir.UTGoto(failId),
+      }
+      (id, pushBlock(state3, mkBlock(id, [], term)))
+    },
+    DTGuard(guardExpr, onTrue, onFalse) => {
+      let (trueId, state1) = lowerTreeToCfg(onTrue, scrutineeVar, resultName, exitId, state)
+      let (falseId, state2) = lowerTreeToCfg(onFalse, scrutineeVar, resultName, exitId, state1)
+      let (id, state3) = freshId(state2)
+      let term = match (guardExpr.kind) {
+        WmcTCoreNorm.NEIdent(name) => WmcMir.UTBranchBool(name, trueId, falseId),
+        _ => WmcMir.UTGoto(falseId),
+      }
+      (id, pushBlock(state3, mkBlock(id, [], term)))
+    },
+    DTSwitchConstructor(_, defaultTree) =>
+      lowerTreeToCfg(defaultTree, scrutineeVar, resultName, exitId, state),
+    DTSwitchTupleArity(_, defaultTree) =>
+      lowerTreeToCfg(defaultTree, scrutineeVar, resultName, exitId, state),
+  }
+
+let lowerDecisionTreeToCfg = (tree: DecisionTree, scrutinee: WmcTCoreNorm.Expr) =>
+  match (scrutinee.kind) {
+    WmcTCoreNorm.NEIdent(scrutineeVar) => {
+      let resultName = "__u_match_result"
+      let (exitId, state1) = freshId(emptyState)
+      let state2 = pushBlock(state1, mkBlock(exitId, [], WmcMir.UTReturn(resultName)))
+      let (treeEntry, state3) = lowerTreeToCfg(tree, scrutineeVar, resultName, exitId, state2)
+      let (entryId, state4) = freshId(state3)
+      let state5 = pushBlock(
+        state4,
+        mkBlock(
+          entryId,
+          [{ name: resultName, rhs: WmcMir.URLit(CoreAst.Int(0)) }: WmcMir.UnifiedAssign],
+          WmcMir.UTGoto(treeEntry),
+        ),
+      )
+      Some({ entry: entryId, blocks: List.reverse(state5.blocksRev) }: WmcMir.UnifiedCfgFunction)
+    },
+    WmcTCoreNorm.NELit(CoreAst.Bool(b)) => {
+      let resultName = "__u_match_result"
+      let scrutineeVar = "__u_match_scrut"
+      let (exitId, state1) = freshId(emptyState)
+      let state2 = pushBlock(state1, mkBlock(exitId, [], WmcMir.UTReturn(resultName)))
+      let (treeEntry, state3) = lowerTreeToCfg(tree, scrutineeVar, resultName, exitId, state2)
+      let (entryId, state4) = freshId(state3)
+      let preAssigns = [
+        { name: resultName, rhs: WmcMir.URLit(CoreAst.Int(0)) }: WmcMir.UnifiedAssign,
+        { name: scrutineeVar, rhs: WmcMir.URLit(CoreAst.Bool(b)) }: WmcMir.UnifiedAssign,
+      ]
+      let state5 = pushBlock(state4, mkBlock(entryId, preAssigns, WmcMir.UTGoto(treeEntry)))
+      Some({ entry: entryId, blocks: List.reverse(state5.blocksRev) }: WmcMir.UnifiedCfgFunction)
+    },
+    _ => None,
+  }
+
 provide let lowerNormalizedMatch = (m: WmcTCoreNorm.MatchExpr) => {
   let clauses = clausesFromNormalized(m.clauses)
+  let tree = elaborateClauseTries(compileTree(clauses))
+  let cfg = lowerDecisionTreeToCfg(tree, m.scrutinee)
   {
     node: m.node,
     bundleNode: m.bundleNode,
     scrutinee: m.scrutinee,
     clauses,
-    tree: elaborateClauseTries(compileTree(clauses)),
+    cfg,
   }: LoweredMatch
 }
 
@@ -343,3 +456,6 @@ provide let findMatchesInExpr = (expr: WmcTCore.Expr) =>
 
 provide let findMatchesInTopValue = (binding: WmcTCore.TopValueBinding) =>
   List.map(lowerNormalizedMatch, normMatchesInTopValue(binding))
+
+provide let lowerNormalizedMatchToUnifiedCfg = (m: WmcTCoreNorm.MatchExpr) =>
+  lowerDecisionTreeToCfg(elaborateClauseTries(compileTree(clausesFromNormalized(m.clauses))), m.scrutinee)

@@ -5,19 +5,11 @@ from "string" include String
 from "char" include Char
 
 from "../../core/core_ast.gr" include CoreAst
-from "../../core/source.gr" include Source
 from "./mir.gr" include WmcMir
-from "./match_lower.gr" include WmcMatchLower
-from "./tcore.gr" include WmcTCore
-from "./tcore_norm.gr" include WmcTCoreNorm
 
 provide record EmitOptions {
   functionName: String,
   includeSourceComments: Bool,
-}
-
-record NameState {
-  counter: Number,
 }
 
 let joinStrings = (sep: String, items: List<String>) => match (items) {
@@ -120,130 +112,9 @@ let sanitizeIdentBase = (input: String) => {
   }
 }
 
-let makeEmptyNameState = () => ({ counter: 0 }: NameState)
-
 let sanitizeLocalBase = (baseHint: String) => {
   let base0 = sanitizeIdentBase(baseHint)
   if (isZigReserved(base0)) { base0 ++ "_wm" } else { base0 }
-}
-
-let rec occurrenceToString = (occ: WmcMatchLower.Occurrence) =>
-  match (occ) {
-    WmcMatchLower.ORoot => "root",
-    WmcMatchLower.OTupleElem(parent, index) =>
-      occurrenceToString(parent) ++ ".tuple[" ++ toString(index) ++ "]",
-    WmcMatchLower.OConstructorField(parent, ctor, index) =>
-      occurrenceToString(parent) ++ "." ++ ctor ++ "[" ++ toString(index) ++ "]",
-  }
-
-let literalToString = (lit: CoreAst.AtomLiteral) =>
-  match (lit) {
-    CoreAst.Int(n) => toString(n),
-    CoreAst.Bool(b) => toString(b),
-    CoreAst.Char(c) => "'" ++ toString(c) ++ "'",
-    CoreAst.Str(s) => "\"" ++ s ++ "\"",
-    CoreAst.Byte(n) => "byte(" ++ toString(n) ++ ")",
-    CoreAst.Unit => "Void",
-  }
-
-let patternTestComment = (test: WmcMatchLower.PatternTest) =>
-  match (test) {
-    WmcMatchLower.TestConstructor(occ, ctor) =>
-      "test ctor " ++ occurrenceToString(occ) ++ " == " ++ ctor,
-    WmcMatchLower.TestTupleArity(occ, arity) =>
-      "test tuple_arity " ++ occurrenceToString(occ) ++ " == " ++ toString(arity),
-    WmcMatchLower.TestLiteral(occ, lit) =>
-      "test lit " ++ occurrenceToString(occ) ++ " == " ++ literalToString(lit),
-    WmcMatchLower.TestPin(occ, name) =>
-      "test pin " ++ occurrenceToString(occ) ++ " == " ++ name,
-  }
-
-let rec bodyExprToString = (expr: WmcMir.BodyExpr) =>
-  match (expr) {
-    WmcMir.BELit(lit) => literalToString(lit),
-    WmcMir.BEIdent(name) => name,
-    WmcMir.BEApply(callee, arg) =>
-      "apply(" ++ bodyExprToString(callee) ++ ", " ++ bodyExprToString(arg) ++ ")",
-    WmcMir.BELet(name, valueExpr, bodyExpr) =>
-      "let " ++ name ++ " = " ++ bodyExprToString(valueExpr) ++ " in " ++ bodyExprToString(bodyExpr),
-    WmcMir.BETuple(items) =>
-      "(" ++ joinStrings(", ", List.map(bodyExprToString, items)) ++ ")",
-    WmcMir.BEMatch(mir) =>
-      "<match entry=b"
-        ++ toString(mir.entry)
-        ++ " blocks="
-        ++ toString(List.length(mir.blocks))
-        ++ ">",
-    WmcMir.BEUnknown(tag) => "<unknown:" ++ tag ++ ">",
-  }
-
-let sourceComment = (span: Source.Span) =>
-  "// wm:" ++ toString(span.line) ++ ":" ++ toString(span.col)
-
-let blockSourceComment = (block: WmcMir.Block) =>
-  match (block.term) {
-    WmcMir.SelectClause(clause) => {
-      let node = clause.node
-      Some(sourceComment(node.span))
-    },
-    WmcMir.SelectExpr(clause, _) => {
-      let node = clause.node
-      Some(sourceComment(node.span))
-    },
-    _ => None,
-  }
-
-let instrLines = (nameState: NameState, blockId: WmcMir.BlockId, instrs: List<WmcMir.Instr>) => {
-  let rec loop = (rest: List<WmcMir.Instr>, idx: Number, accRev: List<String>) =>
-    match (rest) {
-      [] => List.reverse(accRev),
-      [instr, ...tail] =>
-        match (instr) {
-          WmcMir.Bind(binding) => {
-            let localBase = sanitizeLocalBase("__bind_" ++ binding.name)
-            let local = localBase
-              ++ "_b"
-              ++ toString(blockId)
-              ++ "_"
-              ++ toString(idx + nameState.counter)
-            let line = indent3(
-              "const "
-                ++ local
-                ++ " = undefined; // bind "
-                ++ binding.name
-                ++ " <- "
-                ++ occurrenceToString(binding.occurrence)
-            )
-            loop(tail, idx + 1, [line, ...accRev])
-          },
-        },
-    }
-  loop(instrs, 0, [])
-}
-
-let switchMapString = (pairs: List<(String, WmcMir.BlockId)>) =>
-  joinStrings(", ", List.map(((tag, id)) => tag ++ "=>b" ++ toString(id), pairs))
-
-let tupleSwitchMapString = (pairs: List<(Number, WmcMir.BlockId)>) =>
-  joinStrings(", ", List.map(((n, id)) => toString(n) ++ "=>b" ++ toString(id), pairs))
-
-let isRootOccurrence = (occ: WmcMatchLower.Occurrence) =>
-  match (occ) {
-    WmcMatchLower.ORoot => true,
-    _ => false,
-  }
-
-let boolLiteralText = (b: Bool) => if (b) { "true" } else { "false" }
-
-let boolNormLiteral = (expr: WmcTCoreNorm.Expr) =>
-  match (expr.kind) {
-    WmcTCoreNorm.NELit(CoreAst.Bool(b)) => Some(b),
-    _ => None,
-  }
-
-let mapOption = (opt, fn) => match (opt) {
-  None => None,
-  Some(v) => Some(fn(v)),
 }
 
 let rec containsString = (items: List<String>, target: String) =>
@@ -265,64 +136,6 @@ let dedupeStrings = (items: List<String>) => {
     }
   loop(items, [])
 }
-
-let slotNameFor = (name: String) => sanitizeLocalBase("__slot_" ++ name)
-
-let rootScrutineeIdent = (mir: WmcMir.MatchMir) =>
-  match (mir.scrutinee.kind) {
-    WmcTCoreNorm.NEIdent(name) => Some(name),
-    _ => None,
-  }
-
-let resolveBoolIdentExpr = (rootName: Option<String>, name: String) =>
-  match (rootName) {
-    Some(root) => if (root == name) { Some("__scrutinee") } else { Some(slotNameFor(name)) },
-    None => Some(slotNameFor(name)),
-  }
-
-let boolNormExprText = (rootName: Option<String>, expr: WmcTCoreNorm.Expr) =>
-  match (expr.kind) {
-    WmcTCoreNorm.NELit(CoreAst.Bool(b)) => Some(boolLiteralText(b)),
-    WmcTCoreNorm.NEIdent(name) => resolveBoolIdentExpr(rootName, name),
-    _ => None,
-  }
-
-let lookupStringEnv = (env: List<(String, String)>, name: String) => {
-  let rec loop = (rest: List<(String, String)>) =>
-    match (rest) {
-      [] => None,
-      [(n, v), ...tail] => if (n == name) { Some(v) } else { loop(tail) },
-    }
-  loop(env)
-}
-
-let rec bodyIntCandidates = (expr: WmcMir.BodyExpr) =>
-  match (expr) {
-    WmcMir.BELit(CoreAst.Int(n)) => [n],
-    WmcMir.BELit(CoreAst.Bool(true)) => [1],
-    WmcMir.BELit(CoreAst.Bool(false)) => [0],
-    WmcMir.BELit(CoreAst.Unit) => [0],
-    WmcMir.BELit(CoreAst.Char(_)) => [],
-    WmcMir.BELit(CoreAst.Str(_)) => [],
-    WmcMir.BELit(CoreAst.Byte(_)) => [],
-    WmcMir.BEIdent(_) => [0, 1],
-    WmcMir.BEApply(_, _) => [],
-    WmcMir.BELet(_, valueExpr, bodyExpr) =>
-      List.append(bodyIntCandidates(valueExpr), bodyIntCandidates(bodyExpr)),
-    WmcMir.BETuple(items) => List.flatten(List.map(bodyIntCandidates, items)),
-    WmcMir.BEMatch(mir) => matchMirIntCandidates(mir),
-    WmcMir.BEUnknown(_) => [],
-  }
-
-and matchMirIntCandidates = (mir: WmcMir.MatchMir) =>
-  List.flatten(
-    List.map((block: WmcMir.Block) =>
-      match (block.term) {
-        WmcMir.SelectExpr(_, bodyExpr) => bodyIntCandidates(bodyExpr),
-        _ => [],
-      }, mir.blocks)
-  )
-
 let fitsSignedBits = (n: Number, bits: Number) => {
   let min = if (bits == 8) {
     -128
@@ -344,528 +157,248 @@ let fitsSignedBits = (n: Number, bits: Number) => {
   }
   n >= min && n <= max
 }
-
-let inferSignedIntTypeName = (mir: WmcMir.MatchMir) => {
-  let nums = matchMirIntCandidates(mir)
-  let rec allFit = (rest: List<Number>, bits: Number) =>
-    match (rest) {
-      [] => true,
-      [n, ...tail] => fitsSignedBits(n, bits) && allFit(tail, bits),
-    }
-  if (allFit(nums, 8)) {
-    "i8"
-  } else if (allFit(nums, 16)) {
-    "i16"
-  } else if (allFit(nums, 32)) {
-    "i32"
-  } else {
-    "i64"
-  }
-}
-
-let inferIntTypeNameForBodyExpr = (bodyExpr: WmcMir.BodyExpr) => {
-  let nums = bodyIntCandidates(bodyExpr)
-  let rec allFit = (rest: List<Number>, bits: Number) =>
-    match (rest) {
-      [] => true,
-      [n, ...tail] => fitsSignedBits(n, bits) && allFit(tail, bits),
-    }
-  if (allFit(nums, 8)) {
-    "i8"
-  } else if (allFit(nums, 16)) {
-    "i16"
-  } else if (allFit(nums, 32)) {
-    "i32"
-  } else {
-    "i64"
-  }
-}
-
-type StringEnv = List<(String, String)>
-
-let rec evalBoolToI64MatchExpr = (
-  mir: WmcMir.MatchMir,
-  scrutineeExprText: String,
-  rootName: Option<String>,
-  env: StringEnv,
-) => {
-  let rec runAt = (blockId: WmcMir.BlockId, fuel: Number) =>
-    if (fuel <= 0) {
-      None
-    } else {
-      match (WmcMir.findBlock(mir, blockId)) {
-        None => None,
-        Some(block) =>
-          match (block.term) {
-            WmcMir.Fail => None,
-            WmcMir.Goto(nextId) => runAt(nextId, fuel - 1),
-            WmcMir.Test(WmcMatchLower.TestLiteral(occ, CoreAst.Bool(b)), onPass, onFail) =>
-              if (isRootOccurrence(occ)) {
-                if (scrutineeExprText == "true" || scrutineeExprText == "false") {
-                  if (scrutineeExprText == boolLiteralText(b)) {
-                    runAt(onPass, fuel - 1)
-                  } else {
-                    runAt(onFail, fuel - 1)
-                  }
-                } else {
-                  // Build a symbolic conditional expression result when branching on root bool.
-                  match ((runAt(onPass, fuel - 1), runAt(onFail, fuel - 1))) {
-                    (Some(onPassExpr), Some(onFailExpr)) =>
-                      Some(
-                        "(if ("
-                          ++ scrutineeExprText
-                          ++ " == "
-                          ++ boolLiteralText(b)
-                          ++ ") "
-                          ++ onPassExpr
-                          ++ " else "
-                          ++ onFailExpr
-                      ++ ")"
-                      ),
-                    _ => None,
-                  }
-                }
-              } else {
-                None
-              },
-            WmcMir.SelectExpr(_, bodyExpr) => intResultExpr(bodyExpr, rootName, env),
-            _ => None,
-          },
-      }
-    }
-  runAt(mir.entry, List.length(mir.blocks) + 4)
-}
-and intResultExpr = (expr: WmcMir.BodyExpr, rootName: Option<String>, env: StringEnv) =>
-  match (expr) {
-    WmcMir.BELit(CoreAst.Int(n)) => Some(toString(n)),
-    WmcMir.BELit(CoreAst.Bool(b)) => Some(if (b) { "1" } else { "0" }),
-    WmcMir.BELit(CoreAst.Unit) => Some("0"),
-    WmcMir.BELit(CoreAst.Char(_)) => None,
-    WmcMir.BELit(CoreAst.Str(_)) => None,
-    WmcMir.BELit(CoreAst.Byte(_)) => None,
-    WmcMir.BEIdent(name) =>
-      match (lookupStringEnv(env, name)) {
-        Some(valueText) => Some(valueText),
-        None =>
-          mapOption(resolveBoolIdentExpr(rootName, name), (s) => "(if (" ++ s ++ ") 1 else 0)"),
-      },
-    WmcMir.BELet(name, valueExpr, bodyExpr) =>
-      match (intResultExpr(valueExpr, rootName, env)) {
-        Some(valueText) => intResultExpr(bodyExpr, rootName, [(name, valueText), ...env]),
-        // Keep evaluating body when let-bound value is outside executable subset
-        // (e.g. lambda value after call-site inlining).
-        None => intResultExpr(bodyExpr, rootName, env),
-      },
-    WmcMir.BEApply(WmcMir.BEApply(WmcMir.BEIdent(op), left), right) =>
-      match ((intResultExpr(left, rootName, env), intResultExpr(right, rootName, env))) {
-        (Some(l), Some(r)) =>
-          if (op == "intAdd" || op == "+") {
-            Some("(" ++ l ++ " + " ++ r ++ ")")
-          } else if (op == "intSub" || op == "-") {
-            Some("(" ++ l ++ " - " ++ r ++ ")")
-          } else if (op == "intMul" || op == "*") {
-            Some("(" ++ l ++ " * " ++ r ++ ")")
-          } else {
-            None
-          },
-        _ => None,
-      },
-    WmcMir.BEApply(WmcMir.BEIdent(op), WmcMir.BETuple([left, right])) =>
-      match ((intResultExpr(left, rootName, env), intResultExpr(right, rootName, env))) {
-        (Some(l), Some(r)) =>
-          if (op == "intAdd" || op == "+") {
-            Some("(" ++ l ++ " + " ++ r ++ ")")
-          } else if (op == "intSub" || op == "-") {
-            Some("(" ++ l ++ " - " ++ r ++ ")")
-          } else if (op == "intMul" || op == "*") {
-            Some("(" ++ l ++ " * " ++ r ++ ")")
-          } else {
-            None
-          },
-        _ => None,
-      },
-    WmcMir.BEMatch(mir) =>
-      match (boolNormExprText(rootName, mir.scrutinee)) {
-        Some(scrutineeExprText) =>
-          evalBoolToI64MatchExpr(mir, scrutineeExprText, rootName, env),
-        None => None,
-      },
-    _ => None,
-  }
-
-let termLines = (term: WmcMir.Terminator) =>
-  match (term) {
-    WmcMir.Fail => [indent3("// fail"), indent3("return;")],
-    WmcMir.Goto(id) => [indent3("__pc = " ++ toString(id) ++ ";"), indent3("continue;")],
-    WmcMir.Test(test, onPass, onFail) => [
-      indent3("// " ++ patternTestComment(test)),
-      indent3("// TODO: emit actual test"),
-      indent3("__pc = " ++ toString(onPass) ++ ";"),
-      indent3("// on failure -> b" ++ toString(onFail)),
-      indent3("continue;"),
-    ],
-    WmcMir.Guard(_expr, onTrue, onFalse) => [
-      indent3("// guard(expr)"),
-      indent3("// TODO: emit actual guard"),
-      indent3("__pc = " ++ toString(onTrue) ++ ";"),
-      indent3("// on false -> b" ++ toString(onFalse)),
-      indent3("continue;"),
-    ],
-    WmcMir.SwitchConstructor(branches, defaultId) => [
-      indent3("// switch_ctor " ++ switchMapString(branches) ++ " default b" ++ toString(defaultId)),
-      indent3("// TODO: inspect scrutinee tag"),
-      indent3("__pc = " ++ toString(defaultId) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SwitchTupleArity(branches, defaultId) => [
-      indent3("// switch_tuple_arity " ++ tupleSwitchMapString(branches) ++ " default b" ++ toString(defaultId)),
-      indent3("// TODO: inspect scrutinee tuple arity"),
-      indent3("__pc = " ++ toString(defaultId) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SelectClause(clause) => [
-      indent3("// select clause#" ++ toString(clause.index)),
-      indent3("return;"),
-    ],
-    WmcMir.SelectExpr(clause, bodyExpr) => [
-      indent3("// select_expr clause#" ++ toString(clause.index) ++ " = " ++ bodyExprToString(bodyExpr)),
-      indent3("return;"),
-    ],
-  }
-
-let blockLines = (nameState: NameState, block: WmcMir.Block, opts: EmitOptions) => {
-  let header = indent2(toString(block.id) ++ " => {")
-  let sourceLines = if (opts.includeSourceComments) {
-    match (blockSourceComment(block)) {
-      Some(comment) => [indent3(comment)],
-      None => [],
-    }
-  } else {
-    []
-  }
-  let inner = List.append(
-    sourceLines,
-    List.append(instrLines(nameState, block.id, block.instrs), termLines(block.term))
-  )
-  List.append([header], List.append(inner, [indent2("},")]))
-}
-
 provide let defaultOptions = () =>
   { functionName: "__wm_match", includeSourceComments: true }: EmitOptions
 
-provide let emitMatchMir = (mir: WmcMir.MatchMir, options: EmitOptions=defaultOptions()) => {
-  let nameState = makeEmptyNameState()
-  let fnNameBase = sanitizeLocalBase(options.functionName)
-  let blocksLines = List.flatten(
-    List.map((block: WmcMir.Block) => blockLines(nameState, block, options), mir.blocks)
+let collectAssignedNamesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
+  dedupeStrings(
+    List.flatten(
+      List.map(
+        (block: WmcMir.UnifiedBlock) => List.map((a: WmcMir.UnifiedAssign) => a.name, block.assigns),
+        blocks,
+      )
+    )
   )
-  let header = [
-    "// WMC Zig emitter (MIR-driven, early prototype)",
-    "pub fn " ++ fnNameBase ++ "() void {",
-    indent("// scrutinee captured once by caller/lowerer"),
-    indent("var __pc: i32 = " ++ toString(mir.entry) ++ ";"),
-    indent("while (true) {"),
-    indent2("switch (__pc) {"),
-  ]
-  let footer = [
-    indent2("else => return,"),
-    indent2("}"),
-    indent("}"),
-    "}",
-  ]
-  joinStrings("\n", List.append(header, List.append(blocksLines, footer)))
+
+enum UnifiedLocalTy {
+  LTUnknown,
+  LTBool,
+  LTInt,
 }
 
-let execTermLines = (term: WmcMir.Terminator) =>
-  match (term) {
-    WmcMir.Fail => [indent3("unreachable;")],
-    WmcMir.Goto(id) => [indent3("__pc = " ++ toString(id) ++ ";"), indent3("continue;")],
-    WmcMir.Test(WmcMatchLower.TestLiteral(occ, CoreAst.Bool(b)), onPass, onFail) =>
-      if (isRootOccurrence(occ)) {
-        [
-          indent3("if (__scrutinee == " ++ boolLiteralText(b) ++ ") {"),
-          indent3("  __pc = " ++ toString(onPass) ++ ";"),
-          indent3("} else {"),
-          indent3("  __pc = " ++ toString(onFail) ++ ";"),
-          indent3("}"),
-          indent3("continue;"),
-        ]
+let mergeLocalTy = (a: UnifiedLocalTy, b: UnifiedLocalTy) =>
+  match ((a, b)) {
+    (LTUnknown, x) => x,
+    (x, LTUnknown) => x,
+    (LTBool, LTBool) => LTBool,
+    // Conflicts default to int to keep arithmetic-capable output;
+    // branch conditions still force bool through explicit constraint.
+    _ => LTInt,
+  }
+
+let rec lookupLocalTy = (types: List<(String, UnifiedLocalTy)>, name: String) =>
+  match (types) {
+    [] => LTUnknown,
+    [(n, t), ...tail] => if (n == name) { t } else { lookupLocalTy(tail, name) },
+  }
+
+let rec setLocalTy = (types: List<(String, UnifiedLocalTy)>, name: String, ty: UnifiedLocalTy) =>
+  match (types) {
+    [] => [(name, ty)],
+    [(n, t), ...tail] =>
+      if (n == name) {
+        [(n, mergeLocalTy(t, ty)), ...tail]
       } else {
-        [
-          indent3("// unsupported non-root bool literal test"),
-          indent3("__pc = " ++ toString(onFail) ++ ";"),
-          indent3("continue;"),
-        ]
-      },
-    WmcMir.Test(_, onPass, _onFail) => [
-      indent3("// unsupported test in executable subset"),
-      indent3("__pc = " ++ toString(onPass) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.Guard(_, onTrue, _onFalse) => [
-      indent3("// unsupported guard in executable subset"),
-      indent3("__pc = " ++ toString(onTrue) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SwitchConstructor(_, defaultId) => [
-      indent3("// unsupported constructor switch in executable subset"),
-      indent3("__pc = " ++ toString(defaultId) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SwitchTupleArity(_, defaultId) => [
-      indent3("// unsupported tuple switch in executable subset"),
-      indent3("__pc = " ++ toString(defaultId) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SelectClause(clause) => [
-      indent3("// unsupported select clause#" ++ toString(clause.index)),
-      indent3("return __result;"),
-    ],
-    WmcMir.SelectExpr(clause, bodyExpr) =>
-      match (intResultExpr(bodyExpr, None, [])) {
-        Some(valueText) => [
-          indent3("// select_expr clause#" ++ toString(clause.index) ++ " = " ++ bodyExprToString(bodyExpr)),
-          indent3("__result = " ++ valueText ++ ";"),
-          indent3("return __result;"),
-        ],
-        None => [
-          indent3("// unsupported body expr in executable subset: " ++ bodyExprToString(bodyExpr)),
-          indent3("return __result;"),
-        ],
+        [(n, t), ...setLocalTy(tail, name, ty)]
       },
   }
 
-let bindNamesInInstrs = (instrs: List<WmcMir.Instr>) =>
-  List.map((instr: WmcMir.Instr) =>
-    match (instr) {
-      WmcMir.Bind(binding) => binding.name,
-    }, instrs)
+let localTyFromRValue = (rhs: WmcMir.UnifiedRValue, types: List<(String, UnifiedLocalTy)>) =>
+  match (rhs) {
+    WmcMir.URLit(CoreAst.Bool(_)) => LTBool,
+    WmcMir.URLit(_) => LTInt,
+    WmcMir.URVar(name) => lookupLocalTy(types, name),
+    WmcMir.URCall(_, _) => LTInt,
+    WmcMir.URBinOp(_, _, _) => LTInt,
+    WmcMir.URTuple(_) => LTInt,
+  }
 
-let collectBindNames = (mir: WmcMir.MatchMir) =>
-  dedupeStrings(List.flatten(List.map((block: WmcMir.Block) => bindNamesInInstrs(block.instrs), mir.blocks)))
+let inferUnifiedLocalTypes = (blocks: List<WmcMir.UnifiedBlock>, assigned: List<String>) => {
+  let init = List.map((name: String) => (name, LTUnknown), assigned)
+  let rec applyAssigns = (assigns: List<WmcMir.UnifiedAssign>, acc: List<(String, UnifiedLocalTy)>) =>
+    match (assigns) {
+      [] => acc,
+      [a, ...tail] => {
+        let rhsTy = localTyFromRValue(a.rhs, acc)
+        applyAssigns(tail, setLocalTy(acc, a.name, rhsTy))
+      },
+    }
+  let rec applyBlocks = (
+    rest: List<WmcMir.UnifiedBlock>,
+    acc: List<(String, UnifiedLocalTy)>,
+  ) =>
+    match (rest) {
+      [] => acc,
+      [b, ...tail] => {
+        let acc1 = applyAssigns(b.assigns, acc)
+        let acc2 = match (b.term) {
+          WmcMir.UTBranchBool(cond, _, _) => setLocalTy(acc1, cond, LTBool),
+          WmcMir.UTReturn(name) => setLocalTy(acc1, name, LTInt),
+          _ => acc1,
+        }
+        applyBlocks(tail, acc2)
+      },
+    }
+  let rec iterate = (n: Number, current: List<(String, UnifiedLocalTy)>) =>
+    if (n <= 0) {
+      current
+    } else {
+      iterate(n - 1, applyBlocks(blocks, current))
+    }
+  iterate(List.length(assigned) + 2, init)
+}
 
-let execInstrLines = (blockId: WmcMir.BlockId, instrs: List<WmcMir.Instr>, rootName: Option<String>) => {
-  let rec loop = (rest: List<WmcMir.Instr>, accRev: List<String>) =>
+let localTyName = (ty: UnifiedLocalTy, resultTy: String) =>
+  match (ty) {
+    LTBool => "bool",
+    LTInt => resultTy,
+    LTUnknown => resultTy,
+  }
+
+let rec lookupNameMap = (mapping: List<(String, String)>, key: String) =>
+  match (mapping) {
+    [] => sanitizeLocalBase(key),
+    [(src, out), ...tail] => if (src == key) { out } else { lookupNameMap(tail, key) },
+  }
+
+let buildNameMap = (names: List<String>) => {
+  let rec loop = (rest: List<String>, idx: Number, accRev: List<(String, String)>) =>
     match (rest) {
       [] => List.reverse(accRev),
-      [instr, ...tail] =>
-        match (instr) {
-          WmcMir.Bind(binding) =>
-            match (binding.occurrence) {
-              WmcMatchLower.ORoot => {
-                let slot = slotNameFor(binding.name)
-                let assignLine = indent3(slot ++ " = __scrutinee;")
-                let aliasComment = match (rootName) {
-                  Some(root) =>
-                    if (root == binding.name) {
-                      indent3("// bind root aliases scrutinee")
-                    } else {
-                      indent3("// bind " ++ binding.name ++ " <- root")
-                    },
-                  None => indent3("// bind " ++ binding.name ++ " <- root"),
-                }
-                loop(tail, [assignLine, aliasComment, ...accRev])
-              },
-              _ =>
-                loop(
-                  tail,
-                  [
-                    indent3("// unsupported executable bind " ++ binding.name ++ " <- " ++ occurrenceToString(binding.occurrence)),
-                    ...accRev,
-                  ],
-                ),
-            },
-        },
+      [name, ...tail] =>
+        loop(tail, idx + 1, [(name, sanitizeLocalBase(name) ++ "_" ++ toString(idx)), ...accRev]),
     }
-  loop(instrs, [])
+  loop(names, 0, [])
 }
 
-let execTermLinesWithRoot = (
-  term: WmcMir.Terminator,
-  rootName: Option<String>,
-  scrutineeExprText: String,
+let rec emitUnifiedRValue = (rhs: WmcMir.UnifiedRValue, mapping: List<(String, String)>) =>
+  match (rhs) {
+    WmcMir.URLit(CoreAst.Int(n)) => toString(n),
+    WmcMir.URLit(CoreAst.Bool(true)) => "true",
+    WmcMir.URLit(CoreAst.Bool(false)) => "false",
+    WmcMir.URLit(CoreAst.Unit) => "0",
+    WmcMir.URLit(CoreAst.Char(_)) => "0",
+    WmcMir.URLit(CoreAst.Str(_)) => "0",
+    WmcMir.URLit(CoreAst.Byte(_)) => "0",
+    WmcMir.URVar(name) => lookupNameMap(mapping, name),
+    WmcMir.URCall(callee, arg) =>
+      lookupNameMap(mapping, callee) ++ "(" ++ lookupNameMap(mapping, arg) ++ ")",
+    WmcMir.URBinOp(op, left, right) =>
+      "(" ++ lookupNameMap(mapping, left) ++ " " ++ op ++ " " ++ lookupNameMap(mapping, right) ++ ")",
+    WmcMir.URTuple(_) => "0",
+  }
+
+let collectUnifiedIntCandidatesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
+  List.flatten(
+    List.map(
+      (block: WmcMir.UnifiedBlock) =>
+        List.flatMap((a: WmcMir.UnifiedAssign) =>
+          match (a.rhs) {
+            WmcMir.URLit(CoreAst.Int(n)) => [n],
+            WmcMir.URLit(CoreAst.Bool(true)) => [1],
+            WmcMir.URLit(CoreAst.Bool(false)) => [0],
+            WmcMir.URLit(CoreAst.Unit) => [0],
+            _ => [],
+          }, block.assigns),
+      blocks,
+    )
+  )
+
+let inferSignedIntTypeNameFromUnifiedCfg = (blocks: List<WmcMir.UnifiedBlock>) => {
+  let nums = collectUnifiedIntCandidatesCfg(blocks)
+  let rec allFit = (rest: List<Number>, bits: Number) =>
+    match (rest) {
+      [] => true,
+      [n, ...tail] => fitsSignedBits(n, bits) && allFit(tail, bits),
+    }
+  if (allFit(nums, 8)) {
+    "i8"
+  } else if (allFit(nums, 16)) {
+    "i16"
+  } else if (allFit(nums, 32)) {
+    "i32"
+  } else {
+    "i64"
+  }
+}
+
+let emitUnifiedTerminatorLines = (
+  term: WmcMir.UnifiedTerminator,
+  mapping: List<(String, String)>,
 ) =>
   match (term) {
-    WmcMir.Fail => [indent3("unreachable;")],
-    WmcMir.Goto(id) => [indent3("__pc = " ++ toString(id) ++ ";"), indent3("continue;")],
-    WmcMir.Test(WmcMatchLower.TestLiteral(occ, CoreAst.Bool(b)), onPass, onFail) =>
-      if (isRootOccurrence(occ)) {
-        [
-          indent3("if (" ++ scrutineeExprText ++ " == " ++ boolLiteralText(b) ++ ") {"),
-          indent3("  __pc = " ++ toString(onPass) ++ ";"),
-          indent3("} else {"),
-          indent3("  __pc = " ++ toString(onFail) ++ ";"),
-          indent3("}"),
-          indent3("continue;"),
-        ]
-      } else {
-        [
-          indent3("// unsupported non-root bool literal test"),
-          indent3("__pc = " ++ toString(onFail) ++ ";"),
-          indent3("continue;"),
-        ]
-      },
-    WmcMir.Test(_, onPass, _onFail) => [
-      indent3("// unsupported test in executable subset"),
-      indent3("__pc = " ++ toString(onPass) ++ ";"),
+    WmcMir.UTGoto(id) => [indent3("__pc = " ++ toString(id) ++ ";"), indent3("continue;")],
+    WmcMir.UTBranchBool(cond, onTrue, onFalse) => [
+      indent3("if (" ++ lookupNameMap(mapping, cond) ++ ") {"),
+      indent3("  __pc = " ++ toString(onTrue) ++ ";"),
+      indent3("} else {"),
+      indent3("  __pc = " ++ toString(onFalse) ++ ";"),
+      indent3("}"),
       indent3("continue;"),
     ],
-    WmcMir.Guard(_, onTrue, _onFalse) => [
-      indent3("// unsupported guard in executable subset"),
-      indent3("__pc = " ++ toString(onTrue) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SwitchConstructor(_, defaultId) => [
-      indent3("// unsupported constructor switch in executable subset"),
-      indent3("__pc = " ++ toString(defaultId) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SwitchTupleArity(_, defaultId) => [
-      indent3("// unsupported tuple switch in executable subset"),
-      indent3("__pc = " ++ toString(defaultId) ++ ";"),
-      indent3("continue;"),
-    ],
-    WmcMir.SelectClause(clause) => [
-      indent3("// unsupported select clause#" ++ toString(clause.index)),
-      indent3("return __result;"),
-    ],
-    WmcMir.SelectExpr(clause, bodyExpr) =>
-      match (intResultExpr(bodyExpr, rootName, [])) {
-        Some(valueText) => [
-          indent3("// select_expr clause#" ++ toString(clause.index) ++ " = " ++ bodyExprToString(bodyExpr)),
-          indent3("__result = " ++ valueText ++ ";"),
-          indent3("return __result;"),
-        ],
-        None => [
-          indent3("// unsupported body expr in executable subset: " ++ bodyExprToString(bodyExpr)),
-          indent3("return __result;"),
-        ],
-      },
+    WmcMir.UTReturn(name) => [indent3("return " ++ lookupNameMap(mapping, name) ++ ";")],
+    WmcMir.UTFail => [indent3("unreachable;")],
   }
 
-let execBlockLines = (
-  nameState: NameState,
-  block: WmcMir.Block,
-  opts: EmitOptions,
-  rootName: Option<String>,
-  scrutineeExprText: String,
+let emitUnifiedCfgBlockLines = (
+  block: WmcMir.UnifiedBlock,
+  mapping: List<(String, String)>,
 ) => {
   let header = indent2(toString(block.id) ++ " => {")
-  let sourceLines = if (opts.includeSourceComments) {
-    match (blockSourceComment(block)) {
-      Some(comment) => [indent3(comment)],
-      None => [],
-    }
-  } else {
-    []
-  }
-  let inner = List.append(
-    sourceLines,
-    List.append(
-      execInstrLines(block.id, block.instrs, rootName),
-      execTermLinesWithRoot(block.term, rootName, scrutineeExprText),
-    )
-  )
-  List.append([header], List.append(inner, [indent2("},")]))
+  let assignLines = List.map((a: WmcMir.UnifiedAssign) => {
+    let zigName = lookupNameMap(mapping, a.name)
+    let rhsText = emitUnifiedRValue(a.rhs, mapping)
+    indent3(zigName ++ " = " ++ rhsText ++ ";")
+  }, block.assigns)
+  let termLines = emitUnifiedTerminatorLines(block.term, mapping)
+  List.append([header], List.append(assignLines, List.append(termLines, [indent2("},")])))
 }
 
-provide let emitMatchMirBoolToI64 = (mir: WmcMir.MatchMir, options: EmitOptions=defaultOptions()) => {
-  let nameState = makeEmptyNameState()
+provide let emitUnifiedCfgNoArgSpecializedInt = (
+  cfg: WmcMir.UnifiedCfgFunction,
+  options: EmitOptions=defaultOptions(),
+) => {
   let fnNameBase = sanitizeLocalBase(options.functionName)
-  let rootName = rootScrutineeIdent(mir)
-  let rootScrutineeExprText = match (boolNormExprText(rootName, mir.scrutinee)) {
-    Some(s) => s,
-    None => "__scrutinee",
-  }
-  let bindSlots = collectBindNames(mir)
-  let blocksLines = List.flatten(
-    List.map(
-      (block: WmcMir.Block) => execBlockLines(nameState, block, options, rootName, rootScrutineeExprText),
-      mir.blocks,
-    )
+  let resultTy = inferSignedIntTypeNameFromUnifiedCfg(cfg.blocks)
+  let assigned = collectAssignedNamesCfg(cfg.blocks)
+  let mapping = buildNameMap(assigned)
+  let localTypes = inferUnifiedLocalTypes(cfg.blocks, assigned)
+  let assignedDecls =
+    List.map((name: String) =>
+      {
+        let tyName = localTyName(lookupLocalTy(localTypes, name), resultTy)
+        let initValue = if (tyName == "bool") { "false" } else { "0" }
+        indent("var " ++ lookupNameMap(mapping, name) ++ ": " ++ tyName ++ " = " ++ initValue ++ ";")
+      }, assigned)
+  let blockLines = List.flatten(
+    List.map((b: WmcMir.UnifiedBlock) => emitUnifiedCfgBlockLines(b, mapping), cfg.blocks)
   )
-  let slotDeclLines = List.map((name: String) => indent("var " ++ slotNameFor(name) ++ ": bool = false;"), bindSlots)
-  let headerPrefix = [
-    "// WMC Zig emitter (executable subset: bool scrutinee -> i64 result)",
-    "pub fn " ++ fnNameBase ++ "(__scrutinee: bool) i64 {",
-    indent("var __result: i64 = 0;"),
-  ]
-  let headerSuffix = [
-    indent("var __pc: i32 = " ++ toString(mir.entry) ++ ";"),
-    indent("while (true) {"),
-    indent2("switch (__pc) {"),
-  ]
-  let header = List.append(
-    headerPrefix,
+  joinStrings(
+    "\n",
     List.append(
-      slotDeclLines,
-      List.append([indent("_ = __scrutinee;")], headerSuffix),
-    ),
-  )
-  let footer = [
-    indent2("else => return __result,"),
-    indent2("}"),
-    indent("}"),
-    "}",
-  ]
-  joinStrings("\n", List.append(header, List.append(blocksLines, footer)))
-}
-
-provide let emitMatchMirBoolToSpecializedInt = (mir: WmcMir.MatchMir, options: EmitOptions=defaultOptions()) => {
-  let nameState = makeEmptyNameState()
-  let fnNameBase = sanitizeLocalBase(options.functionName)
-  let rootName = rootScrutineeIdent(mir)
-  let rootScrutineeExprText = match (boolNormExprText(rootName, mir.scrutinee)) {
-    Some(s) => s,
-    None => "__scrutinee",
-  }
-  let bindSlots = collectBindNames(mir)
-  let resultTy = inferSignedIntTypeName(mir)
-  let blocksLines = List.flatten(
-    List.map(
-      (block: WmcMir.Block) => execBlockLines(nameState, block, options, rootName, rootScrutineeExprText),
-      mir.blocks,
-    )
-  )
-  let slotDeclLines = List.map((name: String) => indent("var " ++ slotNameFor(name) ++ ": bool = false;"), bindSlots)
-  let headerPrefix = [
-    "// WMC Zig emitter (executable subset: bool scrutinee -> specialized int result)",
-    "pub fn " ++ fnNameBase ++ "(__scrutinee: bool) " ++ resultTy ++ " {",
-    indent("var __result: " ++ resultTy ++ " = 0;"),
-  ]
-  let headerSuffix = [
-    indent("var __pc: i32 = " ++ toString(mir.entry) ++ ";"),
-    indent("while (true) {"),
-    indent2("switch (__pc) {"),
-  ]
-  let header = List.append(
-    headerPrefix,
-    List.append(
-      slotDeclLines,
-      List.append([indent("_ = __scrutinee;")], headerSuffix),
-    ),
-  )
-  let footer = [
-    indent2("else => return __result,"),
-    indent2("}"),
-    indent("}"),
-    "}",
-  ]
-  joinStrings("\n", List.append(header, List.append(blocksLines, footer)))
-}
-
-provide let emitBodyExprNoArgSpecializedInt = (bodyExpr: WmcMir.BodyExpr, options: EmitOptions=defaultOptions()) =>
-  match (intResultExpr(bodyExpr, None, [])) {
-    None => None,
-    Some(valueText) => {
-      let fnNameBase = sanitizeLocalBase(options.functionName)
-      let resultTy = inferIntTypeNameForBodyExpr(bodyExpr)
-      let lines = [
-        "// WMC Zig emitter (executable subset: direct expr -> specialized int result)",
+      [
+        "// WMC Zig emitter (unified MIR CFG no-arg -> specialized int)",
         "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
-        indent("return " ++ valueText ++ ";"),
-        "}",
-      ]
-      Some(joinStrings("\n", lines))
-    },
-  }
+        indent("var __pc: i32 = " ++ toString(cfg.entry) ++ ";"),
+      ],
+      List.append(
+        assignedDecls,
+        List.append(
+          [
+            indent("while (true) {"),
+            indent2("switch (__pc) {"),
+          ],
+          List.append(
+            blockLines,
+            [
+              indent2("else => unreachable,"),
+              indent2("}"),
+              indent("}"),
+              "}",
+            ],
+          ),
+        ),
+      ),
+    ),
+  )
+}

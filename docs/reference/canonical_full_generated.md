@@ -20,6 +20,13 @@ what programs **mean**. Tooling and compilers may differ internally, but
 conforming implementations must agree on the observable behavior described
 here.
 
+Historical note (non-normative):
+- The earlier Workman v0 implementation was a research/experimental system used
+  to explore ideas.
+- v0 implementation behavior and architecture do **not** define canonical
+  Workman or WMC behavior unless explicitly adopted by this manual or a backend
+  profile contract.
+
 This manual is intended to be:
 - Tight where it matters (so different implementations behave the same).
 - Loose where evolution is desirable (so tooling can improve without “spec
@@ -1146,12 +1153,29 @@ Normative:
 - Module exports reuse the same boundary rules: a `let` exported from a module
   is generalized exactly once and subsequently instantiated by importers.
 
-Open design decision (must be resolved):
+Normative (v1 generalization policy):
 
-- Whether canonical Workman adopts a value restriction. If adopted, the manual
-  must define what counts as a “generalizable value”.
-- How infection domains/effect rows interact with generalization (e.g., whether
-  infection rows are part of the "generalizable" set).
+- By default, `let` bindings are generalized.
+- Canonical Workman does **not** impose a blanket "discharge infection before
+  generalization" rule.
+- Infection propagation through ordinary expressions remains valid across `let`
+  boundaries and function boundaries when represented in inferred types/schemes.
+- Generalization must preserve inferred infection/domain information; it must
+  not erase or silently drop infection state from a binding's exported scheme.
+- Rejection of infected flows is enforced at explicit domain/policy boundaries
+  (for example `pure`/`rejectDomains`/domain boundary requirements), not as a
+  global ban on infected bindings.
+- This rule is semantic and policy-boundary-aware, not a syntactic "values-only"
+  gate.
+
+Normative (infection + generalization integration):
+
+- Infection/effect information participates in the same generalization boundary.
+- A `let` binding may remain infected after generalization when the infection is
+  represented in its inferred scheme (for example `A -> IResult<B, E>`).
+- Discharge by pattern matching is one way to eliminate infection from a local
+  expression, but it is not required at every `let` boundary.
+- Implementations must not silently generalize away or drop infection state.
 
 ---
 
@@ -1161,7 +1185,7 @@ Annotations may appear:
 
 - on bindings: `let x: T = expr;`
 - on parameters: `(x: T) => { ... }`
-- as local assertions: `expr as T` (if supported)
+- as local assertions: `expr as T`
 
 Normative:
 
@@ -1411,8 +1435,14 @@ Implementation-defined:
 
 These notes are for guidance only and do **not** define canonical behavior.
 
-- The Zig runtime currently uses a boxed `Value` union for all values
-  (`Int`, `Bool`, `String`, `Tuple`, `Record`, `Data`, `Func`).
+- Some current runtime-mode implementations (including a v0 Zig runtime backend)
+  use a boxed `Value` union for all values (`Int`, `Bool`, `String`, `Tuple`,
+  `Record`, `Data`, `Func`).
+- This is an implementation strategy note, not a recommended canonical backend
+  architecture.
+- In particular, the WMC profile targets compile-time specialization and
+  unboxed representations by default, using boxed values only as a fallback
+  when specialization is not possible (`../7. Interop and backend contracts/3-wmc-profile.md`).
 - The JS runtime currently represents numbers, strings, and booleans as native
   JS values, and uses objects for ADT values; non-exhaustive matches throw an
   error with metadata.
@@ -1893,10 +1923,19 @@ Canonical Workman intends infection to fit HM-style inference. That implies:
 - infection constraints must integrate with unification/generalization
 - solutions must be stable and deterministic for the same program
 
-This section will later include:
-- what is generalized at `let` boundaries in the presence of infections
-- how domain constraints appear in type schemes (if they do)
+Normative (v1 generalization boundary with infection):
+- Workman allows infection propagation to cross `let`/function boundaries when
+  represented in inferred types/schemes.
+- There is no blanket requirement to discharge infection before a binding can be
+  generalized.
+- Domain/effect constraints must not be dropped at `let` boundaries.
+- Rejection happens at explicit domain/policy boundaries (for example pure or
+  domain-specific boundary rules), not as a global anti-infection rule.
 
+Implementation-defined (must be documented):
+- The concrete scheme encoding for infection/domain constraints (for example,
+  explicit row components vs equivalent canonical encoding), provided it
+  preserves the normative behavior above.
 
 
 # Elaboration and Lowering (Normative Boundary)
@@ -1991,17 +2030,25 @@ Future work must supply:
   operate.
 
 
-# Backend Contract: Zig Runtime Mode (Normative, Minimal)
+# Backend Contract: Zig (Normative, Minimal)
 
-Canonical Workman is backend-agnostic, but the *primary* implementation target
-is a Zig runtime-mode backend. This section defines what a Zig backend must
-preserve, without constraining internal implementation strategy.
+WMC is defined with a Zig backend contract as part of the reference language
+implementation boundary. This section defines the **minimal** semantic contract
+that Zig implementations of WMC must preserve.
+
+This contract defines what the Zig backend must preserve at the semantic
+boundary. Detailed implementation direction (specialization-first compilation,
+representation planning, and fallback strategy) is specified in
+`./3-wmc-profile.md` and `./4-wmc-compiler-architecture.md`.
+
+This section is intentionally minimal and should not be read as implying
+multiple WMC backend "modes".
 
 ---
 
 ## Required Semantic Preservation
 
-A Zig runtime backend must preserve:
+The Zig backend must preserve:
 
 - The evaluation order specified in `plans/workmancanonical/5. Dynamic semantics/1-values-and-evaluation.md`.
 - The match semantics specified in `plans/workmancanonical/5. Dynamic semantics/2-control-flow-and-pattern-matching.md`.
@@ -2023,14 +2070,260 @@ Implementation-defined (must be documented):
 
 ## Representation and Layout
 
+WMC does not prescribe a universal runtime object model as the primary
+execution architecture.
+
+Normative:
+- The Zig backend must support runtime/helper machinery for cases where full
+  compile-time specialization is not possible.
+- Boxed/generic representations may be used for those fallback cases, provided
+  canonical observable behavior is preserved and implementation-defined details
+  are documented.
+- Such fallback machinery does not define the primary architecture of WMC.
+
 Canonical Workman does not, by default, guarantee:
 - record layout
 - ADT layout
 - pointer stability
 
-If the Zig backend exposes FFI surfaces, it must do so through the FFI wrapper
+If a Zig backend exposes FFI surfaces, it must do so through the FFI wrapper
 rules in `plans/workmancanonical/7. Interop and backend contracts/1-ffi-and-raw-mode.md`.
 
+
+# WMC Profile (Performance-Oriented, Manual Memory)
+
+## Scope
+
+Defines the reference implementation direction for WMC: a high-level Workman
+language experience with performance-oriented compilation and explicit memory
+control, without relying on a large VM-style runtime.
+
+## Status
+
+Draft (normative where explicitly marked).
+
+## Dependencies
+
+- `../1-introduction.md`
+- `../5. Dynamic semantics/1-values-and-evaluation.md`
+- `./2-backend-contract-zig.md`
+- `./1-ffi-and-raw-mode.md`
+
+---
+
+## Design Intent
+
+WMC is intended to feel like its own language, not a thin syntax layer over Zig.
+At the same time, it targets systems-level performance and explicit resource
+control.
+
+This profile therefore commits to:
+
+1. Preserving canonical Workman semantics.
+2. Preferring compile-time specialization over runtime boxing/dispatch.
+3. Exposing explicit memory/resource operations as first-class language
+   constructs.
+4. Avoiding a large VM runtime as the default execution model.
+
+---
+
+## Normative Goals
+
+### 1. Semantic preservation first
+
+WMC must preserve canonical observable behavior unless this profile explicitly
+declares a backend-specific extension.
+
+### 2. Minimal runtime model
+
+WMC must not use a universal boxed-value VM runtime as the default execution
+model for canonical code.
+
+Normative:
+- WMC must use type-directed specialization and concrete/unboxed
+  representations by default whenever compile-time typing and analysis make
+  them safe.
+- A universal boxed representation is permitted only as a fallback for cases
+  where specialization cannot be proven correct or cannot yet be implemented.
+- The implementation must provide such fallback support, because full
+  specialization cannot be guaranteed in all cases.
+- Such fallback use must not define the primary runtime architecture, and must
+  not change canonical observable behavior.
+
+Implementations may still include small helper runtime libraries for:
+- allocation helpers
+- panic and diagnostics plumbing
+- platform integration
+
+but these helpers must not redefine language semantics.
+
+### 3. Type-directed specialization
+
+Normative:
+- WMC must specialize representations and operations whenever static typing and
+  analysis make it safe and the implementation has a corresponding specialized
+  lowering path.
+
+Implementation-defined (must be documented):
+- Which constructs currently fall back to boxed lowering because a specialized
+  lowering path is not yet implemented.
+
+Examples:
+- direct primitive operations instead of boxed operator dispatch
+- concrete data layout for known ADTs/records
+- monomorphized or specialized function bodies where profitable
+
+### 4. Explicit memory control
+
+WMC is to expose explicit memory/resource control APIs in a backend
+profile surface, provided canonical semantics remain clear at the boundary.
+
+Memory/resource behavior that is profile-specific must be documented as such and
+must not be silently treated as canonical Workman behavior.
+
+---
+
+## Required Compiler Architecture Implications
+
+To satisfy this profile, implementations should include:
+
+1. A typed core IR (`TCore`) that is independent of surface syntax details.
+2. A lowered optimization/codegen IR (`MIR`) with explicit control/data flow.
+3. An explicit match-lowering stage (decision-tree style), not ad hoc emitter
+   pattern expansion.
+4. A representation-planning stage that decides boxed vs unboxed data from
+   typing and escape/lifetime information, with boxed fallback treated as an
+   exceptional path rather than the default codegen strategy.
+
+---
+
+## Non-Goals
+
+1. Reintroducing a mandatory VM-like universal `Value` representation as the
+   primary execution model.
+2. Making WMC merely a Zig syntax frontend.
+3. Hiding memory/resource behavior behind undocumented backend magic.
+
+---
+
+## Open Items
+
+The following must be specified before this profile can be considered stable:
+
+1. Which memory/resource APIs are canonical-profile extensions vs non-canonical.
+2. Numeric specialization policy (`Number` strategy, fixed-width coercions,
+   overflow behavior under specialization).
+3. Conformance tests for typed specialization (to guarantee no semantic drift
+   from canonical behavior).
+
+
+# WMC Compiler Architecture (Non-Normative, Provisional)
+
+This document records the current implementation direction for the WMC
+compiler/backend.
+
+Status:
+- Provisional.
+- Non-normative.
+- Intended to guide experimentation, not freeze detailed compiler design.
+
+Scope:
+- WMC backend/compiler architecture direction.
+- Relationship to Workman v0.
+
+Out of scope:
+- Canonical language semantics (defined elsewhere in this reference).
+- Full IR design lock-in.
+- Optimization policy details.
+
+## 1. Positioning
+
+WMC is a new, spec-first implementation.
+
+Historical note:
+- Workman v0 was a research/experimental implementation used to explore ideas.
+- v0 does not define the WMC compiler architecture.
+- WMC is not a "v0.1" or an incremental continuation of the v0 codebase.
+
+Implication:
+- Reuse from v0 is optional and opportunistic (ideas, tests, examples).
+- WMC does not need to preserve v0 internal runtime, IR, or codegen structure.
+
+## 2. Stable Goals (Current)
+
+These goals are stable enough to guide backend bring-up:
+
+1. Preserve canonical semantics.
+2. Prefer compile-time specialization and concrete/unboxed representations.
+3. Use boxed/generic representations only as fallback.
+4. Keep runtime support minimal (helpers/diagnostics/panic), not a universal VM.
+5. Keep architecture explicit enough to support match lowering and
+   representation planning.
+
+## 3. What Is Intentionally Not Locked Yet
+
+The following should be decided through implementation experiments before being
+documented as fixed architecture:
+
+- Exact `TCore` shape.
+- Exact `MIR` shape.
+- Closure representation details.
+- Monomorphization vs other specialization policies in borderline cases.
+- Infection lowering internal encoding.
+- Representation-planning heuristics (escape/lifetime strategy, thresholds).
+
+## 4. Expected Compiler Shape (Minimal Direction)
+
+WMC should use a typed, multi-stage compiler pipeline rather than a runtime-VM
+execution model.
+
+Minimal direction (subject to refinement):
+1. Parse / module resolution / type inference.
+2. Elaboration of specified surface sugar only.
+3. Typed core IR (retain enough structure for semantics-preserving lowering).
+4. Explicit match lowering (decision-tree style).
+5. Lowered codegen/optimization IR with explicit control flow.
+6. Representation planning (specialized/unboxed by default, boxed fallback when
+   required).
+7. Zig code generation plus small runtime support.
+
+This is a direction, not a frozen pass list.
+
+## 5. Semantic Guardrails During Experimentation
+
+Experiments must not relax these semantic requirements:
+
+- Deterministic evaluation order (including left-to-right forms).
+- `match` scrutinee evaluated exactly once.
+- Match arm order and guard timing.
+- Canonical exhaustiveness/non-exhaustive behavior.
+- Infection semantics as language semantics (not backend-only behavior).
+- `Panic(msg)` as unrecoverable failure.
+
+## 6. Fallback Policy (Provisional)
+
+Boxed/generic lowering is allowed during bring-up, but only under this policy:
+
+- It is a fallback path, not the default architecture.
+- It must preserve canonical observable behavior.
+- Fallback use should be documented as implementation status, not language
+  behavior.
+
+Future work:
+- Add a concrete list of fallback cases and a tracking policy once backend
+  experiments identify the real pressure points.
+
+## 7. Relationship to Other Backend Docs
+
+- `/Users/profilence/git/workmangr/docs/backend/wmc_backend_input_contract.md`
+  defines the frontend/backend handoff.
+- `/Users/profilence/git/workmangr/docs/backend/wmc_conformance_matrix.md`
+  tracks semantic coverage requirements.
+- `/Users/profilence/git/workmangr/docs/backend/wmc_backend_readiness_*`
+  documents readiness and gating.
+
+This document only states architectural direction and non-goals for the
+experimentation phase.
 
 
 # Standard Library Surface (Semi-Normative)
@@ -2162,6 +2455,8 @@ Guidelines:
 ## Unreleased
 
 - Initial manual skeleton added and organized into numbered folders.
-
+- Added `7. Interop and backend contracts/3-wmc-profile.md` to define the WMC
+  implementation profile (performance-oriented, minimal-runtime, type-directed
+  specialization, explicit memory control).
 
 

@@ -2,137 +2,434 @@ module WmcMirLower
 
 from "list" include List
 
-from "./match_lower.gr" include WmcMatchLower
 from "./mir.gr" include WmcMir
 from "./tcore_norm.gr" include WmcTCoreNorm
+from "../../core/core_ast.gr" include CoreAst
 
-record BuildState {
-  nextId: Number,
-  blocksRev: List<WmcMir.Block>,
+record UnifiedLowerState {
+  nextTmpId: Number,
 }
 
-let emptyState = { nextId: 0, blocksRev: [] }: BuildState
+let emptyUnifiedLowerState = { nextTmpId: 0 }: UnifiedLowerState
 
-let freshBlockId = (state: BuildState) => (state.nextId, { ...state, nextId: state.nextId + 1 })
+let freshName = (hint: String, state: UnifiedLowerState) =>
+  (
+    "__u_" ++ hint ++ "_" ++ toString(state.nextTmpId),
+    { nextTmpId: state.nextTmpId + 1 }: UnifiedLowerState,
+  )
 
-let pushBlock = (state: BuildState, block: WmcMir.Block) =>
-  { ...state, blocksRev: [block, ...state.blocksRev] }
+type Env = List<(String, String)>
+type FnEnv = List<(String, (String, WmcTCoreNorm.Expr))>
 
-let mkBlock = (
-  id: WmcMir.BlockId,
-  instrs: List<WmcMir.Instr>,
-  term: WmcMir.Terminator,
-) => ({ id, instrs, term }: WmcMir.Block)
+let lookupEnv = (env: Env, name: String) => {
+  let rec loop = (rest: Env) =>
+    match (rest) {
+      [] => None,
+      [(k, v), ...tail] => if (k == name) { Some(v) } else { loop(tail) },
+    }
+  loop(env)
+}
 
-let rec lowerBodyExpr = (expr: WmcTCoreNorm.Expr) =>
+let lookupFnEnv = (env: FnEnv, name: String) => {
+  let rec loop = (rest: FnEnv) =>
+    match (rest) {
+      [] => None,
+      [(k, v), ...tail] => if (k == name) { Some(v) } else { loop(tail) },
+    }
+  loop(env)
+}
+
+let rec lowerUnifiedExpr = (
+  expr: WmcTCoreNorm.Expr,
+  env: Env,
+  fenv: FnEnv,
+  st: UnifiedLowerState,
+) =>
   match (expr.kind) {
-    WmcTCoreNorm.NELit(lit) => WmcMir.BELit(lit),
-    WmcTCoreNorm.NEIdent(name) => WmcMir.BEIdent(name),
-    WmcTCoreNorm.NEApply(callee, arg) =>
-      WmcMir.BEApply(lowerBodyExpr(callee), lowerBodyExpr(arg)),
+    WmcTCoreNorm.NELit(lit) => {
+      let (name, st1) = freshName("lit", st)
+      (Some(([WmcMir.UAssign(name, WmcMir.URLit(lit))], name)), st1)
+    },
+    WmcTCoreNorm.NEIdent(name) =>
+      match (lookupEnv(env, name)) {
+        Some(local) => (Some(([], local)), st),
+        None => {
+          let (tmp, st1) = freshName("id", st)
+          (Some(([WmcMir.UAssign(tmp, WmcMir.URVar(name))], tmp)), st1)
+        },
+      },
+    WmcTCoreNorm.NETuple(items) => {
+      let rec loop = (
+        rest: List<WmcTCoreNorm.Expr>,
+        accStmtsRev: List<WmcMir.UnifiedStmt>,
+        accVarsRev: List<String>,
+        stX: UnifiedLowerState,
+      ) =>
+        match (rest) {
+          [] => Some((List.reverse(accStmtsRev), List.reverse(accVarsRev), stX)),
+          [item, ...tail] =>
+            match (lowerUnifiedExpr(item, env, fenv, stX)) {
+              (None, _stY) => (None: Option<(List<WmcMir.UnifiedStmt>, List<String>, UnifiedLowerState)>),
+              (Some((stmts, v)), stY) =>
+                loop(
+                  tail,
+                  List.append(List.reverse(stmts), accStmtsRev),
+                  [v, ...accVarsRev],
+                  stY,
+                ),
+            },
+        }
+      match (loop(items, [], [], st)) {
+        None => (None, st),
+        Some((itemStmts, itemVars, st1)) => {
+          let (name, st2) = freshName("tuple", st1)
+          (
+            Some((List.append(itemStmts, [WmcMir.UAssign(name, WmcMir.URTuple(itemVars))]), name)),
+            st2,
+          )
+        },
+      }
+    },
+    WmcTCoreNorm.NELambda(_, _) => (None, st),
+    WmcTCoreNorm.NEUnknown(_) => (None, st),
     WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
-      WmcMir.BELet(name, lowerBodyExpr(valueExpr), lowerBodyExpr(bodyExpr)),
-    WmcTCoreNorm.NELambda(_, _) => WmcMir.BEUnknown("lambda"),
-    WmcTCoreNorm.NETuple(items) =>
-      WmcMir.BETuple(List.map((item: WmcTCoreNorm.Expr) => lowerBodyExpr(item), items)),
-    WmcTCoreNorm.NEMatch(m) =>
-      WmcMir.BEMatch(_lowerMatchFromLowered(WmcMatchLower.lowerNormalizedMatch(m))),
-    WmcTCoreNorm.NEUnknown(tag) => WmcMir.BEUnknown(tag),
+      match (valueExpr.kind) {
+        WmcTCoreNorm.NELambda(param, fnBody) =>
+          lowerUnifiedExpr(bodyExpr, env, [(name, (param, fnBody)), ...fenv], st),
+        _ =>
+          match (lowerUnifiedExpr(valueExpr, env, fenv, st)) {
+            (None, st1) => (None, st1),
+            (Some((valueStmts, valueVar)), st1) => {
+              let (bound, st2) = freshName(name, st1)
+              let bindStmt: WmcMir.UnifiedStmt = WmcMir.UAssign(bound, WmcMir.URVar(valueVar))
+              match (lowerUnifiedExpr(bodyExpr, [(name, bound), ...env], fenv, st2)) {
+                (None, st3) => (None, st3),
+                (Some((bodyStmts, bodyVar)), st3) =>
+                  (
+                    Some((List.append(List.append(valueStmts, [bindStmt]), bodyStmts), bodyVar)),
+                    st3,
+                  ),
+              }
+            },
+          },
+      },
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      match (callee.kind) {
+        WmcTCoreNorm.NEIdent(name) =>
+          match (lookupFnEnv(fenv, name)) {
+            Some((param, fnBody)) =>
+              match (lowerUnifiedExpr(arg, env, fenv, st)) {
+                (None, st1) => (None, st1),
+                (Some((argStmts, argVar)), st1) =>
+                  match (lowerUnifiedExpr(fnBody, [(param, argVar), ...env], fenv, st1)) {
+                    (None, st2) => (None, st2),
+                    (Some((bodyStmts, bodyVar)), st2) =>
+                      (Some((List.append(argStmts, bodyStmts), bodyVar)), st2),
+                  },
+              },
+            None => lowerUnifiedApply(callee, arg, env, fenv, st),
+          },
+        _ => lowerUnifiedApply(callee, arg, env, fenv, st),
+      },
+    WmcTCoreNorm.NEMatch(m) => lowerUnifiedBoolMatch(m, env, fenv, st),
   }
 
-and lowerTree = (tree: WmcMatchLower.DecisionTree, state: BuildState) =>
-  match (tree) {
-    WmcMatchLower.DTFail => {
-      let (id, state1) = freshBlockId(state)
-      let state2 = pushBlock(state1, mkBlock(id, [], WmcMir.Fail))
-      (id, state2)
-    },
-    WmcMatchLower.DTSelectClause(clause) => {
-      let (id, state1) = freshBlockId(state)
-      let bodyExpr = lowerBodyExpr(clause.body)
-      let state2 = pushBlock(state1, mkBlock(id, [], WmcMir.SelectExpr(clause, bodyExpr)))
-      (id, state2)
-    },
-    WmcMatchLower.DTBind(binding, next) => {
-      let (nextId, state1) = lowerTree(next, state)
-      let (id, state2) = freshBlockId(state1)
-      let block = mkBlock(id, [WmcMir.Bind(binding)], WmcMir.Goto(nextId))
-      (id, pushBlock(state2, block))
-    },
-    WmcMatchLower.DTTest(test, onPass, onFail) => {
-      let (passId, state1) = lowerTree(onPass, state)
-      let (failId, state2) = lowerTree(onFail, state1)
-      let (id, state3) = freshBlockId(state2)
-      let block = mkBlock(id, [], WmcMir.Test(test, passId, failId))
-      (id, pushBlock(state3, block))
-    },
-    WmcMatchLower.DTGuard(expr, onTrue, onFalse) => {
-      let (trueId, state1) = lowerTree(onTrue, state)
-      let (falseId, state2) = lowerTree(onFalse, state1)
-      let (id, state3) = freshBlockId(state2)
-      let block = mkBlock(id, [], WmcMir.Guard(expr, trueId, falseId))
-      (id, pushBlock(state3, block))
-    },
-    WmcMatchLower.DTSwitchConstructor(branches, defaultTree) => {
-      let (loweredBranchesRev, state1) = lowerCtorBranches(branches, [], state)
-      let (defaultId, state2) = lowerTree(defaultTree, state1)
-      let (id, state3) = freshBlockId(state2)
-      let block = mkBlock(
-        id,
-        [],
-        WmcMir.SwitchConstructor(List.reverse(loweredBranchesRev), defaultId),
-      )
-      (id, pushBlock(state3, block))
-    },
-    WmcMatchLower.DTSwitchTupleArity(branches, defaultTree) => {
-      let (loweredBranchesRev, state1) = lowerTupleBranches(branches, [], state)
-      let (defaultId, state2) = lowerTree(defaultTree, state1)
-      let (id, state3) = freshBlockId(state2)
-      let block = mkBlock(
-        id,
-        [],
-        WmcMir.SwitchTupleArity(List.reverse(loweredBranchesRev), defaultId),
-      )
-      (id, pushBlock(state3, block))
-    },
-  }
-
-and lowerCtorBranches = (
-  branches: List<(String, WmcMatchLower.DecisionTree)>,
-  accRev: List<(String, WmcMir.BlockId)>,
-  state: BuildState,
+and lowerUnifiedApply = (
+  callee: WmcTCoreNorm.Expr,
+  arg: WmcTCoreNorm.Expr,
+  env: Env,
+  fenv: FnEnv,
+  st: UnifiedLowerState,
 ) =>
-  match (branches) {
-    [] => (accRev, state),
-    [(tag, tree), ...tail] => {
-      let (branchId, state1) = lowerTree(tree, state)
-      lowerCtorBranches(tail, [(tag, branchId), ...accRev], state1)
-    },
-  }
+      match (callee.kind) {
+        WmcTCoreNorm.NEApply(callee2, left) =>
+          match (callee2.kind) {
+            WmcTCoreNorm.NEIdent(op) =>
+              if (
+                op == "+" || op == "-" || op == "*" || op == "intAdd" || op == "intSub"
+                  || op == "intMul"
+              ) {
+                match (lowerUnifiedExpr(left, env, fenv, st)) {
+                  (None, st1) => (None, st1),
+                  (Some((leftStmts, leftVar)), st1) =>
+                    match (lowerUnifiedExpr(arg, env, fenv, st1)) {
+                      (None, st2) => (None, st2),
+                      (Some((rightStmts, rightVar)), st2) => {
+                        let opNorm = if (op == "intAdd") {
+                          "+"
+                        } else if (op == "intSub") {
+                          "-"
+                        } else if (op == "intMul") {
+                          "*"
+                        } else {
+                          op
+                        }
+                        let (out, st3) = freshName("bin", st2)
+                        (
+                          Some((
+                            List.append(
+                              List.append(leftStmts, rightStmts),
+                              [WmcMir.UAssign(out, WmcMir.URBinOp(opNorm, leftVar, rightVar))],
+                            ),
+                            out,
+                          )),
+                          st3,
+                        )
+                      },
+                    },
+                }
+              } else {
+                lowerUnifiedCall(callee, arg, env, fenv, st)
+              },
+            _ => lowerUnifiedCall(callee, arg, env, fenv, st),
+          },
+        WmcTCoreNorm.NEIdent(op) =>
+          match (arg.kind) {
+            WmcTCoreNorm.NETuple([left, right]) when op == "+" || op == "-" || op == "*" || op == "intAdd" || op == "intSub" || op == "intMul" =>
+              match (lowerUnifiedExpr(left, env, fenv, st)) {
+                (None, st1) => (None, st1),
+                (Some((leftStmts, leftVar)), st1) =>
+                  match (lowerUnifiedExpr(right, env, fenv, st1)) {
+                    (None, st2) => (None, st2),
+                    (Some((rightStmts, rightVar)), st2) => {
+                      let opNorm = if (op == "intAdd") {
+                        "+"
+                      } else if (op == "intSub") {
+                        "-"
+                      } else if (op == "intMul") {
+                        "*"
+                      } else {
+                        op
+                      }
+                      let (out, st3) = freshName("bin", st2)
+                      (
+                        Some((
+                          List.append(
+                            List.append(leftStmts, rightStmts),
+                            [WmcMir.UAssign(out, WmcMir.URBinOp(opNorm, leftVar, rightVar))],
+                          ),
+                          out,
+                        )),
+                        st3,
+                      )
+                    },
+                  },
+              },
+            _ => lowerUnifiedCall(callee, arg, env, fenv, st),
+          },
+        _ => lowerUnifiedCall(callee, arg, env, fenv, st),
+      }
 
-and lowerTupleBranches = (
-  branches: List<(Number, WmcMatchLower.DecisionTree)>,
-  accRev: List<(Number, WmcMir.BlockId)>,
-  state: BuildState,
+and lowerUnifiedCall = (
+  callee: WmcTCoreNorm.Expr,
+  arg: WmcTCoreNorm.Expr,
+  env: Env,
+  fenv: FnEnv,
+  st: UnifiedLowerState,
 ) =>
-  match (branches) {
-    [] => (accRev, state),
-    [(arity, tree), ...tail] => {
-      let (branchId, state1) = lowerTree(tree, state)
-      lowerTupleBranches(tail, [(arity, branchId), ...accRev], state1)
-    },
+  match (lowerUnifiedExpr(callee, env, fenv, st)) {
+    (None, st1) => (None, st1),
+    (Some((calleeStmts, calleeVar)), st1) =>
+      match (lowerUnifiedExpr(arg, env, fenv, st1)) {
+        (None, st2) => (None, st2),
+        (Some((argStmts, argVar)), st2) => {
+          let (out, st3) = freshName("call", st2)
+          (
+            Some((
+              List.append(
+                List.append(calleeStmts, argStmts),
+                [WmcMir.UAssign(out, WmcMir.URCall(calleeVar, argVar))],
+              ),
+              out,
+            )),
+            st3,
+          )
+        },
+      },
   }
 
-and _lowerMatchFromLowered = (m: WmcMatchLower.LoweredMatch) => {
-  let (entry, state) = lowerTree(m.tree, emptyState)
-  {
-    node: m.node,
-    scrutinee: m.scrutinee,
-    entry,
-    blocks: List.reverse(state.blocksRev),
-    clauses: m.clauses,
-  }: WmcMir.MatchMir
+and lowerUnifiedBoolMatch = (
+  m: WmcTCoreNorm.MatchExpr,
+  env: Env,
+  fenv: FnEnv,
+  st: UnifiedLowerState,
+) =>
+  match (m.clauses) {
+    [c1, c2] =>
+      if (c1.guard != None || c2.guard != None) {
+        (None, st)
+      } else {
+        let boolOfPattern = (p: WmcTCoreNorm.Pattern) =>
+          match (p.kind) {
+            WmcTCoreNorm.NPLit(CoreAst.Bool(b)) => Some(b),
+            _ => None,
+          }
+        match ((boolOfPattern(c1.param), boolOfPattern(c2.param))) {
+          (Some(b1), Some(b2)) when b1 != b2 =>
+            match (lowerUnifiedExpr(m.scrutinee, env, fenv, st)) {
+              (None, st1) => (None, st1),
+              (Some((scrutStmts, scrutVar)), st1) =>
+                match (lowerUnifiedExpr(c1.body, env, fenv, st1)) {
+                  (None, st2) => (None, st2),
+                  (Some((thenStmts0, thenVar)), st2) =>
+                    match (lowerUnifiedExpr(c2.body, env, fenv, st2)) {
+                      (None, st3) => (None, st3),
+                      (Some((elseStmts0, elseVar)), st3) => {
+                        let (out, st4) = freshName("match", st3)
+                        let thenStmts = List.append(thenStmts0, [WmcMir.UAssign(out, WmcMir.URVar(thenVar))])
+                        let elseStmts = List.append(elseStmts0, [WmcMir.UAssign(out, WmcMir.URVar(elseVar))])
+                        let branch = if (b1) {
+                          WmcMir.UBranchBool(scrutVar, thenStmts, elseStmts)
+                        } else {
+                          WmcMir.UBranchBool(scrutVar, elseStmts, thenStmts)
+                        }
+                        (Some((List.append(scrutStmts, [branch]), out)), st4)
+                      },
+                    },
+                },
+            },
+          _ => (None, st),
+        }
+      },
+    _ => (None, st),
+  }
+
+record UnifiedCfgBuildState {
+  nextId: Number,
+  blocksRev: List<WmcMir.UnifiedBlock>,
 }
 
-provide let lowerMatch = _lowerMatchFromLowered
-provide let lowerExpr = lowerBodyExpr
+let emptyUnifiedCfgBuildState = { nextId: 0, blocksRev: [] }: UnifiedCfgBuildState
+
+let freshUnifiedCfgId = (state: UnifiedCfgBuildState) =>
+  (state.nextId, { nextId: state.nextId + 1, blocksRev: state.blocksRev }: UnifiedCfgBuildState)
+
+let pushUnifiedCfgBlock = (state: UnifiedCfgBuildState, block: WmcMir.UnifiedBlock) =>
+  { nextId: state.nextId, blocksRev: [block, ...state.blocksRev] }: UnifiedCfgBuildState
+
+let mkUnifiedCfgBlock = (
+  id: WmcMir.BlockId,
+  assigns: List<WmcMir.UnifiedAssign>,
+  term: WmcMir.UnifiedTerminator,
+) => ({ id, assigns, term }: WmcMir.UnifiedBlock)
+
+let rec lowerUnifiedStmtSeqToCfg = (
+  stmts: List<WmcMir.UnifiedStmt>,
+  cont: WmcMir.UnifiedTerminator,
+  state: UnifiedCfgBuildState,
+) =>
+  match (stmts) {
+    [] => {
+      let (id, state1) = freshUnifiedCfgId(state)
+      let block = mkUnifiedCfgBlock(id, [], cont)
+      (id, pushUnifiedCfgBlock(state1, block))
+    },
+    [stmt, ...tail] =>
+      match (stmt) {
+        WmcMir.UAssign(name, rhs) => {
+          let (nextId, state1) = lowerUnifiedStmtSeqToCfg(tail, cont, state)
+          let (id, state2) = freshUnifiedCfgId(state1)
+          let block = mkUnifiedCfgBlock(
+            id,
+            [{ name, rhs }: WmcMir.UnifiedAssign],
+            WmcMir.UTGoto(nextId),
+          )
+          (id, pushUnifiedCfgBlock(state2, block))
+        },
+        WmcMir.UBranchBool(cond, thenStmts, elseStmts) => {
+          let (nextId, state1) = lowerUnifiedStmtSeqToCfg(tail, cont, state)
+          let (thenId, state2) = lowerUnifiedStmtSeqToCfg(thenStmts, WmcMir.UTGoto(nextId), state1)
+          let (elseId, state3) = lowerUnifiedStmtSeqToCfg(elseStmts, WmcMir.UTGoto(nextId), state2)
+          let (id, state4) = freshUnifiedCfgId(state3)
+          let block = mkUnifiedCfgBlock(id, [], WmcMir.UTBranchBool(cond, thenId, elseId))
+          (id, pushUnifiedCfgBlock(state4, block))
+        },
+        WmcMir.UFail => {
+          let (id, state1) = freshUnifiedCfgId(state)
+          let block = mkUnifiedCfgBlock(id, [], WmcMir.UTFail)
+          (id, pushUnifiedCfgBlock(state1, block))
+        },
+        WmcMir.UReturn(name) => {
+          let (id, state1) = freshUnifiedCfgId(state)
+          let block = mkUnifiedCfgBlock(id, [], WmcMir.UTReturn(name))
+          (id, pushUnifiedCfgBlock(state1, block))
+        },
+      },
+  }
+
+let lowerUnifiedStmtsToCfg = (stmts: List<WmcMir.UnifiedStmt>) => {
+  let (entry, state) = lowerUnifiedStmtSeqToCfg(stmts, WmcMir.UTFail, emptyUnifiedCfgBuildState)
+  { entry, blocks: List.reverse(state.blocksRev) }: WmcMir.UnifiedCfgFunction
+}
+
+provide let lowerExprToCfgNoArg = (expr: WmcTCoreNorm.Expr) =>
+  match (lowerUnifiedExpr(expr, [], [], emptyUnifiedLowerState)) {
+    (None, _) => None,
+    (Some((stmts, out)), _) => Some(lowerUnifiedStmtsToCfg(List.append(stmts, [WmcMir.UReturn(out)]))),
+  }
+
+provide record UnifiedCfgFragment {
+  entry: Number,
+  blocks: List<WmcMir.UnifiedBlock>,
+  nextId: Number,
+}
+
+let maxBlockId = (blocks: List<WmcMir.UnifiedBlock>) => {
+  let rec loop = (rest: List<WmcMir.UnifiedBlock>, current: Number) =>
+    match (rest) {
+      [] => current,
+      [b, ...tail] => {
+        let next = if (b.id > current) { b.id } else { current }
+        loop(tail, next)
+      },
+    }
+  loop(blocks, -1)
+}
+
+let remapTermForExit = (
+  term: WmcMir.UnifiedTerminator,
+  offset: Number,
+  exitId: Number,
+) =>
+  match (term) {
+    WmcMir.UTGoto(id) => WmcMir.UTGoto(id + offset),
+    WmcMir.UTBranchBool(cond, onTrue, onFalse) =>
+      WmcMir.UTBranchBool(cond, onTrue + offset, onFalse + offset),
+    WmcMir.UTReturn(_) => WmcMir.UTGoto(exitId),
+    WmcMir.UTFail => WmcMir.UTFail,
+  }
+
+let remapAssignsForReturn = (
+  assigns: List<WmcMir.UnifiedAssign>,
+  term: WmcMir.UnifiedTerminator,
+  resultName: String,
+) =>
+  match (term) {
+    WmcMir.UTReturn(value) =>
+      List.append(assigns, [{ name: resultName, rhs: WmcMir.URVar(value) }: WmcMir.UnifiedAssign]),
+    _ => assigns,
+  }
+
+provide let lowerExprToCfgFragmentNoArg = (
+  expr: WmcTCoreNorm.Expr,
+  resultName: String,
+  exitId: Number,
+  startId: Number,
+) =>
+  match (lowerExprToCfgNoArg(expr)) {
+    None => None,
+    Some(cfg) => {
+      let mappedBlocks = List.map((b: WmcMir.UnifiedBlock) =>
+        {
+          id: b.id + startId,
+          assigns: remapAssignsForReturn(b.assigns, b.term, resultName),
+          term: remapTermForExit(b.term, startId, exitId),
+        }: WmcMir.UnifiedBlock, cfg.blocks)
+      let used = maxBlockId(cfg.blocks) + 1
+      Some({
+        entry: cfg.entry + startId,
+        blocks: mappedBlocks,
+        nextId: startId + used,
+      }: UnifiedCfgFragment)
+    },
+  }

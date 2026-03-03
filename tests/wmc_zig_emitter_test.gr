@@ -8,7 +8,6 @@ from "map" include Map
 from "string" include String
 
 from "../src/backend/wmc/driver.gr" include WmcDriver
-from "../src/backend/wmc/match_lower.gr" include WmcMatchLower
 from "../src/backend/wmc/mir_lower.gr" include WmcMirLower
 from "../src/backend/wmc/emit_zig.gr" include WmcEmitZig
 from "../src/backend/wmc/expr_inline.gr" include WmcExprInline
@@ -18,20 +17,6 @@ from "../src/backend/wmc/tcore_norm.gr" include WmcTCoreNorm
 from "../src/module/module_system.gr" include ModuleSystem
 
 setSourceFile("./tests/wmc_zig_emitter_test.gr")
-
-let findValue = (items: List<WmcTCore.TopValueBinding>, target: String) => {
-  let rec loop = (rest: List<WmcTCore.TopValueBinding>) =>
-    match (rest) {
-      [] => None,
-      [item, ...tail] =>
-        if (item.name == target) {
-          Some(item)
-        } else {
-          loop(tail)
-        },
-    }
-  loop(items)
-}
 
 let findNormValue = (items: List<WmcTCoreNorm.TopValueBinding>, target: String) => {
   let rec loop = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
@@ -47,11 +32,33 @@ let findNormValue = (items: List<WmcTCoreNorm.TopValueBinding>, target: String) 
   loop(items)
 }
 
-test("Zig emitter allocates collision-safe bind names and emits source comments", () => {
+let emitUnifiedNoArg = (
+  rawModule: WmcTCore.Module,
+  expr: WmcTCoreNorm.Expr,
+  fnName: String,
+) => {
+  let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, expr)
+  let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
+  let executableExpr = match (simplified.kind) {
+    WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
+      body,
+    _ => simplified,
+  }
+  let cfg = match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
+    Some(c) => c,
+    None => fail("expected unified lowering to support expression"),
+  }
+  WmcEmitZig.emitUnifiedCfgNoArgSpecializedInt(
+    cfg,
+    options={ functionName: fnName, includeSourceComments: false }
+  )
+}
+
+test("Zig unified emitter outputs CFG block machine and avoids reserved-name collisions", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let classify = (x) => {\n  match(x) {\n    Some(Var(switch)) => { first(switch) }\n    Some(Var(switch)) => { second(switch) }\n    _ => { fallback(x) }\n  }\n};",
+    "let reservedLocals = { let switch = 1 + 1; switch };",
     overrides
   )
 
@@ -64,40 +71,28 @@ test("Zig emitter allocates collision-safe bind names and emits source comments"
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let classify = match (findValue(proto.entry.values, "classify")) {
+  let reservedLocals = match (findNormValue(proto.normalizedEntry.values, "reservedLocals")) {
     Some(v) => v,
-    None => fail("missing classify"),
+    None => fail("missing reservedLocals"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(classify)) {
-    [m] => m,
-    _ => fail("expected one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let zig = WmcEmitZig.emitMatchMir(
-    mir,
-    options={ functionName: "__wm_match_classify", includeSourceComments: true }
-  )
+  let zig = emitUnifiedNoArg(proto.entry, reservedLocals.value, "reserved_locals_expr")
 
-  let hasSourceComment = String.contains("// wm:", zig)
-  let hasSafeBind = String.contains("const __bind_switch", zig)
-  let avoidsRawReservedConst = !String.contains("const switch =", zig)
+  let hasFunc = String.contains("pub fn reserved_locals_expr()", zig)
   let hasBlockMachine = String.contains("switch (__pc)", zig)
-  let hasSelectExpr = String.contains("select_expr clause#", zig)
+  let avoidsRawReserved = !String.contains("var switch:", zig) && !String.contains(" switch = ", zig)
 
   all([
-    assertTrue(hasSourceComment),
-    assertTrue(hasSafeBind),
-    assertTrue(avoidsRawReservedConst),
+    assertTrue(hasFunc),
     assertTrue(hasBlockMachine),
-    assertTrue(hasSelectExpr),
+    assertTrue(avoidsRawReserved),
   ])
 })
 
-test("Zig emitter executable subset emits bool test and i64 result selection", () => {
+test("Zig unified emitter handles bool branch and integer result selection", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let choose = (x) => {\n  match(x) {\n    true => { 1 }\n    false => { 2 }\n  }\n};",
+    "let choose = { if true { 1 } else { 2 } };",
     overrides
   )
 
@@ -110,33 +105,25 @@ test("Zig emitter executable subset emits bool test and i64 result selection", (
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let choose = match (findValue(proto.entry.values, "choose")) {
+  let choose = match (findNormValue(proto.normalizedEntry.values, "choose")) {
     Some(v) => v,
     None => fail("missing choose"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(choose)) {
-    [m] => m,
-    _ => fail("expected one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let zig = WmcEmitZig.emitMatchMirBoolToI64(
-    mir,
-    options={ functionName: "choose_bool", includeSourceComments: false }
-  )
+  let zig = emitUnifiedNoArg(proto.entry, choose.value, "choose_expr")
 
   all([
-    assertTrue(String.contains("pub fn choose_bool(__scrutinee: bool) i64", zig)),
-    assertTrue(String.contains("if (__scrutinee == true)", zig)),
-    assertTrue(String.contains("__result = 1;", zig) || String.contains("__result = 2;", zig)),
-    assertTrue(!String.contains("// TODO: emit actual test", zig)),
+    assertTrue(String.contains("pub fn choose_expr()", zig)),
+    assertTrue(String.contains("if (", zig)),
+    assertTrue(String.contains("return", zig)),
+    assertTrue(String.contains("switch (__pc)", zig)),
   ])
 })
 
-test("Zig emitter executable subset constant-folds nested bool match body", () => {
+test("Zig unified emitter lowers nested if and keeps deterministic arithmetic output", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let chooseNested = (x) => {\n  match(x) {\n    true => { if true { 7 } else { 8 } }\n    false => { 0 }\n  }\n};",
+    "let chooseNested = { if true { if true { 7 } else { 8 } } else { 0 } };",
     overrides
   )
 
@@ -149,32 +136,24 @@ test("Zig emitter executable subset constant-folds nested bool match body", () =
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let chooseNested = match (findValue(proto.entry.values, "chooseNested")) {
+  let chooseNested = match (findNormValue(proto.normalizedEntry.values, "chooseNested")) {
     Some(v) => v,
     None => fail("missing chooseNested"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(chooseNested)) {
-    [m] => m,
-    _ => fail("expected one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let zig = WmcEmitZig.emitMatchMirBoolToI64(
-    mir,
-    options={ functionName: "choose_nested_bool", includeSourceComments: false }
-  )
+  let zig = emitUnifiedNoArg(proto.entry, chooseNested.value, "choose_nested_expr")
 
   all([
-    assertTrue(String.contains("pub fn choose_nested_bool(__scrutinee: bool) i64", zig)),
-    assertTrue(String.contains("__result = 7;", zig)),
-    assertTrue(!String.contains("unsupported body expr in executable subset", zig)),
+    assertTrue(String.contains("pub fn choose_nested_expr()", zig)),
+    assertTrue(String.contains(" = 7;", zig) || String.contains("return 7;", zig)),
+    assertTrue(String.contains("switch (__pc)", zig)),
   ])
 })
 
-test("Zig emitter executable subset handles nested bool match on root identifier", () => {
+test("Zig unified emitter handles nested bool branch on local identifier", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let chooseNestedId = (x) => {\n  match(x) {\n    true => { if x { 7 } else { 8 } }\n    false => { 0 }\n  }\n};",
+    "let chooseNestedId = { let x = true; if x { 7 } else { 8 } };",
     overrides
   )
 
@@ -187,32 +166,24 @@ test("Zig emitter executable subset handles nested bool match on root identifier
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let chooseNestedId = match (findValue(proto.entry.values, "chooseNestedId")) {
+  let chooseNestedId = match (findNormValue(proto.normalizedEntry.values, "chooseNestedId")) {
     Some(v) => v,
     None => fail("missing chooseNestedId"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(chooseNestedId)) {
-    [m] => m,
-    _ => fail("expected one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let zig = WmcEmitZig.emitMatchMirBoolToI64(
-    mir,
-    options={ functionName: "choose_nested_id_bool", includeSourceComments: false }
-  )
+  let zig = emitUnifiedNoArg(proto.entry, chooseNestedId.value, "choose_nested_id_expr")
 
   all([
-    assertTrue(String.contains("pub fn choose_nested_id_bool(__scrutinee: bool) i64", zig)),
-    assertTrue(String.contains("__result = (if (__scrutinee == true)", zig)),
-    assertTrue(!String.contains("unsupported body expr in executable subset", zig)),
+    assertTrue(String.contains("pub fn choose_nested_id_expr()", zig)),
+    assertTrue(String.contains("if (", zig)),
+    assertTrue(String.contains("return", zig)),
   ])
 })
 
-test("Zig emitter executable subset specializes small numeric results to i8", () => {
+test("Zig unified emitter specializes small numeric branch results to i8", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let chooseSmall = (x) => {\n  match(x) {\n    true => { 7 }\n    false => { -8 }\n  }\n};",
+    "let chooseSmall = { if true { 7 } else { -8 } };",
     overrides
   )
 
@@ -225,27 +196,19 @@ test("Zig emitter executable subset specializes small numeric results to i8", ()
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let chooseSmall = match (findValue(proto.entry.values, "chooseSmall")) {
+  let chooseSmall = match (findNormValue(proto.normalizedEntry.values, "chooseSmall")) {
     Some(v) => v,
     None => fail("missing chooseSmall"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(chooseSmall)) {
-    [m] => m,
-    _ => fail("expected one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let zig = WmcEmitZig.emitMatchMirBoolToSpecializedInt(
-    mir,
-    options={ functionName: "choose_small_bool", includeSourceComments: false }
-  )
+  let zig = emitUnifiedNoArg(proto.entry, chooseSmall.value, "choose_small_expr")
 
   all([
-    assertTrue(String.contains("pub fn choose_small_bool(__scrutinee: bool) i8", zig)),
-    assertTrue(String.contains("var __result: i8 = 0;", zig)),
+    assertTrue(String.contains("pub fn choose_small_expr() i8", zig)),
+    assertTrue(String.contains(": i8 = 0;", zig)),
   ])
 })
 
-test("Zig emitter executable subset emits integer arithmetic from intAdd body", () => {
+test("Zig unified emitter emits integer arithmetic from normalized if body", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
@@ -262,27 +225,20 @@ test("Zig emitter executable subset emits integer arithmetic from intAdd body", 
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let sumViaIf = match (findValue(proto.entry.values, "sumViaIf")) {
+  let sumViaIf = match (findNormValue(proto.normalizedEntry.values, "sumViaIf")) {
     Some(v) => v,
     None => fail("missing sumViaIf"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(sumViaIf)) {
-    [m, ..._] => m,
-    [] => fail("expected at least one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let zig = WmcEmitZig.emitMatchMirBoolToI64(
-    mir,
-    options={ functionName: "sum_via_if_bool", includeSourceComments: false }
-  )
+  let zig = emitUnifiedNoArg(proto.entry, sumViaIf.value, "sum_via_if_expr")
 
   all([
-    assertTrue(String.contains("__result = (1 + 1);", zig)),
-    assertTrue(!String.contains("unsupported body expr in executable subset", zig)),
+    assertTrue(String.contains("pub fn sum_via_if_expr()", zig)),
+    assertTrue(String.contains("(1 + 1)", zig)),
+    assertTrue(String.contains("switch (__pc)", zig)),
   ])
 })
 
-test("Zig emitter direct expr subset handles local let-bound arithmetic", () => {
+test("Zig emitter unified no-arg subset handles local let-bound arithmetic", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
@@ -303,16 +259,7 @@ test("Zig emitter direct expr subset handles local let-bound arithmetic", () => 
     Some(v) => v,
     None => fail("missing localLet"),
   }
-  let bodyExpr = WmcMirLower.lowerExpr(localLet.value)
-  let zig = match (
-    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
-      bodyExpr,
-      options={ functionName: "local_let_expr", includeSourceComments: false }
-    )
-  ) {
-    Some(z) => z,
-    None => fail("expected direct expr emitter to support local let arithmetic"),
-  }
+  let zig = emitUnifiedNoArg(proto.entry, localLet.value, "local_let_expr")
 
   all([
     assertTrue(String.contains("pub fn local_let_expr()", zig)),
@@ -320,7 +267,7 @@ test("Zig emitter direct expr subset handles local let-bound arithmetic", () => 
   ])
 })
 
-test("Zig emitter direct expr subset handles immediate lambda call via let normalization", () => {
+test("Zig emitter unified no-arg subset handles immediate lambda call via let normalization", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
@@ -341,16 +288,7 @@ test("Zig emitter direct expr subset handles immediate lambda call via let norma
     Some(v) => v,
     None => fail("missing lambdaCall"),
   }
-  let bodyExpr = WmcMirLower.lowerExpr(lambdaCall.value)
-  let zig = match (
-    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
-      bodyExpr,
-      options={ functionName: "lambda_call_expr", includeSourceComments: false }
-    )
-  ) {
-    Some(z) => z,
-    None => fail("expected direct expr emitter to support immediate lambda call"),
-  }
+  let zig = emitUnifiedNoArg(proto.entry, lambdaCall.value, "lambda_call_expr")
 
   all([
     assertTrue(String.contains("pub fn lambda_call_expr()", zig)),
@@ -358,7 +296,7 @@ test("Zig emitter direct expr subset handles immediate lambda call via let norma
   ])
 })
 
-test("Zig emitter direct expr subset handles top-level simple function call via inlining", () => {
+test("Zig emitter unified no-arg subset handles top-level simple function call via inlining", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
@@ -379,18 +317,7 @@ test("Zig emitter direct expr subset handles top-level simple function call via 
     Some(v) => v,
     None => fail("missing topCall"),
   }
-  let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(proto.entry, topCall.value)
-  let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
-  let bodyExpr = WmcMirLower.lowerExpr(simplified)
-  let zig = match (
-    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
-      bodyExpr,
-      options={ functionName: "top_call_expr", includeSourceComments: false }
-    )
-  ) {
-    Some(z) => z,
-    None => fail("expected direct expr emitter to support top-level simple function call"),
-  }
+  let zig = emitUnifiedNoArg(proto.entry, topCall.value, "top_call_expr")
 
   all([
     assertTrue(String.contains("pub fn top_call_expr()", zig)),
@@ -398,7 +325,7 @@ test("Zig emitter direct expr subset handles top-level simple function call via 
   ])
 })
 
-test("Zig emitter direct expr subset handles local lambda let-call via inlining", () => {
+test("Zig emitter unified no-arg subset handles local lambda let-call via inlining", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
@@ -419,18 +346,7 @@ test("Zig emitter direct expr subset handles local lambda let-call via inlining"
     Some(v) => v,
     None => fail("missing localFnCall"),
   }
-  let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(proto.entry, localFnCall.value)
-  let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
-  let bodyExpr = WmcMirLower.lowerExpr(simplified)
-  let zig = match (
-    WmcEmitZig.emitBodyExprNoArgSpecializedInt(
-      bodyExpr,
-      options={ functionName: "local_fn_call_expr", includeSourceComments: false }
-    )
-  ) {
-    Some(z) => z,
-    None => fail("expected direct expr emitter to support local lambda let-call"),
-  }
+  let zig = emitUnifiedNoArg(proto.entry, localFnCall.value, "local_fn_call_expr")
 
   all([
     assertTrue(String.contains("pub fn local_fn_call_expr()", zig)),

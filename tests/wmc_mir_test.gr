@@ -3,20 +3,20 @@ module WmcMirTest
 from "../submodules/graintest/lib/test.gr" include Test
 use Test.*
 
-from "list" include List
 from "map" include Map
+from "list" include List
 
 from "../src/backend/wmc/driver.gr" include WmcDriver
 from "../src/backend/wmc/match_lower.gr" include WmcMatchLower
 from "../src/backend/wmc/mir.gr" include WmcMir
 from "../src/backend/wmc/mir_lower.gr" include WmcMirLower
-from "../src/backend/wmc/tcore.gr" include WmcTCore
+from "../src/backend/wmc/tcore_norm.gr" include WmcTCoreNorm
 from "../src/module/module_system.gr" include ModuleSystem
 
 setSourceFile("./tests/wmc_mir_test.gr")
 
-let findValue = (items: List<WmcTCore.TopValueBinding>, target: String) => {
-  let rec loop = (rest: List<WmcTCore.TopValueBinding>) =>
+let findNormValue = (items: List<WmcTCoreNorm.TopValueBinding>, target: String) => {
+  let rec loop = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
     match (rest) {
       [] => None,
       [item, ...tail] =>
@@ -29,86 +29,48 @@ let findValue = (items: List<WmcTCore.TopValueBinding>, target: String) => {
   loop(items)
 }
 
-let rec hasSwitchCtor = (blocks: List<WmcMir.Block>) =>
-  match (blocks) {
-    [] => false,
-    [block, ...tail] =>
-      match (block.term) {
-        WmcMir.SwitchConstructor(_, _) => true,
-        _ => hasSwitchCtor(tail),
-      },
+let unwrapMainThunk = (value: WmcTCoreNorm.Expr) =>
+  match (value.kind) {
+    WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName => body,
+    _ => value,
   }
 
-let rec hasGuard = (blocks: List<WmcMir.Block>) =>
+let rec hasBinOpAdd = (blocks: List<WmcMir.UnifiedBlock>) =>
   match (blocks) {
     [] => false,
-    [block, ...tail] =>
-      match (block.term) {
-        WmcMir.Guard(_, _, _) => true,
-        _ => hasGuard(tail),
-      },
-  }
-
-let rec hasSelectClause = (blocks: List<WmcMir.Block>) =>
-  match (blocks) {
-    [] => false,
-    [block, ...tail] =>
-      match (block.term) {
-        WmcMir.SelectClause(_) => true,
-        WmcMir.SelectExpr(_, _) => true,
-        _ => hasSelectClause(tail),
-      },
-  }
-
-let rec hasSelectExpr = (blocks: List<WmcMir.Block>) =>
-  match (blocks) {
-    [] => false,
-    [block, ...tail] =>
-      match (block.term) {
-        WmcMir.SelectExpr(_, _) => true,
-        _ => hasSelectExpr(tail),
-      },
-  }
-
-let rec hasBindInstr = (blocks: List<WmcMir.Block>) =>
-  match (blocks) {
-    [] => false,
-    [block, ...tail] => {
-      let thisBlockHas = match (block.instrs) {
-        [WmcMir.Bind(_), ..._] => true,
-        _ => false,
+    [b, ...tail] => {
+      let rec hasAddAssign = (assigns: List<WmcMir.UnifiedAssign>) =>
+        match (assigns) {
+          [] => false,
+          [a, ...rest] =>
+            match (a.rhs) {
+              WmcMir.URBinOp("+", _, _) => true,
+              _ => hasAddAssign(rest),
+            },
+        }
+      if (hasAddAssign(b.assigns)) {
+        true
+      } else {
+        hasBinOpAdd(tail)
       }
-      thisBlockHas || hasBindInstr(tail)
     },
   }
 
-let rec bodyExprHasNestedMatch = (expr: WmcMir.BodyExpr) =>
-  match (expr) {
-    WmcMir.BELit(_) => false,
-    WmcMir.BEIdent(_) => false,
-    WmcMir.BEApply(callee, arg) => bodyExprHasNestedMatch(callee) || bodyExprHasNestedMatch(arg),
-    WmcMir.BELet(_, valueExpr, bodyExpr) =>
-      bodyExprHasNestedMatch(valueExpr) || bodyExprHasNestedMatch(bodyExpr),
-    WmcMir.BETuple(items) => List.some(bodyExprHasNestedMatch, items),
-    WmcMir.BEMatch(_) => true,
-    WmcMir.BEUnknown(_) => false,
-  }
-
-let rec hasNestedMatchBody = (blocks: List<WmcMir.Block>) =>
+let rec hasUnifiedCfgBranch = (blocks: List<WmcMir.UnifiedBlock>) =>
   match (blocks) {
     [] => false,
-    [block, ...tail] =>
-      match (block.term) {
-        WmcMir.SelectExpr(_, bodyExpr) => bodyExprHasNestedMatch(bodyExpr) || hasNestedMatchBody(tail),
-        _ => hasNestedMatchBody(tail),
+    [b, ...tail] =>
+      match (b.term) {
+        WmcMir.UTBranchBool(_, _, _) => true,
+        _ => hasUnifiedCfgBranch(tail),
       },
   }
 
-test("MIR lowering builds CFG blocks for constructor match with guard", () => {
+test("Unified MIR CFG lowering emits bool branch for normalized if expression", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let classify = (x) => {\n  match(x) {\n    Some(v) when cond(v) => { first(v) }\n    Some(v) => { second(v) }\n    _ => { fallback(x) }\n  }\n};",
+    "let main = => { if true { 1 + 1 } else { 0 } };",
     overrides
   )
 
@@ -121,41 +83,57 @@ test("MIR lowering builds CFG blocks for constructor match with guard", () => {
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let classify = match (findValue(proto.entry.values, "classify")) {
+  let main = match (findNormValue(proto.normalizedEntry.values, "main")) {
     Some(v) => v,
-    None => fail("missing classify"),
+    None => fail("missing main"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(classify)) {
-    [m] => m,
-    _ => fail("expected one match"),
-  }
-  let mir = WmcMirLower.lowerMatch(lowered)
-  let entryBlock = match (WmcMir.findBlock(mir, mir.entry)) {
-    Some(block) => block,
-    None => fail("missing MIR entry block"),
+  let expr = unwrapMainThunk(main.value)
+  let cfg = match (WmcMirLower.lowerExprToCfgNoArg(expr)) {
+    Some(c) => c,
+    None => fail("expected unified lowering to succeed"),
   }
 
-  let entryLooksLikeSwitch = match (entryBlock.term) {
-    WmcMir.SwitchConstructor([( "Some", _)], _) => true,
-    _ => false,
+  assertTrue(hasUnifiedCfgBranch(cfg.blocks))
+})
+
+test("Unified MIR lowering supports local lambda let-call", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let main = => { let f = (x) => { x + 2 }; f(3) };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let main = match (findNormValue(proto.normalizedEntry.values, "main")) {
+    Some(v) => v,
+    None => fail("missing main"),
+  }
+  let expr = unwrapMainThunk(main.value)
+  let cfg = match (WmcMirLower.lowerExprToCfgNoArg(expr)) {
+    Some(c) => c,
+    None => fail("expected unified lowering to succeed"),
   }
 
   all([
-    assertTrue(entryLooksLikeSwitch),
-    assertTrue(List.length(mir.blocks) > 4),
-    assertTrue(hasSwitchCtor(mir.blocks)),
-    assertTrue(hasGuard(mir.blocks)),
-    assertTrue(hasSelectClause(mir.blocks)),
-    assertTrue(hasSelectExpr(mir.blocks)),
-    assertTrue(hasBindInstr(mir.blocks)),
+    assertTrue(List.length(cfg.blocks) > 0),
+    assertTrue(hasBinOpAdd(cfg.blocks)),
   ])
 })
 
-test("MIR body lowering preserves normalized nested match (from if)", () => {
+test("Unified MIR CFG lowering creates branch/goto control-flow blocks", () => {
   let overrides = Map.make()
   Map.set(
     "entry.wm",
-    "let classify = (x) => {\n  match(x) {\n    Some(v) => { if cond(v) { first(v) } else { second(v) } }\n    _ => { fallback(x) }\n  }\n};",
+    "let main = => { if true { 1 + 1 } else { 0 } };",
     overrides
   )
 
@@ -168,15 +146,57 @@ test("MIR body lowering preserves normalized nested match (from if)", () => {
     Ok(p) => p,
     Err(msg) => fail(msg),
   }
-  let classify = match (findValue(proto.entry.values, "classify")) {
+  let main = match (findNormValue(proto.normalizedEntry.values, "main")) {
     Some(v) => v,
-    None => fail("missing classify"),
+    None => fail("missing main"),
   }
-  let lowered = match (WmcMatchLower.findMatchesInTopValue(classify)) {
-    [m] => m,
-    _ => fail("expected one match"),
+  let expr = unwrapMainThunk(main.value)
+  let cfg = match (WmcMirLower.lowerExprToCfgNoArg(expr)) {
+    Some(c) => c,
+    None => fail("expected unified lowering to succeed"),
   }
-  let mir = WmcMirLower.lowerMatch(lowered)
 
-  assertTrue(hasNestedMatchBody(mir.blocks))
+  all([
+    assertTrue(List.length(cfg.blocks) > 0),
+    assertTrue(hasUnifiedCfgBranch(cfg.blocks)),
+    assertTrue(WmcMir.findUnifiedBlock(cfg, cfg.entry) != None),
+  ])
+})
+
+test("Match CFG bridge lowers normalized bool match into unified CFG", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "let main = => { match(true) { true => { 1 } false => { 2 } } };",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+  let main = match (findNormValue(proto.normalizedEntry.values, "main")) {
+    Some(v) => v,
+    None => fail("missing main"),
+  }
+  let expr = unwrapMainThunk(main.value)
+  let cfg = match (expr.kind) {
+    WmcTCoreNorm.NEMatch(m) =>
+      match (WmcMatchLower.lowerNormalizedMatchToUnifiedCfg(m)) {
+        Some(c) => c,
+        None => fail("expected bool match to lower to CFG"),
+      },
+    _ => fail("expected normalized main body to be match"),
+  }
+
+  all([
+    assertTrue(List.length(cfg.blocks) > 0),
+    assertTrue(hasUnifiedCfgBranch(cfg.blocks)),
+    assertTrue(WmcMir.findUnifiedBlock(cfg, cfg.entry) != None),
+  ])
 })

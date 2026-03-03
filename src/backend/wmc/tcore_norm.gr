@@ -71,6 +71,9 @@ provide record Module {
 provide enum NormalizationIssueKind {
   UnsupportedMatchBundleInclude(String),
   UnsupportedMatchBundleHole,
+  BackendUnknownExpr(String),
+  BackendNonCanonicalIntrinsicOp(String),
+  BackendMainNotZeroArgThunk,
 }
 
 provide record NormalizationIssue {
@@ -113,6 +116,17 @@ let mapOption = (opt, fn) => match (opt) {
   Some(v) => Some(fn(v)),
 }
 
+let canonicalizeIntrinsicOpName = (name: String) =>
+  if (name == "intAdd") {
+    "+"
+  } else if (name == "intSub") {
+    "-"
+  } else if (name == "intMul") {
+    "*"
+  } else {
+    name
+  }
+
 let rec _normalizePattern = (pattern: WmcTCore.Pattern) => {
   let kind = match (pattern.kind) {
     WmcTCore.PMark(_, inner) => {
@@ -149,7 +163,7 @@ let rec normalizeExpr = (expr: WmcTCore.Expr) => {
         innerNorm.kind
       },
       WmcTCore.ELit(lit) => NELit(lit),
-      WmcTCore.EIdent(name) => NEIdent(name),
+      WmcTCore.EIdent(name) => NEIdent(canonicalizeIntrinsicOpName(name)),
       WmcTCore.EApply(callee, arg) => NEApply(normalizeExpr(callee), normalizeExpr(arg)),
       WmcTCore.ELet(binding, body) =>
         match (_normalizePattern(binding.name).kind) {
@@ -406,13 +420,122 @@ let findNormalizationIssuesInExpr = (expr: WmcTCore.Expr) =>
 let findNormalizationIssuesInTopValue = (binding: WmcTCore.TopValueBinding) =>
   findNormalizationIssuesInExpr(binding.binding.value)
 
+let backendIssue = (node: WmcTCore.TypedNode, kind: NormalizationIssueKind, message: String) =>
+  { node, kind, message }: NormalizationIssue
+
+let isNonCanonicalIntrinsicOp = (name: String) =>
+  name == "intAdd" || name == "intSub" || name == "intMul"
+
+let rec backendNormalFormIssuesInExprAcc = (expr: Expr, accRev: List<NormalizationIssue>) => {
+  let withCurrent = match (expr.kind) {
+    NEUnknown(tag) =>
+      [
+        backendIssue(
+          expr.node,
+          BackendUnknownExpr(tag),
+          "backend normalized expression contains NEUnknown(" ++ tag ++ ")",
+        ),
+        ...accRev,
+      ],
+    NEIdent(name) =>
+      if (isNonCanonicalIntrinsicOp(name)) {
+        [
+          backendIssue(
+            expr.node,
+            BackendNonCanonicalIntrinsicOp(name),
+            "backend normalized expression uses non-canonical intrinsic op name: " ++ name
+              ++ " (use +, -, *)",
+          ),
+          ...accRev,
+        ]
+      } else {
+        accRev
+      },
+    _ => accRev,
+  }
+  match (expr.kind) {
+    NELit(_) => withCurrent,
+    NEIdent(_) => withCurrent,
+    NEUnknown(_) => withCurrent,
+    NEApply(callee, arg) => {
+      let acc1 = backendNormalFormIssuesInExprAcc(callee, withCurrent)
+      backendNormalFormIssuesInExprAcc(arg, acc1)
+    },
+    NELet(_, valueExpr, bodyExpr) => {
+      let acc1 = backendNormalFormIssuesInExprAcc(valueExpr, withCurrent)
+      backendNormalFormIssuesInExprAcc(bodyExpr, acc1)
+    },
+    NELambda(_, bodyExpr) => backendNormalFormIssuesInExprAcc(bodyExpr, withCurrent),
+    NETuple(items) => backendNormalFormIssuesInExprListAcc(items, withCurrent),
+    NEMatch(m) => {
+      let acc1 = backendNormalFormIssuesInExprAcc(m.scrutinee, withCurrent)
+      backendNormalFormIssuesInClausesAcc(m.clauses, acc1)
+    },
+  }
+}
+and backendNormalFormIssuesInExprListAcc = (items: List<Expr>, accRev: List<NormalizationIssue>) =>
+  match (items) {
+    [] => accRev,
+    [item, ...tail] =>
+      backendNormalFormIssuesInExprListAcc(tail, backendNormalFormIssuesInExprAcc(item, accRev)),
+  }
+and backendNormalFormIssuesInClausesAcc = (
+  clauses: List<MatchClause>,
+  accRev: List<NormalizationIssue>,
+) =>
+  match (clauses) {
+    [] => accRev,
+    [clause, ...tail] => {
+      let acc1 = match (clause.guard) {
+        None => accRev,
+        Some(g) => backendNormalFormIssuesInExprAcc(g, accRev),
+      }
+      let acc2 = backendNormalFormIssuesInExprAcc(clause.body, acc1)
+      backendNormalFormIssuesInClausesAcc(tail, acc2)
+    },
+  }
+
+provide let findBackendNormalFormIssuesInExpr = (expr: Expr) =>
+  List.reverse(backendNormalFormIssuesInExprAcc(expr, []))
+
+let findBackendNormalFormIssuesInTopValue = (binding: TopValueBinding) => {
+  let valueIssues = findBackendNormalFormIssuesInExpr(binding.value)
+  let mainShapeIssues = if (binding.name == "main") {
+    match (binding.value.kind) {
+      NELambda(param, _) when param == zeroArgThunkParamName => [],
+      _ =>
+        [
+          backendIssue(
+            binding.node,
+            BackendMainNotZeroArgThunk,
+            "backend expects canonical main thunk: let main = => { ... }",
+          ),
+        ],
+    }
+  } else {
+    []
+  }
+  List.append(mainShapeIssues, valueIssues)
+}
+
+provide let findBackendNormalFormIssuesInModule = (m: Module) =>
+  List.flatten(List.map(findBackendNormalFormIssuesInTopValue, m.values))
+
+provide let assertBackendNormalFormExpr = (expr: Expr) =>
+  List.length(findBackendNormalFormIssuesInExpr(expr)) == 0
+
+provide let assertBackendNormalFormModule = (m: Module) =>
+  List.length(findBackendNormalFormIssuesInModule(m)) == 0
+
 let _normModuleDetailed = (m: WmcTCore.Module) => {
-  let issues = List.flatten(
+  let normalizationIssues = List.flatten(
     List.map((binding: WmcTCore.TopValueBinding) => findNormalizationIssuesInTopValue(binding), m.values)
   )
+  let normalized = normalizeModule(m)
+  let backendNormalFormIssues = findBackendNormalFormIssuesInModule(normalized)
   {
-    normalized: normalizeModule(m),
-    issues,
+    normalized,
+    issues: List.append(normalizationIssues, backendNormalFormIssues),
   }: NormalizedModuleResult
 }
 provide let normalizeModuleDetailed = _normModuleDetailed
