@@ -209,6 +209,7 @@ let collectAssignedNamesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
 record LinearTrace {
   blocks: List<WmcMir.UnifiedBlock>,
   assigns: List<WmcMir.UnifiedAssign>,
+  effects: List<WmcMir.UnifiedEffectCall>,
   returnName: String,
 }
 
@@ -218,6 +219,7 @@ let tryCollectLinearTrace = (cfg: WmcMir.UnifiedCfgFunction) => {
     visited: List<Number>,
     blocksRev: List<WmcMir.UnifiedBlock>,
     assignsRev: List<WmcMir.UnifiedAssign>,
+    effectsRev: List<WmcMir.UnifiedEffectCall>,
   ) =>
     if (containsNumber(visited, currentId)) {
       None
@@ -225,27 +227,25 @@ let tryCollectLinearTrace = (cfg: WmcMir.UnifiedCfgFunction) => {
       match (WmcMir.findUnifiedBlock(cfg, currentId)) {
         None => None,
         Some(block) => {
-          if (block.effects != []) {
-            None
-          } else {
           let nextAssignsRev = List.append(List.reverse(block.assigns), assignsRev)
+          let nextEffectsRev = List.append(List.reverse(block.effects), effectsRev)
           let nextBlocksRev = [block, ...blocksRev]
           match (block.term) {
             WmcMir.UTGoto(nextId) =>
-              loop(nextId, [currentId, ...visited], nextBlocksRev, nextAssignsRev),
+              loop(nextId, [currentId, ...visited], nextBlocksRev, nextAssignsRev, nextEffectsRev),
             WmcMir.UTReturn(name) =>
               Some({
                 blocks: List.reverse(nextBlocksRev),
                 assigns: List.reverse(nextAssignsRev),
+                effects: List.reverse(nextEffectsRev),
                 returnName: name,
               }: LinearTrace),
             _ => None,
           }
-          }
         },
       }
     }
-  loop(cfg.entry, [], [], [])
+  loop(cfg.entry, [], [], [], [])
 }
 
 enum UnifiedLocalTy {
@@ -374,6 +374,8 @@ let referencedVarsInRValue = (rhs: WmcMir.UnifiedRValue) =>
     WmcMir.URBinOp(_op, left, right) => [left, right],
     WmcMir.URTuple(items) => items,
   }
+
+let referencedVarsInEffect = (fx: WmcMir.UnifiedEffectCall) => [fx.arg]
 
 let cfgUsesBuiltinPrint = (blocks: List<WmcMir.UnifiedBlock>) =>
   List.some(
@@ -552,16 +554,26 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
       let localTypes = inferUnifiedLocalTypes(trace.blocks, assigned)
       let usedNames = dedupeStrings(
         List.append(
-          List.flatten(List.map((a: WmcMir.UnifiedAssign) => referencedVarsInRValue(a.rhs), trace.assigns)),
+          List.append(
+            List.flatten(List.map((a: WmcMir.UnifiedAssign) => referencedVarsInRValue(a.rhs), trace.assigns)),
+            List.flatten(
+              List.map((fx: WmcMir.UnifiedEffectCall) => referencedVarsInEffect(fx), trace.effects)
+            ),
+          ),
           if (resultTy == "void") { [] } else { [trace.returnName] }
         )
       )
-      let constLines = List.map((a: WmcMir.UnifiedAssign) => {
-        let zigName = lookupNameMap(mapping, a.name)
-        let tyName = localTyName(lookupLocalTy(localTypes, a.name), localValueTy)
-        let rhsText = emitUnifiedRValue(a.rhs, mapping)
-        indent("const " ++ zigName ++ ": " ++ tyName ++ " = " ++ rhsText ++ ";")
-      }, trace.assigns)
+      let blockLines = List.flatten(List.map((b: WmcMir.UnifiedBlock) => {
+        let effectLines = List.map((fx: WmcMir.UnifiedEffectCall) =>
+          indent(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");"), b.effects)
+        let constLines = List.map((a: WmcMir.UnifiedAssign) => {
+          let zigName = lookupNameMap(mapping, a.name)
+          let tyName = localTyName(lookupLocalTy(localTypes, a.name), localValueTy)
+          let rhsText = emitUnifiedRValue(a.rhs, mapping)
+          indent("const " ++ zigName ++ ": " ++ tyName ++ " = " ++ rhsText ++ ";")
+        }, b.assigns)
+        List.append(effectLines, constLines)
+      }, trace.blocks))
       let discardLines = List.filterMap((a: WmcMir.UnifiedAssign) => {
         if (containsString(usedNames, a.name)) {
           None
@@ -581,10 +593,10 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
         "\n",
         List.append(
           [
-            "// WMC Zig emitter (unified MIR linear no-arg -> specialized int)",
+            "// WMC Zig emitter",
             "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
           ],
-          List.append(List.append(constLines, discardLines), [returnLine, "}"]),
+          List.append(List.append(blockLines, discardLines), [returnLine, "}"]),
         ),
       )
     },
@@ -608,7 +620,7 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
         "\n",
         List.append(
           [
-            "// WMC Zig emitter (unified MIR CFG no-arg -> specialized int)",
+            "// WMC Zig emitter",
             "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
             indent("var __pc: i32 = " ++ toString(cfg.entry) ++ ";"),
           ],
