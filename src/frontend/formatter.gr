@@ -309,6 +309,7 @@ let renderWithSettingsWithTokens = (
         Some(e) => exprHasHole(e),
         None => false,
       } || fnHasHole(matchExpr.bundle),
+    SurfaceAst.ArrowPrefix(ap) => exprHasHole(ap.body),
     SurfaceAst.Apply(callee, arg) => exprHasHole(callee) || exprHasHole(arg),
     SurfaceAst.InfixChain(chain) =>
       exprHasHole(chain.first) || anyInfixRest(chain.rest),
@@ -476,6 +477,7 @@ let renderWithSettingsWithTokens = (
         None => false,
       }
         || anyFnItemMissingRBrace(matchExpr.bundle.items),
+    SurfaceAst.ArrowPrefix(ap) => exprHasMissingRBrace(ap.body),
     SurfaceAst.Apply(callee, arg) =>
       exprHasMissingRBrace(callee) || exprHasMissingRBrace(arg),
     SurfaceAst.InfixChain(chain) =>
@@ -1145,6 +1147,21 @@ let renderWithSettingsWithTokens = (
             }
           }
           emitRest(chain.rest)
+        },
+        SurfaceAst.ArrowPrefix(ap) => {
+          if (mode == Virtual && settings.allowVirtualInsertions) {
+            emitVirtual(
+              "()",
+              expr.node.span.start,
+              "inferred unit parameter",
+              SurfaceAst.OptionalCanonical,
+              None
+            )
+          }
+          space()
+          write("=>")
+          space()
+          emitExpr(ap.body)
         },
         SurfaceAst.Apply(callee, arg) => {
           match ((callee.kind, arg.kind)) {

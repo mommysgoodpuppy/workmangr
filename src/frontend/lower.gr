@@ -475,6 +475,17 @@ and lowerPipe = (
     _ => makeExpr(exprNode, CoreAst.Apply(loweredRhs, loweredLhs)),
   }
 }
+and lowerArrowPrefix = (
+  exprNode: SurfaceAst.Node,
+  body: SurfaceAst.Expr,
+) => {
+  let unitExpr: SurfaceAst.Expr = {
+    node: exprNode,
+    kind: SurfaceAst.Lit(SurfaceAst.Unit),
+    attach: { leading: [], trailing: [], dangling: [] },
+  }
+  lowerArrow(exprNode, unitExpr, body)
+}
 and lowerMatchExpr = (exprNode: SurfaceAst.Node, m: SurfaceAst.MatchExpr) => {
   let loweredBundle = lowerFnExpr(m.bundle)
   let bundleExpr = makeExpr(m.bundle.node, CoreAst.Fn(loweredBundle))
@@ -665,6 +676,7 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
     SurfaceAst.Block(block) => lowerExpr(block.body),
     SurfaceAst.Assign(asg) => lowerAssignExpr(expr.node, asg),
     SurfaceAst.Postfix(pf) => lowerPostfix(expr.node, pf),
+    SurfaceAst.ArrowPrefix(ap) => lowerArrowPrefix(expr.node, ap.body),
     SurfaceAst.InfixChain(chain) => {
       match (chain) {
         { first, rest: [(op, rhs)] } when op.text == "=>" =>

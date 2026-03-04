@@ -246,3 +246,27 @@ Deno.test("wm compile emits void Zig main for void workman main", async () => {
     throw new Error(`expected print output "42", got ${JSON.stringify(output)}`);
   }
 });
+
+Deno.test("wm compile supports expression sequencing after print", async () => {
+  const result = await runViaCliRun(
+    `let main = => { print(42); 1 + 1 };`,
+  );
+  if (result.code !== 2) {
+    throw new Error(`expected exit code 2, got ${result.code}`);
+  }
+  if (!result.output.includes("42")) {
+    throw new Error(`expected printed 42, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm compile supports wildcard let discard in sequencing", async () => {
+  const result = await runViaCliRun(
+    `let main = => { let _ = print(7); 1 + 2 };`,
+  );
+  if (result.code !== 3) {
+    throw new Error(`expected exit code 3, got ${result.code}`);
+  }
+  if (!result.output.includes("7")) {
+    throw new Error(`expected printed 7, got ${JSON.stringify(result.output)}`);
+  }
+});

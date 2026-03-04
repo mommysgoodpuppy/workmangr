@@ -531,8 +531,8 @@ test("parser recovers lambda arrow body without braces", () => {
     [SurfaceAst.DeclGroup(group)] => match (group.decls) {
       [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
         [binding] => match (binding.value.kind) {
-          SurfaceAst.Fn(fnExpr) => match (fnExpr.items) {
-            [{ kind: SurfaceAst.Clause(clause), _ }] => match (clause.body.items) {
+          SurfaceAst.ArrowPrefix({ body: { kind: SurfaceAst.Block(block), _ } }) =>
+            match (block.items) {
               [
                 SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("{"), _ }),
                 SurfaceAst.ExprItem({ kind: SurfaceAst.Postfix(_), _ }),
@@ -540,8 +540,6 @@ test("parser recovers lambda arrow body without braces", () => {
               ] => true,
               _ => false,
             },
-            _ => false,
-          },
           _ => false,
         },
         _ => false,

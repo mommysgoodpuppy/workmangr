@@ -115,6 +115,11 @@ let rec visitExpr = (store: NS.NodeStore, expr: SurfaceAst.Expr) => {
       let store = visitExpr(store, arg)
       NS.addChild(store, expr.node.id, "arg", arg.node.id)
     },
+    SurfaceAst.ArrowPrefix(ap) => {
+      let store = NS.updatePreview(store, expr.node.id, "ArrowPrefix")
+      let store = visitExpr(store, ap.body)
+      NS.addChild(store, expr.node.id, "body", ap.body.node.id)
+    },
 
     SurfaceAst.InfixChain(chain) => {
       let store = NS.updatePreview(store, expr.node.id, "InfixChain")

@@ -1424,34 +1424,17 @@ and parseTerm: Parser<SurfaceAst.Expr> = state => {
       let (body, state3) = parseExpr(state2)
       let span = spanFromTokens(tok.span, body.node.span)
       let (bodyBlock, state4) = recoverArrowExprAsBlock(state3, body)
-      let (patId, state5) = freshId(state4)
-      let wildcardPat: SurfaceAst.Pattern = {
-        node: { id: patId, span: tok.span },
-        kind: Wildcard,
-        attach: { leading: [], trailing: [], dangling: [] },
+      let rhs: SurfaceAst.Expr = {
+        node: bodyBlock.node,
+        kind: SurfaceAst.Block(bodyBlock),
+        attach: body.attach,
       }
-      let (clauseId, state6) = freshId(state5)
-      let clause: SurfaceAst.FnClause = {
-        node: { id: clauseId, span },
-        param: wildcardPat,
-        guard: None,
-        body: bodyBlock,
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let (itemId, state7) = freshId(state6)
-      let item: SurfaceAst.FnItem = {
-        node: { id: itemId, span },
-        kind: SurfaceAst.Clause(clause),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let (fnExprId, state8) = freshId(state7)
-      let fnExpr: SurfaceAst.FnExpr = {
-        node: { id: fnExprId, span },
-        items: [item],
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let expr = makeExpr(id, span, Fn(fnExpr))
-      (expr, state8)
+      let expr = makeExpr(
+        id,
+        span,
+        ArrowPrefix({ body: rhs }),
+      )
+      (expr, state4)
     },
     _ => {
       let (expr, state1) = parsePrimary(state)
@@ -1979,35 +1962,18 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
       let state2 = dropToken(state1)
       let (bodyExpr, state3) = parseExpr(state2)
       let span = spanFromTokens(tok.span, bodyExpr.node.span)
-      let (patId, state4) = freshId(state3)
-      let pat: SurfaceAst.Pattern = {
-        node: { id: patId, span: tok.span },
-        kind: Wildcard,
-        attach: { leading: [], trailing: [], dangling: [] },
+      let (bodyBlock, state4) = recoverArrowExprAsBlock(state3, bodyExpr)
+      let rhs: SurfaceAst.Expr = {
+        node: bodyBlock.node,
+        kind: SurfaceAst.Block(bodyBlock),
+        attach: bodyExpr.attach,
       }
-      let (bodyBlock, state5) = recoverArrowExprAsBlock(state4, bodyExpr)
-      let (clauseId, state6) = freshId(state5)
-      let clause: SurfaceAst.FnClause = {
-        node: { id: clauseId, span },
-        param: pat,
-        guard: None,
-        body: bodyBlock,
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let (itemId, state7) = freshId(state6)
-      let item: SurfaceAst.FnItem = {
-        node: { id: itemId, span },
-        kind: SurfaceAst.Clause(clause),
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let (fnExprId, state8) = freshId(state7)
-      let fnExpr: SurfaceAst.FnExpr = {
-        node: { id: fnExprId, span },
-        items: [item],
-        attach: { leading: [], trailing: [], dangling: [] },
-      }
-      let expr = makeExpr(id, span, Fn(fnExpr))
-      (expr, state8)
+      let expr = makeExpr(
+        id,
+        span,
+        ArrowPrefix({ body: rhs }),
+      )
+      (expr, state4)
     },
     _ => {
       makeInferredExprHole(

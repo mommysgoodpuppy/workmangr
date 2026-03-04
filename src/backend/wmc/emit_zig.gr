@@ -391,6 +391,9 @@ let cfgUsesBuiltinPrint = (blocks: List<WmcMir.UnifiedBlock>) =>
     blocks
   )
 
+let cfgHasEffects = (blocks: List<WmcMir.UnifiedBlock>) =>
+  List.some((block: WmcMir.UnifiedBlock) => block.effects != [], blocks)
+
 let emitBuiltinPrelude = (usesPrint: Bool) =>
   if (usesPrint) {
     joinStrings(
@@ -541,9 +544,14 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
   options: EmitOptions=defaultOptions(),
 ) => {
   let fnNameBase = sanitizeLocalBase(options.functionName)
-  let resultTy = match (options.resultType) {
+  let inferredResultTy = match (options.resultType) {
     Some(name) => name,
     None => inferIntTypeNameFromUnifiedCfg(cfg.blocks),
+  }
+  let resultTy = if (inferredResultTy == "comptime_int" && cfgHasEffects(cfg.blocks)) {
+    inferIntTypeNameFromUnifiedCfg(cfg.blocks)
+  } else {
+    inferredResultTy
   }
   let localValueTy = if (resultTy == "void") { "u8" } else { resultTy }
   let prelude = emitBuiltinPrelude(cfgUsesBuiltinPrint(cfg.blocks))

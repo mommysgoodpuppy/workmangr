@@ -168,6 +168,7 @@ let rec normalizeExpr = (expr: WmcTCore.Expr) => {
       WmcTCore.ELet(binding, body) =>
         match (_normalizePattern(binding.name).kind) {
           NPVar(name) => NELet(name, normalizeExpr(binding.value), normalizeExpr(body)),
+          NPWildcard => NELet("_", normalizeExpr(binding.value), normalizeExpr(body)),
           _ => NEUnknown("let_pattern"),
         },
       WmcTCore.EFn(fnExpr) =>

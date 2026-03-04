@@ -66,6 +66,7 @@ provide enum rec ExprKind {
   Fn(FnExpr),
   Match(MatchExpr),
   Apply(Expr, Expr), // callee, single arg
+  ArrowPrefix(ArrowPrefixExpr), // `=> body`
   InfixChain(InfixChain),
   Postfix(Postfix),
   Block(Block),
@@ -108,6 +109,9 @@ and provide record Postfix {
 and provide record InfixChain {
   first: Expr,
   rest: List<(Name, /*op*/ Expr)>,
+}
+and provide record ArrowPrefixExpr {
+  body: Expr,
 }
 and provide record Block {
   node: Node,
