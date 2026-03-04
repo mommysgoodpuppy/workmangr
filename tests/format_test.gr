@@ -723,5 +723,17 @@ export type GenericError =
   assertEquals(canonicalNonWs(source), canonicalNonWs(virtualOut))
 })
 
+test("virtual formatter emits inferred hole as virtual artifact", () => {
+  let source = "let thing = "
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let inferredHoleArtifacts = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "?" && artifact.reason == "inferred hole",
+    result.virtualArtifacts
+  )
+  assertTrue(List.length(inferredHoleArtifacts) > 0)
+  assertEquals(canonicalNonWs("let thing = ?;"), canonicalNonWs(result.text))
+})
+
 let results = runTests()
 printResultsAndExit(results)

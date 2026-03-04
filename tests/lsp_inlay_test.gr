@@ -107,6 +107,29 @@ test("format inlays recover missing match-arm comma as separate token", () => {
   ])
 })
 
+test("format inlay preview keeps backend order for shared-anchor tokens", () => {
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}"
+  let hints = Inlay.formatInlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  let preview = Inlay.previewFromHintsJson(source, hints, true)
+  let hasBraceCommaOrder = String.contains("*}**,*", preview)
+  let hasCommaBraceOrder = String.contains("*,**}*", preview)
+  all([
+    assertTrue(hasBraceCommaOrder),
+    assertFalse(hasCommaBraceOrder),
+  ])
+})
+
 test("format inlays keep inferred hole before semicolon in missing let rhs", () => {
   let source = "let thing = "
   let hints = Inlay.formatInlayHintsForSource(
@@ -125,6 +148,28 @@ test("format inlays keep inferred hole before semicolon in missing let rhs", () 
   all([
     assertTrue(hasVirtualQ),
     assertTrue(hasVirtualSemi),
+    assertEquals(canonicalExpected, canonicalPreview),
+  ])
+})
+
+test("format inlays recover lambda arrow bare body to block", () => {
+  let source = "let main = => print(thing)"
+  let hints = Inlay.formatInlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  let preview = Inlay.previewFromHintsJson(source, hints, true)
+  let canonicalPreview = canonicalNonWs(preview)
+  let canonicalExpected = canonicalNonWs("let main = *()* => *{*print(thing)*}**;*")
+  let hasVirtualLBrace = String.contains("\"label\":\"{\"", hints)
+  let hasVirtualRBrace = String.contains("\"label\":\"}\"", hints)
+  all([
+    assertTrue(hasVirtualLBrace),
+    assertTrue(hasVirtualRBrace),
     assertEquals(canonicalExpected, canonicalPreview),
   ])
 })

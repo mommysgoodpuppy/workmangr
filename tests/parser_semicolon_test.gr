@@ -522,6 +522,50 @@ test("parser recovers match arrow clauses with non-block bodies", () => {
   assertTrue(missingBraceWarnings >= 4)
 })
 
+test("parser recovers lambda arrow body without braces", () => {
+  clearErrors()
+  let source = "let main = => print(thing)"
+  let parsed = Parser.parse(source)
+
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Fn(fnExpr) => match (fnExpr.items) {
+            [{ kind: SurfaceAst.Clause(clause), _ }] => match (clause.body.items) {
+              [
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("{"), _ }),
+                SurfaceAst.ExprItem({ kind: SurfaceAst.Postfix(_), _ }),
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("}"), _ }),
+              ] => true,
+              _ => false,
+            },
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+
+  let marked = getMarkedErrors()
+  let missingBraceWarnings = List.length(List.filter(
+    (entry: Error.MarkedError) => match (entry) {
+      { mark, error } => match ((mark.kind, error.severity)) {
+        (SurfaceAst.MissingToken("{"), Error.Warning) => true,
+        (SurfaceAst.MissingToken("}"), Error.Warning) => true,
+        _ => false,
+      },
+    },
+    marked
+  ))
+  assertTrue(shapeOk)
+  assertTrue(missingBraceWarnings >= 2)
+})
+
 test("raw-like directives remain non-canonical in WMC parser mode", () => {
   clearErrors()
   let parsed = Parser.parse("@raw;\n@backend;\nlet x = 1;")
