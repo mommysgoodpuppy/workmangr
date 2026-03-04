@@ -1,0 +1,136 @@
+module WmcApi
+
+from "array" include Array
+from "list" include List
+from "path" include Path
+from "string" include String
+from "fs" include Fs
+from "wasi/process" include Process
+
+from "../module/module_system.gr" include ModuleSystem
+from "../backend/wmc/driver.gr" include WmcDriver
+from "../backend/wmc/mir_lower.gr" include WmcMirLower
+from "../backend/wmc/emit_zig.gr" include WmcEmitZig
+from "../backend/wmc/tcore.gr" include WmcTCore
+from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
+from "../backend/wmc/expr_inline.gr" include WmcExprInline
+from "../backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
+from "../core/types.gr" include Types
+from "../core/error.gr" include Error
+
+let escapeJson = (s: String) => {
+  let step1 = String.replaceAll("\\", "\\\\", s)
+  let step2 = String.replaceAll("\"", "\\\"", step1)
+  let step3 = String.replaceAll("\n", "\\n", step2)
+  let step4 = String.replaceAll("\r", "\\r", step3)
+  String.replaceAll("\t", "\\t", step4)
+}
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
+  let fatals = List.filter((diag: Error.CompilerError) => diag.severity == Error.SError, diagnostics)
+  if (fatals == []) {
+    "Backend compile aborted: fatal diagnostics present"
+  } else {
+    let lines = List.map((diag: Error.CompilerError) => Error.errorToString(diag), fatals)
+    "Backend compile aborted: fatal diagnostics present\n" ++ joinStrings("\n", lines)
+  }
+}
+
+let findCompilableMainExpr = (
+  rawModule: WmcTCore.Module,
+  values: List<WmcTCoreNorm.TopValueBinding>,
+) => {
+  let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [binding, ...tail] => if (binding.name == "main") {
+        Some(binding)
+      } else {
+        findMain(tail)
+      },
+    }
+
+  match (findMain(values)) {
+    None => None,
+    Some(binding) => {
+      let resultTypeName = match (binding.value.node.ty) {
+        Some(Types.TFun(_paramTy, returnTy)) => WmcEmitZig.zigTypeNameFromType(returnTy),
+        Some(ty) => WmcEmitZig.zigTypeNameFromType(ty),
+        None => "comptime_int",
+      }
+      let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
+      let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
+      let executableExpr = match (simplified.kind) {
+        WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
+          body,
+        _ => simplified,
+      }
+      match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
+        None => None,
+        Some(cfg) =>
+          Some(
+            WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
+              cfg,
+              options={
+                wmFunctionName: "__wm_main",
+                zigMainName: "main",
+                includeSourceComments: true,
+                resultType: Some(resultTypeName),
+              },
+            )
+          ),
+      }
+    },
+  }
+}
+
+let jsonSuccess = (zigSource: String) =>
+  "{\"success\":true,\"zigSource\":\"" ++ escapeJson(zigSource) ++ "\"}"
+
+let jsonFailure = (message: String) =>
+  "{\"success\":false,\"error\":\"" ++ escapeJson(message) ++ "\"}"
+
+provide let compileFileToJson = (filePath: String) => {
+  let options = ModuleSystem.defaultOptions()
+  match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
+    Err(msg) => jsonFailure(msg),
+    Ok(proto) => {
+      if (!WmcDriver.isBackendReadyEntry(proto)) {
+        jsonFailure(fatalDiagnosticSummary(proto.entry.diagnostics))
+      } else {
+        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values)) {
+          None =>
+            jsonFailure(
+              "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"
+            ),
+          Some(zigSource) => jsonSuccess(zigSource),
+        }
+      }
+    },
+  }
+}
+
+let main = () => {
+  match (Process.argv()) {
+    Err(_) => print(jsonFailure("Failed to read argv")),
+    Ok(args) => {
+      let argCount = Array.length(args)
+      if (argCount < 2) {
+        print(jsonFailure("Usage: grain --include-dirs src src/api/wmc_api.gr -- <file.wm>"))
+      } else {
+        let filePath = Array.get(1, args)
+        match (Fs.Utf8.readFile(Path.fromString(filePath))) {
+          Err(_) => print(jsonFailure("Failed to read file: " ++ filePath)),
+          Ok(_source) => print(compileFileToJson(filePath)),
+        }
+      }
+    },
+  }
+}
+
+main()
