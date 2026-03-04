@@ -1,0 +1,11 @@
+module TestParser
+
+from "./frontend/parser.gr" include Parser
+from "./core/ast.gr" include Ast
+
+let testSource = "let x = match(x) => { 1 => { \"T\" }, _ => { \"F\" } };"
+
+print("Before parse")
+let ast = Parser.parse(testSource)
+print("After parse")
+print("Parsed successfully")

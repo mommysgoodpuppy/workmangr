@@ -1,0 +1,121 @@
+module CompileCli
+
+from "list" include List
+from "fs" include Fs
+from "path" include Path
+from "string" include String
+
+from "../module/module_system.gr" include ModuleSystem
+from "../backend/wmc/driver.gr" include WmcDriver
+from "../backend/wmc/mir_lower.gr" include WmcMirLower
+from "../backend/wmc/emit_zig.gr" include WmcEmitZig
+from "../backend/wmc/tcore.gr" include WmcTCore
+from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
+from "../backend/wmc/expr_inline.gr" include WmcExprInline
+from "../backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
+from "../core/types.gr" include Types
+from "../core/error.gr" include Error
+
+let compileOutputPath = (filePath: String) =>
+  if (String.endsWith(".wm", filePath)) {
+    String.slice(0, end=String.length(filePath) - 3, filePath) ++ ".zig"
+  } else {
+    filePath ++ ".zig"
+  }
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
+  let fatals = List.filter((diag: Error.CompilerError) => diag.severity == Error.SError, diagnostics)
+  if (fatals == []) {
+    "Backend compile aborted: fatal diagnostics present"
+  } else {
+    let lines = List.map((diag: Error.CompilerError) =>
+      Error.errorToString(diag), fatals)
+    "Backend compile aborted: fatal diagnostics present\n" ++ joinStrings("\n", lines)
+  }
+}
+
+let findCompilableMainExpr = (
+  rawModule: WmcTCore.Module,
+  values: List<WmcTCoreNorm.TopValueBinding>,
+) => {
+  let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [binding, ...tail] => {
+        if (binding.name == "main") {
+          Some(binding)
+        } else {
+          findMain(tail)
+        }
+      },
+    }
+  match (findMain(values)) {
+    None => None,
+    Some(binding) => {
+      let resultTypeName = match (binding.value.node.ty) {
+        Some(Types.TFun(_paramTy, returnTy)) => WmcEmitZig.zigTypeNameFromType(returnTy),
+        Some(ty) => WmcEmitZig.zigTypeNameFromType(ty),
+        None => "comptime_int",
+      }
+      let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
+      let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
+      let executableExpr = match (simplified.kind) {
+        WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
+          body,
+        _ => simplified,
+      }
+      match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
+        None => None,
+        Some(cfg) =>
+          Some(
+            WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
+              cfg,
+              options={
+                wmFunctionName: "__wm_main",
+                zigMainName: "main",
+                includeSourceComments: true,
+                resultType: Some(resultTypeName),
+              },
+            )
+          ),
+      }
+    },
+  }
+}
+
+provide let compileFile = (filePath: String, stdRoot: Option<String>) => {
+  let baseOptions = ModuleSystem.defaultOptions()
+  let options = match (stdRoot) {
+    Some(root) => { ...baseOptions, stdRoots: [root] },
+    None => baseOptions,
+  }
+
+  match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
+    Err(msg) => Err(msg),
+    Ok(proto) => {
+      if (!WmcDriver.isBackendReadyEntry(proto)) {
+        Err(fatalDiagnosticSummary(proto.entry.diagnostics))
+      } else {
+        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values)) {
+          None =>
+            Err(
+              "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"
+            ),
+          Some(zigSource) => {
+            let outPath = compileOutputPath(filePath)
+            match (Fs.Utf8.writeFile(Path.fromString(outPath), zigSource)) {
+              Ok(_) => Ok(outPath),
+              Err(fsErr) =>
+                Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),
+            }
+          },
+        }
+      }
+    },
+  }
+}

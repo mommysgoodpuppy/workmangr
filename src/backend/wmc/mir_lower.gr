@@ -227,24 +227,41 @@ and lowerUnifiedCall = (
   fenv: FnEnv,
   st: UnifiedLowerState,
 ) =>
-  match (lowerUnifiedExpr(callee, env, fenv, st)) {
-    (None, st1) => (None, st1),
-    (Some((calleeStmts, calleeVar)), st1) =>
-      match (lowerUnifiedExpr(arg, env, fenv, st1)) {
+  match (callee.kind) {
+    WmcTCoreNorm.NEIdent(name) when name == "print" =>
+      match (lowerUnifiedExpr(arg, env, fenv, st)) {
         (None, st2) => (None, st2),
         (Some((argStmts, argVar)), st2) => {
-          let (out, st3) = freshName("call", st2)
+          let (out, st3) = freshName("print", st2)
           (
             Some((
-              List.append(
-                List.append(calleeStmts, argStmts),
-                [WmcMir.UAssign(out, WmcMir.URCall(calleeVar, argVar))],
-              ),
+              List.append(argStmts, [WmcMir.UAssign(out, WmcMir.URCall("__wm_print", argVar))]),
               out,
             )),
             st3,
           )
         },
+      },
+    _ =>
+      match (lowerUnifiedExpr(callee, env, fenv, st)) {
+        (None, st1) => (None, st1),
+        (Some((calleeStmts, calleeVar)), st1) =>
+          match (lowerUnifiedExpr(arg, env, fenv, st1)) {
+            (None, st2) => (None, st2),
+            (Some((argStmts, argVar)), st2) => {
+              let (out, st3) = freshName("call", st2)
+              (
+                Some((
+                  List.append(
+                    List.append(calleeStmts, argStmts),
+                    [WmcMir.UAssign(out, WmcMir.URCall(calleeVar, argVar))],
+                  ),
+                  out,
+                )),
+                st3,
+              )
+            },
+          },
       },
   }
 

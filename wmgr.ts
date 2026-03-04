@@ -40,7 +40,12 @@ const uniqueExistingDirs = async (candidates: string[]): Promise<string[]> => {
 
 const parseCli = (argv: string[]): CliParse => {
   if (argv.length === 0) {
-    return { command: "type", args: [], fileArgIndex: null, hasStdRootArg: false };
+    return {
+      command: "type",
+      args: [],
+      fileArgIndex: null,
+      hasStdRootArg: false,
+    };
   }
 
   const command = argv[0];
@@ -65,6 +70,20 @@ const parseCli = (argv: string[]): CliParse => {
   return { command, args, fileArgIndex, hasStdRootArg };
 };
 
+const toPosixPath = (value: string): string => value.replaceAll("\\", "/");
+
+const toGrainInputPath = (absPath: string, rootDir: string): string => {
+  // Grain/WASI on Windows is unreliable with drive-letter absolute paths.
+  // Prefer a repo-relative POSIX path when possible.
+  if (Deno.build.os === "windows") {
+    const rel = path.relative(rootDir, absPath);
+    if (rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+      return toPosixPath(rel);
+    }
+  }
+  return toPosixPath(absPath);
+};
+
 const usage = `Usage:
   deno run -A wmgr.ts <command> [args...]
 
@@ -72,13 +91,15 @@ Examples:
   deno run -A wmgr.ts type /Users/profilence/git/workman/aoc2016/1.wm
   deno run -A wmgr.ts type --line 96 /Users/profilence/git/workman/aoc2016/1.wm
   deno run -A wmgr.ts ast /Users/profilence/git/workman/std/prelude.wm
+  deno run -A wmgr.ts run ./simple.wm
 `;
 
 const main = async () => {
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
   const workmangrRoot = path.normalize(Deno.env.get("WMGR_ROOT") ?? scriptDir);
   const invocationCwd = Deno.cwd();
-  const grainBin = Deno.env.get("WMGR_GRAIN_BIN") ?? Deno.env.get("GRAIN_BIN") ?? "grain";
+  const grainBin = Deno.env.get("WMGR_GRAIN_BIN") ??
+    Deno.env.get("GRAIN_BIN") ?? "grain";
 
   const stdRootCandidates = [
     Deno.env.get("WMGR_STD_ROOT") ?? "",
@@ -109,16 +130,31 @@ const main = async () => {
 
   const parsed = parseCli(argv);
   const passArgs = [...parsed.args];
+  const rawFileArg = parsed.fileArgIndex == null
+    ? null
+    : parsed.args[parsed.fileArgIndex];
+  const absFileArg = rawFileArg == null
+    ? null
+    : (path.isAbsolute(rawFileArg)
+      ? rawFileArg
+      : path.resolve(invocationCwd, rawFileArg));
 
   if (parsed.fileArgIndex != null) {
     const fileArg = passArgs[parsed.fileArgIndex];
-    const abs = path.isAbsolute(fileArg) ? fileArg : path.resolve(invocationCwd, fileArg);
+    const abs = path.isAbsolute(fileArg)
+      ? fileArg
+      : path.resolve(invocationCwd, fileArg);
     if (await fileExists(abs)) {
-      passArgs[parsed.fileArgIndex] = abs;
+      passArgs[parsed.fileArgIndex] = toGrainInputPath(abs, workmangrRoot);
     }
   }
 
-  if (parsed.command === "type" && !parsed.hasStdRootArg && stdRoot) {
+  if (
+    (parsed.command === "type" || parsed.command === "compile" ||
+      parsed.command === "run") &&
+    !parsed.hasStdRootArg &&
+    stdRoot
+  ) {
     passArgs.unshift("--std-root", stdRoot);
   }
 
@@ -130,21 +166,58 @@ const main = async () => {
     stdRoot ? path.join(stdRoot, "..", "..") : "",
   ]);
 
-  const grainArgs = [
+  const grainArgsFor = (command: string, cmdArgs: string[]) => [
     ...extraPreopenDirs.flatMap((dir) => ["--dir", dir]),
     "--include-dirs",
     path.join(workmangrRoot, "src"),
     path.join(workmangrRoot, "src", "cli", "cli.gr"),
     "--",
-    parsed.command,
-    ...passArgs,
+    command,
+    ...cmdArgs,
   ];
 
   const env = { ...Deno.env.toObject() };
   if (stdRoot) env.WORKMAN_STD_ROOT = stdRoot;
 
+  const runCommand = async (cmd: string, args: string[], cwd: string) =>
+    await new Deno.Command(cmd, {
+      args,
+      cwd,
+      env,
+      stdin: "null",
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+
+  if (parsed.command === "run") {
+    if (!absFileArg) {
+      console.error("wm run requires a .wm input file");
+      Deno.exit(1);
+    }
+    const compileProc = await runCommand(
+      grainBin,
+      grainArgsFor("compile", passArgs),
+      workmangrRoot,
+    );
+    if (compileProc.stdout.length > 0) {
+      await Deno.stdout.write(compileProc.stdout);
+    }
+    if (compileProc.stderr.length > 0) {
+      await Deno.stderr.write(compileProc.stderr);
+    }
+    if (compileProc.code !== 0) Deno.exit(compileProc.code);
+
+    const zigPath = absFileArg.endsWith(".wm")
+      ? absFileArg.slice(0, absFileArg.length - 3) + ".zig"
+      : absFileArg + ".zig";
+    const zigProc = await runCommand("zig", ["run", zigPath], invocationCwd);
+    if (zigProc.stdout.length > 0) await Deno.stdout.write(zigProc.stdout);
+    if (zigProc.stderr.length > 0) await Deno.stderr.write(zigProc.stderr);
+    Deno.exit(zigProc.code);
+  }
+
   const proc = await new Deno.Command(grainBin, {
-    args: grainArgs,
+    args: grainArgsFor(parsed.command, passArgs),
     cwd: workmangrRoot,
     env,
     // `type`/`ast` are non-interactive. Piping stdio avoids TTY-specific hangs

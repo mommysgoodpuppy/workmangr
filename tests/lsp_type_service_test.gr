@@ -22,7 +22,7 @@ let value = id(1);
   match (String.indexOf("1", source)) {
     Some(offset) =>
       match (TypeService.typeAtOffset(snapshot, offset)) {
-        Some(found) => assertEquals("Number", Types.typeToString(found.ty)),
+        Some(found) => assertEquals("U8", Types.typeToString(found.ty)),
         None => fail("expected type at literal offset"),
       },
     None => fail("expected literal in test source"),

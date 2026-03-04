@@ -248,6 +248,8 @@ let renderWithSettingsWithTokens = (
   and exprHasHole = (expr: SurfaceAst.Expr) => match (expr.kind) {
     SurfaceAst.Hole(_) => true,
     SurfaceAst.Lit(_) | SurfaceAst.Ident(_) => false,
+    SurfaceAst.Annotate(valueExpr, annotation) =>
+      exprHasHole(valueExpr) || typeHasHole(annotation),
     SurfaceAst.Fn(fn) => fnHasHole(fn),
     SurfaceAst.Match(matchExpr) =>
       match (matchExpr.scrutinee) {
@@ -400,6 +402,7 @@ let renderWithSettingsWithTokens = (
     }
 
   let rec exprHasMissingRBrace = (expr: SurfaceAst.Expr) => match (expr.kind) {
+    SurfaceAst.Annotate(valueExpr, _annotation) => exprHasMissingRBrace(valueExpr),
     SurfaceAst.Block(block) =>
       blockHasMissingRBrace(block.items) || exprHasMissingRBrace(block.body),
     SurfaceAst.Fn(fnExpr) => anyFnItemMissingRBrace(fnExpr.items),
@@ -888,6 +891,11 @@ let renderWithSettingsWithTokens = (
         SurfaceAst.Lit(SurfaceAst.Unit) => write("()"),
         SurfaceAst.Lit(_) => write("<lit>"),
         SurfaceAst.Ident(name) => write(name.text),
+        SurfaceAst.Annotate(valueExpr, annotation) => {
+          emitExpr(valueExpr)
+          write(": ")
+          emitTypeExpr(annotation)
+        },
         SurfaceAst.Paren(inner) => {
           write("(")
           emitExpr(inner)

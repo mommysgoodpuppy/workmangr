@@ -116,6 +116,10 @@ let rec indexExpr = (expr: CoreAst.Expr, index: Map.Map<Number, Source.Span>) =>
   indexNodeSpan(index, expr.node)
   match (expr.kind) {
     CoreAst.Mark(_, inner) => indexExpr(inner, index),
+    CoreAst.Annotate(valueExpr, annotation) => {
+      indexExpr(valueExpr, index)
+      indexTypeExpr(annotation, index)
+    },
     CoreAst.Apply(callee, arg) => {
       indexExpr(callee, index)
       indexExpr(arg, index)

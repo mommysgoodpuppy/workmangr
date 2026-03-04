@@ -190,6 +190,7 @@ let rec collectPatternNodes = (pattern: CoreAst.Pattern) =>
 let rec collectPatternsFromExpr = (expr: CoreAst.Expr) =>
   match (expr.kind) {
     CoreAst.Mark(_, inner) => collectPatternsFromExpr(inner),
+    CoreAst.Annotate(valueExpr, _annotation) => collectPatternsFromExpr(valueExpr),
     CoreAst.Fn(fnExpr) => {
       let rec collectFromItems = (items: List<CoreAst.FnItem>) =>
         match (items) {
@@ -247,6 +248,7 @@ let rec collectPatternsFromExpr = (expr: CoreAst.Expr) =>
 let rec collectExprs = (expr: CoreAst.Expr) =>
   match (expr.kind) {
     CoreAst.Mark(_, inner) => [expr, ...collectExprs(inner)],
+    CoreAst.Annotate(valueExpr, _annotation) => [expr, ...collectExprs(valueExpr)],
     CoreAst.Lit(_) => [expr],
     CoreAst.Ident(_) => [expr],
     CoreAst.Hole(_) => [expr],

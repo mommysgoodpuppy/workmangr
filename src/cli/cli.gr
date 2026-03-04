@@ -14,13 +14,7 @@ from "../module/module_system.gr" include ModuleSystem
 from "./report.gr" include Report
 from "../frontend/parser.gr" include Parser
 from "../frontend/lower.gr" include Lower
-from "../backend/wmc/driver.gr" include WmcDriver
-from "../backend/wmc/mir_lower.gr" include WmcMirLower
-from "../backend/wmc/emit_zig.gr" include WmcEmitZig
-from "../backend/wmc/tcore.gr" include WmcTCore
-from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
-from "../backend/wmc/expr_inline.gr" include WmcExprInline
-from "../backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
+from "./compile_cli.gr" include CompileCli
 
 let usage =
   "Usage: wmgr type [--line <line>] [--std-root <path>] <file.wm> | wmgr ast <file.wm> | wmgr compile [--std-root <path>] <file.wm>"
@@ -50,80 +44,6 @@ let envLookup = (name: String) => {
         }
       }, None, vars)
     },
-  }
-}
-
-let compileOutputPath = (filePath: String) =>
-  if (String.endsWith(".wm", filePath)) {
-    String.slice(0, end=String.length(filePath) - 3, filePath) ++ ".zig"
-  } else {
-    filePath ++ ".zig"
-  }
-
-let wrapWithZigMainForNoArgInt = (zigSource: String, fnName: String) => {
-  "const std = @import(\"std\");\n\n"
-    ++ zigSource
-    ++ "\n\npub fn main() !void {\n"
-    ++ "  std.debug.print(\"{d}\\n\", .{"
-    ++ fnName
-    ++ "()});\n"
-    ++ "}"
-}
-
-let findCompilableMainExpr = (
-  rawModule: WmcTCore.Module,
-  values: List<WmcTCoreNorm.TopValueBinding>,
-) => {
-  let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
-    match (rest) {
-      [] => None,
-      [binding, ...tail] => {
-        if (binding.name == "main") {
-          Some(binding)
-        } else {
-          findMain(tail)
-        }
-      },
-    }
-  match (findMain(values)) {
-    None => None,
-    Some(binding) => {
-      let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
-      let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
-      let executableExpr = match (simplified.kind) {
-        WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
-          body,
-        _ => simplified,
-      }
-      match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
-        None => None,
-        Some(cfg) =>
-          Some(
-            WmcEmitZig.emitUnifiedCfgNoArgSpecializedInt(
-              cfg,
-              options={ functionName: "__wm_main", includeSourceComments: true },
-            )
-          ),
-      }
-    },
-  }
-}
-
-let writeCompileOutput = (filePath: String, zigNoMain: String) => {
-  let wrapped = wrapWithZigMainForNoArgInt(zigNoMain, "__wm_main")
-  let outPath = compileOutputPath(filePath)
-  match (Fs.Utf8.writeFile(Path.fromString(outPath), wrapped)) {
-    Ok(_) =>
-      print(
-        "Wrote prototype Zig backend output to "
-          ++ outPath
-          ++ " (entrypoint=main)"
-      ),
-    Err(fsErr) =>
-      exitWith(
-        1,
-        "Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)
-      ),
   }
 }
 
@@ -256,27 +176,14 @@ let main = () => {
                 print("Lowered AST:")
                 print(lowered)
               } else if (command == "compile") {
-                let baseOptions = ModuleSystem.defaultOptions()
-                let options = match (stdRoot) {
-                  Some(root) => { ...baseOptions, stdRoots: [root] },
-                  None => baseOptions,
-                }
-                match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
+                match (CompileCli.compileFile(filePath, stdRoot)) {
                   Err(msg) => exitWith(1, msg),
-                  Ok(proto) => {
-                    if (!WmcDriver.isBackendReadyEntry(proto)) {
-                      exitWith(1, "Backend compile aborted: fatal diagnostics present")
-                    } else {
-                      match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values)) {
-                        None =>
-                          exitWith(
-                            1,
-                            "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"
-                          ),
-                        Some(zig) => writeCompileOutput(filePath, zig),
-                      }
-                    }
-                  },
+                  Ok(outPath) =>
+                    print(
+                      "Wrote prototype Zig backend output to "
+                        ++ outPath
+                        ++ " (entrypoint=main)"
+                    ),
                 }
               } else {
                 let baseOptions = ModuleSystem.defaultOptions()

@@ -5,11 +5,20 @@ from "string" include String
 from "char" include Char
 
 from "../../core/core_ast.gr" include CoreAst
+from "../../core/types.gr" include Types
 from "./mir.gr" include WmcMir
 
 provide record EmitOptions {
   functionName: String,
   includeSourceComments: Bool,
+  resultType: Option<String>,
+}
+
+provide record ProgramEmitOptions {
+  wmFunctionName: String,
+  zigMainName: String,
+  includeSourceComments: Bool,
+  resultType: Option<String>,
 }
 
 let joinStrings = (sep: String, items: List<String>) => match (items) {
@@ -123,6 +132,12 @@ let rec containsString = (items: List<String>, target: String) =>
     [head, ...tail] => if (head == target) { true } else { containsString(tail, target) },
   }
 
+let rec containsNumber = (items: List<Number>, target: Number) =>
+  match (items) {
+    [] => false,
+    [head, ...tail] => if (head == target) { true } else { containsNumber(tail, target) },
+  }
+
 let dedupeStrings = (items: List<String>) => {
   let rec loop = (rest: List<String>, accRev: List<String>) =>
     match (rest) {
@@ -157,8 +172,29 @@ let fitsSignedBits = (n: Number, bits: Number) => {
   }
   n >= min && n <= max
 }
+
+let fitsUnsignedBits = (n: Number, bits: Number) => {
+  let max = if (bits == 8) {
+    255
+  } else if (bits == 16) {
+    65535
+  } else if (bits == 32) {
+    4294967295
+  } else {
+    18446744073709551615
+  }
+  n >= 0 && n <= max
+}
 provide let defaultOptions = () =>
-  { functionName: "__wm_match", includeSourceComments: true }: EmitOptions
+  { functionName: "__wm_match", includeSourceComments: true, resultType: None }: EmitOptions
+
+provide let defaultProgramOptions = () =>
+  {
+    wmFunctionName: "__wm_main",
+    zigMainName: "main",
+    includeSourceComments: true,
+    resultType: None,
+  }: ProgramEmitOptions
 
 let collectAssignedNamesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
   dedupeStrings(
@@ -169,6 +205,44 @@ let collectAssignedNamesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
       )
     )
   )
+
+record LinearTrace {
+  blocks: List<WmcMir.UnifiedBlock>,
+  assigns: List<WmcMir.UnifiedAssign>,
+  returnName: String,
+}
+
+let tryCollectLinearTrace = (cfg: WmcMir.UnifiedCfgFunction) => {
+  let rec loop = (
+    currentId: Number,
+    visited: List<Number>,
+    blocksRev: List<WmcMir.UnifiedBlock>,
+    assignsRev: List<WmcMir.UnifiedAssign>,
+  ) =>
+    if (containsNumber(visited, currentId)) {
+      None
+    } else {
+      match (WmcMir.findUnifiedBlock(cfg, currentId)) {
+        None => None,
+        Some(block) => {
+          let nextAssignsRev = List.append(List.reverse(block.assigns), assignsRev)
+          let nextBlocksRev = [block, ...blocksRev]
+          match (block.term) {
+            WmcMir.UTGoto(nextId) =>
+              loop(nextId, [currentId, ...visited], nextBlocksRev, nextAssignsRev),
+            WmcMir.UTReturn(name) =>
+              Some({
+                blocks: List.reverse(nextBlocksRev),
+                assigns: List.reverse(nextAssignsRev),
+                returnName: name,
+              }: LinearTrace),
+            _ => None,
+          }
+        },
+      }
+    }
+  loop(cfg.entry, [], [], [])
+}
 
 enum UnifiedLocalTy {
   LTUnknown,
@@ -282,10 +356,51 @@ let rec emitUnifiedRValue = (rhs: WmcMir.UnifiedRValue, mapping: List<(String, S
     WmcMir.URLit(CoreAst.Byte(_)) => "0",
     WmcMir.URVar(name) => lookupNameMap(mapping, name),
     WmcMir.URCall(callee, arg) =>
-      lookupNameMap(mapping, callee) ++ "(" ++ lookupNameMap(mapping, arg) ++ ")",
+      if (callee == "__wm_print") {
+        "(blk: { __wm_print(" ++ lookupNameMap(mapping, arg) ++ "); break :blk 0; })"
+      } else {
+        lookupNameMap(mapping, callee) ++ "(" ++ lookupNameMap(mapping, arg) ++ ")"
+      },
     WmcMir.URBinOp(op, left, right) =>
       "(" ++ lookupNameMap(mapping, left) ++ " " ++ op ++ " " ++ lookupNameMap(mapping, right) ++ ")",
     WmcMir.URTuple(_) => "0",
+  }
+
+let referencedVarsInRValue = (rhs: WmcMir.UnifiedRValue) =>
+  match (rhs) {
+    WmcMir.URLit(_) => [],
+    WmcMir.URVar(name) => [name],
+    WmcMir.URCall(callee, arg) => [callee, arg],
+    WmcMir.URBinOp(_op, left, right) => [left, right],
+    WmcMir.URTuple(items) => items,
+  }
+
+let cfgUsesBuiltinPrint = (blocks: List<WmcMir.UnifiedBlock>) =>
+  List.some(
+    (block: WmcMir.UnifiedBlock) =>
+      List.some(
+        (assign: WmcMir.UnifiedAssign) => match (assign.rhs) {
+          WmcMir.URCall(callee, _arg) => callee == "__wm_print",
+          _ => false,
+        },
+        block.assigns
+      ),
+    blocks
+  )
+
+let emitBuiltinPrelude = (usesPrint: Bool) =>
+  if (usesPrint) {
+    joinStrings(
+      "\n",
+      [
+        "const std = @import(\"std\");",
+        "fn __wm_print(value: anytype) void {",
+        "  std.debug.print(\"{}\\n\", .{value});",
+        "}",
+      ]
+    ) ++ "\n\n"
+  } else {
+    ""
   }
 
 let collectUnifiedIntCandidatesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
@@ -304,14 +419,25 @@ let collectUnifiedIntCandidatesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
     )
   )
 
-let inferSignedIntTypeNameFromUnifiedCfg = (blocks: List<WmcMir.UnifiedBlock>) => {
+let inferIntTypeNameFromUnifiedCfg = (blocks: List<WmcMir.UnifiedBlock>) => {
   let nums = collectUnifiedIntCandidatesCfg(blocks)
   let rec allFit = (rest: List<Number>, bits: Number) =>
     match (rest) {
       [] => true,
       [n, ...tail] => fitsSignedBits(n, bits) && allFit(tail, bits),
     }
-  if (allFit(nums, 8)) {
+  let rec allFitUnsigned = (rest: List<Number>, bits: Number) =>
+    match (rest) {
+      [] => true,
+      [n, ...tail] => fitsUnsignedBits(n, bits) && allFitUnsigned(tail, bits),
+    }
+  if (allFitUnsigned(nums, 8)) {
+    "u8"
+  } else if (allFitUnsigned(nums, 16)) {
+    "u16"
+  } else if (allFitUnsigned(nums, 32)) {
+    "u32"
+  } else if (allFit(nums, 8)) {
     "i8"
   } else if (allFit(nums, 16)) {
     "i16"
@@ -322,9 +448,51 @@ let inferSignedIntTypeNameFromUnifiedCfg = (blocks: List<WmcMir.UnifiedBlock>) =
   }
 }
 
+provide let zigTypeNameFromType = (ty: Types.Type) =>
+  match (ty) {
+    Types.TBool => "bool",
+    Types.TNumber => "comptime_int",
+    Types.TByte => "u8",
+    Types.TNominal(name, []) =>
+      if (name == "U8" || name == "u8") {
+        "u8"
+      } else if (name == "U16" || name == "u16") {
+        "u16"
+      } else if (name == "U32" || name == "u32") {
+        "u32"
+      } else if (name == "U64" || name == "u64") {
+        "u64"
+      } else if (name == "U128" || name == "u128") {
+        "u128"
+      } else if (name == "I8" || name == "i8") {
+        "i8"
+      } else if (name == "I16" || name == "i16") {
+        "i16"
+      } else if (name == "I32" || name == "i32") {
+        "i32"
+      } else if (name == "I64" || name == "i64") {
+        "i64"
+      } else if (name == "I128" || name == "i128") {
+        "i128"
+      } else if (name == "Int" || name == "int" || name == "Number" || name == "number") {
+        "comptime_int"
+      } else if (name == "Bool" || name == "bool") {
+        "bool"
+      } else if (name == "Void" || name == "void") {
+        "void"
+      } else {
+        "comptime_int"
+      },
+    Types.TNominal("Bool", _args) => "bool",
+    Types.TNominal("Void", _args) => "void",
+    Types.TVoid => "void",
+    _ => "comptime_int",
+  }
+
 let emitUnifiedTerminatorLines = (
   term: WmcMir.UnifiedTerminator,
   mapping: List<(String, String)>,
+  resultTy: String,
 ) =>
   match (term) {
     WmcMir.UTGoto(id) => [indent3("__pc = " ++ toString(id) ++ ";"), indent3("continue;")],
@@ -336,13 +504,19 @@ let emitUnifiedTerminatorLines = (
       indent3("}"),
       indent3("continue;"),
     ],
-    WmcMir.UTReturn(name) => [indent3("return " ++ lookupNameMap(mapping, name) ++ ";")],
+    WmcMir.UTReturn(name) =>
+      if (resultTy == "void") {
+        [indent3("return;")]
+      } else {
+        [indent3("return " ++ lookupNameMap(mapping, name) ++ ";")]
+      },
     WmcMir.UTFail => [indent3("unreachable;")],
   }
 
 let emitUnifiedCfgBlockLines = (
   block: WmcMir.UnifiedBlock,
   mapping: List<(String, String)>,
+  resultTy: String,
 ) => {
   let header = indent2(toString(block.id) ++ " => {")
   let assignLines = List.map((a: WmcMir.UnifiedAssign) => {
@@ -350,7 +524,7 @@ let emitUnifiedCfgBlockLines = (
     let rhsText = emitUnifiedRValue(a.rhs, mapping)
     indent3(zigName ++ " = " ++ rhsText ++ ";")
   }, block.assigns)
-  let termLines = emitUnifiedTerminatorLines(block.term, mapping)
+  let termLines = emitUnifiedTerminatorLines(block.term, mapping, resultTy)
   List.append([header], List.append(assignLines, List.append(termLines, [indent2("},")])))
 }
 
@@ -359,46 +533,137 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
   options: EmitOptions=defaultOptions(),
 ) => {
   let fnNameBase = sanitizeLocalBase(options.functionName)
-  let resultTy = inferSignedIntTypeNameFromUnifiedCfg(cfg.blocks)
-  let assigned = collectAssignedNamesCfg(cfg.blocks)
-  let mapping = buildNameMap(assigned)
-  let localTypes = inferUnifiedLocalTypes(cfg.blocks, assigned)
-  let assignedDecls =
-    List.map((name: String) =>
-      {
-        let tyName = localTyName(lookupLocalTy(localTypes, name), resultTy)
-        let initValue = if (tyName == "bool") { "false" } else { "0" }
-        indent("var " ++ lookupNameMap(mapping, name) ++ ": " ++ tyName ++ " = " ++ initValue ++ ";")
-      }, assigned)
-  let blockLines = List.flatten(
-    List.map((b: WmcMir.UnifiedBlock) => emitUnifiedCfgBlockLines(b, mapping), cfg.blocks)
-  )
-  joinStrings(
-    "\n",
-    List.append(
-      [
-        "// WMC Zig emitter (unified MIR CFG no-arg -> specialized int)",
-        "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
-        indent("var __pc: i32 = " ++ toString(cfg.entry) ++ ";"),
-      ],
-      List.append(
-        assignedDecls,
+  let resultTy = match (options.resultType) {
+    Some(name) => name,
+    None => inferIntTypeNameFromUnifiedCfg(cfg.blocks),
+  }
+  let localValueTy = if (resultTy == "void") { "u8" } else { resultTy }
+  let prelude = emitBuiltinPrelude(cfgUsesBuiltinPrint(cfg.blocks))
+  match (tryCollectLinearTrace(cfg)) {
+    Some(trace) => {
+      let assigned = dedupeStrings(List.map((a: WmcMir.UnifiedAssign) => a.name, trace.assigns))
+      let mapping = buildNameMap(assigned)
+      let localTypes = inferUnifiedLocalTypes(trace.blocks, assigned)
+      let usedNames = dedupeStrings(
+        List.append(
+          List.flatten(List.map((a: WmcMir.UnifiedAssign) => referencedVarsInRValue(a.rhs), trace.assigns)),
+          if (resultTy == "void") { [] } else { [trace.returnName] }
+        )
+      )
+      let constLines = List.map((a: WmcMir.UnifiedAssign) => {
+        let zigName = lookupNameMap(mapping, a.name)
+        let tyName = localTyName(lookupLocalTy(localTypes, a.name), localValueTy)
+        let rhsText = emitUnifiedRValue(a.rhs, mapping)
+        indent("const " ++ zigName ++ ": " ++ tyName ++ " = " ++ rhsText ++ ";")
+      }, trace.assigns)
+      let discardLines = List.filterMap((a: WmcMir.UnifiedAssign) => {
+        if (containsString(usedNames, a.name)) {
+          None
+        } else {
+          let zigName = lookupNameMap(mapping, a.name)
+          Some(indent("_ = " ++ zigName ++ ";"))
+        }
+      }, trace.assigns)
+      let returnLine = if (resultTy == "void") {
+        indent("return;")
+      } else {
+        indent("return " ++ lookupNameMap(mapping, trace.returnName) ++ ";")
+      }
+      prelude
+        ++
+      joinStrings(
+        "\n",
         List.append(
           [
-            indent("while (true) {"),
-            indent2("switch (__pc) {"),
+            "// WMC Zig emitter (unified MIR linear no-arg -> specialized int)",
+            "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
+          ],
+          List.append(List.append(constLines, discardLines), [returnLine, "}"]),
+        ),
+      )
+    },
+    None => {
+      let assigned = collectAssignedNamesCfg(cfg.blocks)
+      let mapping = buildNameMap(assigned)
+      let localTypes = inferUnifiedLocalTypes(cfg.blocks, assigned)
+      let assignedDecls =
+        List.map((name: String) =>
+          {
+            let tyName = localTyName(lookupLocalTy(localTypes, name), localValueTy)
+            let initValue = if (tyName == "bool") { "false" } else { "0" }
+            indent("var " ++ lookupNameMap(mapping, name) ++ ": " ++ tyName ++ " = " ++ initValue ++ ";")
+          }, assigned)
+      let blockLines = List.flatten(
+        List.map((b: WmcMir.UnifiedBlock) => emitUnifiedCfgBlockLines(b, mapping, resultTy), cfg.blocks)
+      )
+      prelude
+        ++
+      joinStrings(
+        "\n",
+        List.append(
+          [
+            "// WMC Zig emitter (unified MIR CFG no-arg -> specialized int)",
+            "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
+            indent("var __pc: i32 = " ++ toString(cfg.entry) ++ ";"),
           ],
           List.append(
-            blockLines,
-            [
-              indent2("else => unreachable,"),
-              indent2("}"),
-              indent("}"),
-              "}",
-            ],
+            assignedDecls,
+            List.append(
+              [
+                indent("while (true) {"),
+                indent2("switch (__pc) {"),
+              ],
+              List.append(
+                blockLines,
+                [
+                  indent2("else => unreachable,"),
+                  indent2("}"),
+                  indent("}"),
+                  "}",
+                ],
+              ),
+            ),
           ),
         ),
-      ),
-    ),
-  )
+      )
+    },
+  }
+}
+
+provide let emitUnifiedCfgProgramNoArgSpecializedInt = (
+  cfg: WmcMir.UnifiedCfgFunction,
+  options: ProgramEmitOptions=defaultProgramOptions(),
+) => {
+  let resultTy = match (options.resultType) {
+    Some(name) => name,
+    None => inferIntTypeNameFromUnifiedCfg(cfg.blocks),
+  }
+  let wmFnName = sanitizeLocalBase(options.wmFunctionName)
+  let zigMainName = sanitizeLocalBase(options.zigMainName)
+  let body =
+    emitUnifiedCfgNoArgSpecializedInt(
+      cfg,
+      options={
+        functionName: wmFnName,
+        includeSourceComments: options.includeSourceComments,
+        resultType: Some(resultTy),
+      },
+    )
+  let mainBody = if (resultTy == "void") {
+    "  " ++ wmFnName ++ "();"
+  } else if (resultTy == "bool") {
+    "  return @as(u8, @intFromBool(" ++ wmFnName ++ "()));"
+  } else {
+    "  return @as(u8, @intCast(" ++ wmFnName ++ "()));"
+  }
+  let mainReturnTy = if (resultTy == "void") { "void" } else { "u8" }
+  body
+    ++ "\n\npub fn "
+    ++ zigMainName
+    ++ "() "
+    ++ mainReturnTy
+    ++ " {\n"
+    ++ mainBody
+    ++ "\n"
+    ++ "}"
 }

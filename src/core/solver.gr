@@ -1,6 +1,7 @@
 module Solver
 
 from "list" include List
+from "map" include Map
 
 from "./types.gr" include Types
 from "./constraints.gr" include Constraints
@@ -15,11 +16,13 @@ provide record SolverState {
 provide enum SolveError {
   Occurs(Constraints.Origin),
   CannotUnify(Types.Type, Types.Type, Constraints.Origin),
+  NumericViolation(Constraints.Origin, String),
 }
 
 provide record SolveSuccess {
   subst: Subst,
   domainConstraints: List<Constraints.Constraint>,
+  unsolvedNumericConstraints: List<Constraints.Constraint>,
 }
 
 let emptyState = () =>
@@ -116,23 +119,145 @@ let rec unify = (
   }
 }
 
+let numericResolved = (ty: Types.Type, subst: Subst) => {
+  let applied = Types.applySubstType(subst, ty)
+  match (applied) {
+    Types.TVar(_) => None,
+    Types.THole(_) => None,
+    _ =>
+      if (Types.isNumericType(applied)) {
+        Some(true)
+      } else {
+        Some(false)
+      },
+  }
+}
+
+let validateNumericConstraint = (
+  constraint: Constraints.NumericConstraint,
+  subst: Subst,
+) =>
+  match (constraint) {
+    Constraints.IsNumeric(ty) =>
+      match (numericResolved(ty, subst)) {
+        Some(true) => Ok(false),
+        Some(false) => Err("type is not numeric"),
+        None => Ok(true),
+      },
+    Constraints.IntLiteral(ty, _value) =>
+      match (numericResolved(ty, subst)) {
+        Some(true) => Ok(false),
+        Some(false) => Err("integer literal is not numeric in context"),
+        None => Ok(true),
+      },
+  }
+
+let smallestUnsignedSpecialization = (value: Number) => {
+  if (value < 0) {
+    Types.TNominal("Int", [])
+  } else if (value <= 255) {
+    Types.TNominal("U8", [])
+  } else if (value <= 65535) {
+    Types.TNominal("U16", [])
+  } else if (value <= 4294967295) {
+    Types.TNominal("U32", [])
+  } else if (value <= 9007199254740991) {
+    Types.TNominal("U64", [])
+  } else {
+    Types.TNominal("Int", [])
+  }
+}
+
+let specializeNumericVars = (
+  subst: Subst,
+  numericConstraints: List<Constraints.Constraint>,
+) => {
+  let literalMaxByVar: Map.Map<Number, Number> = Map.make()
+  List.forEach((constraint: Constraints.Constraint) => {
+    match (constraint) {
+      Constraints.Numeric(spec, _origin) =>
+        match (spec) {
+          Constraints.IntLiteral(ty, value) =>
+            match (Types.applySubstType(subst, ty)) {
+              Types.TVar(varId) =>
+                match (Map.get(varId, literalMaxByVar)) {
+                  Some(existingMax) =>
+                    if (value > existingMax) {
+                      Map.set(varId, value, literalMaxByVar)
+                      void
+                    } else {
+                      void
+                    },
+                  None => {
+                    Map.set(varId, value, literalMaxByVar)
+                    void
+                  },
+                },
+              _ => void,
+            },
+          _ => void,
+        },
+      _ => void,
+    }
+  }, numericConstraints)
+
+  let specialized = subst
+  List.forEach(((varId, maxValue): (Number, Number)) => {
+    let target = smallestUnsignedSpecialization(maxValue)
+    let _ = Types.extendSubst(specialized, varId, target)
+    void
+  }, Map.toList(literalMaxByVar))
+  specialized
+}
+
 provide let solve = (state: SolverState) => {
   let rec loop = (
     remaining: List<Constraints.Constraint>,
     subst: Subst,
     domainAcc: List<Constraints.Constraint>,
+    numericAcc: List<Constraints.Constraint>,
   ) => match (remaining) {
-    [] =>
-      Ok({ subst, domainConstraints: List.reverse(domainAcc) }: SolveSuccess),
+    [] => {
+      let specializedSubst = specializeNumericVars(subst, numericAcc)
+      let rec finalizeNumeric = (
+        remainingNumeric: List<Constraints.Constraint>,
+        unresolvedRev: List<Constraints.Constraint>,
+      ) =>
+        match (remainingNumeric) {
+          [] =>
+            Ok({
+              subst: specializedSubst,
+              domainConstraints: List.reverse(domainAcc),
+              unsolvedNumericConstraints: List.reverse(unresolvedRev),
+            }: SolveSuccess),
+          [constraint, ...restNumeric] =>
+            match (constraint) {
+              Constraints.Numeric(spec, origin) =>
+                match (validateNumericConstraint(spec, specializedSubst)) {
+                  Ok(true) => finalizeNumeric(restNumeric, [constraint, ...unresolvedRev]),
+                  Ok(false) => finalizeNumeric(restNumeric, unresolvedRev),
+                  Err(message) => Err(NumericViolation(origin, message)),
+                },
+              _ => finalizeNumeric(restNumeric, unresolvedRev),
+            },
+        }
+      finalizeNumeric(numericAcc, [])
+    },
     [constraint, ...rest] => match (constraint) {
       Constraints.Equality(left, right, origin) =>
         match (unify(left, right, subst, origin)) {
-          Ok(nextSubst) => loop(rest, nextSubst, domainAcc),
+          Ok(nextSubst) => loop(rest, nextSubst, domainAcc, numericAcc),
           Err(err) => Err(err),
         },
-      Constraints.Domain(_, _) => loop(rest, subst, [constraint, ...domainAcc]),
+      Constraints.Domain(_, _) => loop(rest, subst, [constraint, ...domainAcc], numericAcc),
+      Constraints.Numeric(spec, origin) =>
+        match (validateNumericConstraint(spec, subst)) {
+          Ok(true) => loop(rest, subst, domainAcc, [constraint, ...numericAcc]),
+          Ok(false) => loop(rest, subst, domainAcc, numericAcc),
+          Err(message) => Err(NumericViolation(origin, message)),
+        },
     },
   }
 
-  loop(state.constraints, state.subst, [])
+  loop(state.constraints, state.subst, [], [])
 }

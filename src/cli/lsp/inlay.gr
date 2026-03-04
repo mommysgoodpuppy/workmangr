@@ -409,6 +409,8 @@ let rec typeInlaysFromExpr = (
         CoreAst.Spread(valueExpr) => typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
       }, items)
     ),
+  CoreAst.Annotate(valueExpr, _annotation) =>
+    typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
   CoreAst.Mark(_, inner) => typeInlaysFromExpr(inner, infer, rangeStart, rangeEnd),
   _ => []
 }

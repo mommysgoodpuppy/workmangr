@@ -538,6 +538,11 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
       makeExpr(expr.node, CoreAst.Lit(lowerAtomLiteral(lit))),
     SurfaceAst.Ident(name) =>
       makeExpr(expr.node, CoreAst.Ident(lowerName(name))),
+    SurfaceAst.Annotate(value, annotation) =>
+      makeExpr(
+        expr.node,
+        CoreAst.Annotate(lowerExpr(value), lowerTypeExpr(annotation))
+      ),
     SurfaceAst.Hole(hole) => makeExpr(expr.node, CoreAst.Hole(lowerHole(hole))),
     SurfaceAst.Paren(inner) => lowerExpr(inner),
     SurfaceAst.Tuple(exprs) =>

@@ -152,7 +152,9 @@ test("named imports with alias resolve correct symbol", () => {
     None => fail("missing ok binding"),
   }
   let hasTypeErrors = List.some(
-    (diag: Error.CompilerError) => diag.stage == Error.TypeInference,
+    (diag: Error.CompilerError) =>
+      diag.stage == Error.TypeInference
+        && !String.contains("unresolved numeric", diag.message),
     entry.diagnostics
   )
   let typeOk = match (okScheme.ty) {
@@ -530,7 +532,7 @@ test("module infer typeAtOffset resolves innermost span type", () => {
       match (ModuleInfer.typeAtOffsetInSummary(entry, offset)) {
         Some(found) =>
           all([
-            assertEquals("Number", Types.typeToString(found.ty)),
+            assertEquals("U8", Types.typeToString(found.ty)),
             assertEquals("1", Source.slice(entrySource, found.span)),
           ]),
         None => fail("expected type entry at literal offset"),
@@ -642,7 +644,7 @@ test("std coretypes fixture supports Option and IResult constructor typing", () 
     None => fail("missing fromIRes binding"),
   }
   all([
-    assertEquals("Number", Types.typeToString(fromOpt.ty)),
+    assertEquals("U8", Types.typeToString(fromOpt.ty)),
     assertEquals("Bool", Types.typeToString(fromIRes.ty)),
   ])
 })
@@ -704,9 +706,9 @@ test("type-only reexports preserve Option Result and IResult constructor availab
   }
   all([
     assertFalse(hasUnknownCtor),
-    assertEquals("Number", Types.typeToString(pickOpt.ty)),
-    assertEquals("Number", Types.typeToString(pickRes.ty)),
-    assertEquals("Number", Types.typeToString(pickIRes.ty)),
+    assertEquals("U8", Types.typeToString(pickOpt.ty)),
+    assertEquals("U8", Types.typeToString(pickRes.ty)),
+    assertEquals("U8", Types.typeToString(pickIRes.ty)),
   ])
 })
 

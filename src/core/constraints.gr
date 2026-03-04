@@ -7,15 +7,27 @@ provide record Origin {
   description: String,
 }
 
+provide enum NumericConstraint {
+  IsNumeric(Types.Type),
+  IntLiteral(Types.Type, Number),
+}
+
 provide enum Constraint {
   Equality(Types.Type, Types.Type, Origin),
   Domain(String, Origin),
+  Numeric(NumericConstraint, Origin),
 }
 
 provide let equality = (left: Types.Type, right: Types.Type, origin: Origin) =>
   Equality(left, right, origin)
 
 provide let domain = (label: String, origin: Origin) => Domain(label, origin)
+
+provide let numericIs = (ty: Types.Type, origin: Origin) =>
+  Numeric(IsNumeric(ty), origin)
+
+provide let numericIntLiteral = (ty: Types.Type, value: Number, origin: Origin) =>
+  Numeric(IntLiteral(ty, value), origin)
 
 provide let makeOrigin = (nodeId: Number, description: String) =>
   { nodeId, description }

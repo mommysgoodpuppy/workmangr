@@ -97,6 +97,7 @@ provide enum rec ExprKind {
   Mark(Mark, Expr),
   Lit(AtomLiteral),
   Ident(Name),
+  Annotate(Expr, TypeExpr),
   Apply(Expr, Expr),
   Fn(FnExpr),
   Let(LetBinding, Expr),

@@ -47,6 +47,11 @@ let rec visitExpr = (store: NS.NodeStore, expr: SurfaceAst.Expr) => {
       let store = visitName(store, name)
       NS.addChild(store, expr.node.id, "name", name.node.id)
     },
+    SurfaceAst.Annotate(valueExpr, _annotation) => {
+      let store = NS.updatePreview(store, expr.node.id, "Annotate")
+      let store = visitExpr(store, valueExpr)
+      NS.addChild(store, expr.node.id, "value", valueExpr.node.id)
+    },
 
     SurfaceAst.Fn(fnExpr) => {
       let store = NS.updatePreview(store, expr.node.id, "Fn")

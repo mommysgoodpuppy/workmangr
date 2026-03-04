@@ -116,9 +116,10 @@ let truth = keep(true);
   let keepScheme = expectTopBinding(state, "keep")
   let oneScheme = expectTopBinding(state, "one")
   let truthScheme = expectTopBinding(state, "truth")
-  let hasTypeMismatch = List.some(
+  let hasHardTypeMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch,
+      entry.reason == Infer.TypeMismatch
+        && !String.contains("unresolved numeric", entry.message),
     state.marks
   )
   let idPoly = List.length(idScheme.quantifiers) >= 1
@@ -126,8 +127,8 @@ let truth = keep(true);
   all([
     assertTrue(idPoly),
     assertTrue(keepPoly),
-    assertFalse(hasTypeMismatch),
-    assertEquals("Number", Types.typeToString(oneScheme.ty)),
+    assertFalse(hasHardTypeMismatch),
+    assertEquals("U8", Types.typeToString(oneScheme.ty)),
     assertEquals("Bool", Types.typeToString(truthScheme.ty)),
   ])
 })
@@ -193,6 +194,25 @@ let classify = match(index:Int) => {
   assertFalse(hasHardMismatch)
 })
 
+test("expression annotation constrains arithmetic result type", () => {
+  let source =
+    "
+let x = 1 + 1: U8;
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "x")
+  let hasHardMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("cannot unify", entry.message),
+    state.marks
+  )
+  all([
+    assertFalse(hasHardMismatch),
+    assertEquals("U8", Types.typeToString(scheme.ty)),
+  ])
+})
+
 test("literal patterns use their literal type", () => {
   let source =
     "
@@ -206,8 +226,8 @@ let choose = (x) => {
   let state = inferSource(source)
   let scheme = expectTopBinding(state, "choose")
   match (scheme.ty) {
-    Types.TFun(Types.TBool, Types.TNumber) => assertTrue(true),
-    _ => fail "expected choose : Bool -> Number",
+    Types.TFun(Types.TBool, Types.TNominal("U8", [])) => assertTrue(true),
+    _ => fail "expected choose : Bool -> U8",
   }
 })
 
@@ -490,8 +510,10 @@ let b = lift(true);
   let liftScheme = expectTopBinding(state, "lift")
   let nScheme = expectTopBinding(state, "n")
   let bScheme = expectTopBinding(state, "b")
-  let hasTypeMismatch = List.some(
-    (entry: Infer.TypeMark) => entry.reason == Infer.TypeMismatch,
+  let hasHardTypeMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && !String.contains("unresolved numeric", entry.message),
     state.marks
   )
   let liftIsPolyInPayload = match (liftScheme.ty) {
@@ -511,7 +533,7 @@ let b = lift(true);
     assertTrue(liftIsPolyInPayload),
     assertTrue(nTypeOk),
     assertTrue(bTypeOk),
-    assertFalse(hasTypeMismatch),
+    assertFalse(hasHardTypeMismatch),
   ])
 })
 
@@ -549,7 +571,7 @@ let out = id(1);
   let layer2State = Layer2.solve(layer1State)
   assertEquals(0, List.length(layer2State.constraints))
   let outScheme = expectTopBinding(layer2State, "out")
-  assertEquals("Number", Types.typeToString(outScheme.ty))
+  assertEquals("U8", Types.typeToString(outScheme.ty))
 })
 
 test("literals map to primitive base types", () => {
@@ -571,8 +593,8 @@ let choose = (x) => { if (x) { 1 } else { 2 } };
   let state = inferSource(source)
   let scheme = expectTopBinding(state, "choose")
   match (scheme.ty) {
-    Types.TFun(Types.TBool, Types.TNumber) => assertTrue(true),
-    _ => fail "expected choose : Bool -> Number",
+    Types.TFun(Types.TBool, Types.TNominal("U8", [])) => assertTrue(true),
+    _ => fail "expected choose : Bool -> U8",
   }
 })
 
@@ -740,7 +762,7 @@ let keep = 1;
 "
   let state = inferSource(source)
   let keepScheme = expectTopBinding(state, "keep")
-  assertEquals("Number", Types.typeToString(keepScheme.ty))
+  assertEquals("U8", Types.typeToString(keepScheme.ty))
   let hasUnknownIdentifier = List.some(
     (entry: Infer.TypeMark) => entry.reason == Infer.UnknownIdentifier,
     state.marks
@@ -790,7 +812,7 @@ let keep = 1;
 "
   let state = inferSource(source)
   let keepScheme = expectTopBinding(state, "keep")
-  assertEquals("Number", Types.typeToString(keepScheme.ty))
+  assertEquals("U8", Types.typeToString(keepScheme.ty))
   let hasPatternArityMark = List.some(
     (entry: Infer.TypeMark) =>
       entry.reason == Infer.TypeMismatch
@@ -816,7 +838,7 @@ let keep = 1;
 "
   let state = inferSource(source)
   let keepScheme = expectTopBinding(state, "keep")
-  assertEquals("Number", Types.typeToString(keepScheme.ty))
+  assertEquals("U8", Types.typeToString(keepScheme.ty))
   let hasUnknownOrPatternMark = List.some(
     (entry: Infer.TypeMark) =>
       entry.reason == Infer.UnknownIdentifier
@@ -964,18 +986,19 @@ let pick = (x) => {
 "
   let state = inferSource(source)
   let pickScheme = expectTopBinding(state, "pick")
-  let hasTypeMismatch = List.some(
+  let hasHardTypeMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch,
+      entry.reason == Infer.TypeMismatch
+        && !String.contains("unresolved numeric", entry.message),
     state.marks
   )
   match (pickScheme.ty) {
-    Types.TFun(Types.TNominal("Option", [Types.TNumber]), Types.TNumber) =>
+    Types.TFun(Types.TNominal("Option", [Types.TNominal("U8", [])]), Types.TNominal("U8", [])) =>
       all([
-        assertFalse(hasTypeMismatch),
+        assertFalse(hasHardTypeMismatch),
         assertTrue(true),
       ]),
-    _ => fail("expected pick : Option<Number> -> Number"),
+    _ => fail("expected pick : Option<U8> -> U8"),
   }
 })
 
@@ -1000,12 +1023,12 @@ let onlyPair = (p) => {
     state.marks
   )
   match (onlyPairScheme.ty) {
-    Types.TFun(Types.TTuple([Types.TBool, Types.TBool]), Types.TNumber) =>
+    Types.TFun(Types.TTuple([Types.TBool, Types.TBool]), Types.TNominal("U8", [])) =>
       all([
         assertFalse(hasUnknownIdentifier),
         assertTrue(true),
       ]),
-    _ => fail("expected onlyPair : (Bool, Bool) -> Number"),
+    _ => fail("expected onlyPair : (Bool, Bool) -> U8"),
   }
 })
 
@@ -1029,12 +1052,12 @@ let choose = (b) => {
     state.marks
   )
   match (chooseScheme.ty) {
-    Types.TFun(Types.TBool, Types.TNumber) =>
+    Types.TFun(Types.TBool, Types.TNominal("U8", [])) =>
       all([
         assertFalse(hasUnknownPanic),
         assertTrue(true),
       ]),
-    _ => fail "expected choose : Bool -> Number",
+    _ => fail "expected choose : Bool -> U8",
   }
 })
 
@@ -1085,8 +1108,8 @@ let y = Panic(1);
     (entry: Infer.TypeMark) =>
       entry.reason == Infer.TypeMismatch
         && (
-          String.contains("cannot unify Number with String", entry.message)
-            || String.contains("cannot unify String with Number", entry.message)
+          (String.contains("cannot unify", entry.message) && String.contains("String", entry.message))
+            || String.contains("not numeric", entry.message)
         ),
     state.marks
   )
@@ -1132,7 +1155,7 @@ let keep = 1;
     state.marks
   )
   all([
-    assertEquals("Number", Types.typeToString(keepScheme.ty)),
+    assertEquals("U8", Types.typeToString(keepScheme.ty)),
     assertTrue(hasNonExhaustive),
   ])
 })
@@ -1197,7 +1220,7 @@ let keep = 1;
     state.marks
   )
   all([
-    assertEquals("Number", Types.typeToString(keepScheme.ty)),
+    assertEquals("U8", Types.typeToString(keepScheme.ty)),
     assertTrue(hasMixedTypeDiag),
   ])
 })

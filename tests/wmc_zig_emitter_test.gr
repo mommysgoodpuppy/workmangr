@@ -50,7 +50,7 @@ let emitUnifiedNoArg = (
   }
   WmcEmitZig.emitUnifiedCfgNoArgSpecializedInt(
     cfg,
-    options={ functionName: fnName, includeSourceComments: false }
+    options={ functionName: fnName, includeSourceComments: false, resultType: None }
   )
 }
 

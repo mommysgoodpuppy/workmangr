@@ -62,6 +62,7 @@ and provide record Attachments {
 provide enum rec ExprKind {
   Lit(AtomLiteral),
   Ident(Name),
+  Annotate(Expr, TypeExpr),
   Fn(FnExpr),
   Match(MatchExpr),
   Apply(Expr, Expr), // callee, single arg

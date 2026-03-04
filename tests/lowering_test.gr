@@ -669,5 +669,32 @@ test("call argument lowering preserves nested evaluation shape order", () => {
   )
 })
 
+test("expression type ascription lowers to core annotate node", () => {
+  let source = "let x = 1 + 1: U8;"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) =>
+      match (binding.value.kind) {
+        CoreAst.Annotate(valueExpr, annotation) =>
+          match ((valueExpr.kind, annotation.kind)) {
+            (
+              CoreAst.Apply(_, _),
+              CoreAst.Ref({ text: "U8", _ }, []),
+            ) => Ok(void),
+            _ => Err("expected annotate(infix-value, U8)"),
+          },
+        _ => Err("expected core annotate node"),
+      },
+  )
+})
+
 let results = runTests()
 printResultsAndExit(results)

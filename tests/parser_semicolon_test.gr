@@ -281,6 +281,30 @@ test("parser supports match arrow params with type annotations", () => {
   all([assertTrue(shapeOk), assertFalse(hasErrors)])
 })
 
+test("parser supports expression type ascription", () => {
+  clearErrors()
+  let source = "let x = 1 + 1: U8;"
+  let parsed = Parser.parse(source)
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Annotate(
+            { kind: SurfaceAst.InfixChain({ rest: [({ text: "+", _ }, _)], _ }), _ },
+            { kind: SurfaceAst.Ref({ text: "U8", _ }, []), _ },
+          ) => true,
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
 test("only @core directive enables canonical core mode", () => {
   clearErrors()
   let coreProgram = Parser.parse("@core;\nlet x = 1;")

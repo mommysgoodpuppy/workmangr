@@ -158,6 +158,7 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Lit(SurfaceAst.Unit) => "Lit(Unit)",
       SurfaceAst.Lit(SurfaceAst.Byte(_)) => "Lit(Byte)",
       SurfaceAst.Ident(name) => "Ident(" ++ escapeJson(name.text) ++ ")",
+      SurfaceAst.Annotate(_, _) => "Annotate",
       SurfaceAst.Fn(_) => "Fn",
       SurfaceAst.Match(_) => "Match",
       SurfaceAst.Apply(_, _) => "Apply",
@@ -229,6 +230,8 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
         let argJson = exprToJson(arg, depth + 1)
         ",\"children\":[" ++ calleeJson ++ "," ++ argJson ++ "]"
       },
+      SurfaceAst.Annotate(valueExpr, _annotation) =>
+        ",\"children\":[" ++ exprToJson(valueExpr, depth + 1) ++ "]",
       SurfaceAst.Assign(asg) => {
         let targetJson = exprToJson(asg.target, depth + 1)
         let valueJson = exprToJson(asg.value, depth + 1)

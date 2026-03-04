@@ -140,6 +140,7 @@ and projectExpr = (ctx: ProjectCtx, expr: CoreAst.Expr) => {
     CoreAst.Mark(mark, inner) => EMark(mark, projectExpr(ctx, inner)),
     CoreAst.Lit(lit) => ELit(lit),
     CoreAst.Ident(name) => EIdent(name.text),
+    CoreAst.Annotate(valueExpr, _annotation) => projectExpr(ctx, valueExpr).kind,
     CoreAst.Apply(callee, arg) => EApply(projectExpr(ctx, callee), projectExpr(ctx, arg)),
     CoreAst.Fn(fnExpr) => EFn(projectFnExpr(ctx, fnExpr)),
     CoreAst.Let(binding, body) => ELet(projectLetBinding(ctx, binding), projectExpr(ctx, body)),

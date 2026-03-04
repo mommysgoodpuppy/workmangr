@@ -1074,12 +1074,28 @@ let rec parseExpr: Parser<SurfaceAst.Expr> = state => {
     },
     _ => (pipedExpr, pipedState),
   }
+  let rec parseTypeAscriptions = (lhs: SurfaceAst.Expr, stateX: ParseState) =>
+    if (kindIs(currentToken(stateX).kind, Lexer.Colon)) {
+      let (_, stateColon) = expectSimple(Lexer.Colon, stateX)
+      let (annotation, stateAfterType) = parseTypeExpr(stateColon)
+      let span = spanFromTokens(lhs.node.span, annotation.node.span)
+      let (id, stateAfterId) = freshId(stateAfterType)
+      let annotated = makeExpr(id, span, Annotate(lhs, annotation))
+      parseTypeAscriptions(annotated, stateAfterId)
+    } else {
+      (lhs, stateX)
+    }
+  let (exprWithAscription, state1a) = parseTypeAscriptions(expr, state1)
   let (trailingTrivia, state2) = takeTrailingGapTriviaOnLine(
-    expr.node.span.line,
-    state1,
+    exprWithAscription.node.span.line,
+    state1a,
     []
   )
-  let exprWithAttach = withExprAttachments(expr, leadingTrivia, trailingTrivia)
+  let exprWithAttach = withExprAttachments(
+    exprWithAscription,
+    leadingTrivia,
+    trailingTrivia
+  )
   (exprWithAttach, state2)
 }
 and parseInfix: Parser<SurfaceAst.Expr> = state => {
@@ -3770,6 +3786,7 @@ and parseMatch = (state: ParseState) => {
   let (matchTok, state2) = expectKeyword("match", state)
   let rec exprToParamPattern = (expr: SurfaceAst.Expr) => {
     match (expr.kind) {
+      Annotate(inner, _annotation) => exprToParamPattern(inner),
       Ident({ text, _ }) when text == "_" =>
         Some(
           { node: expr.node, kind: SurfaceAst.Wildcard, attach: expr.attach }:

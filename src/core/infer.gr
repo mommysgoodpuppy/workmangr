@@ -59,6 +59,7 @@ provide record InferState {
   infectionRegistry: InfectionRegistry.Registry,
   nodeTypes: Map.Map<Number, Types.Type>,
   topBindings: Map.Map<String, Types.Scheme>,
+  topBindingRawTypes: Map.Map<String, Types.Type>,
   constraints: List<Constraints.Constraint>,
   matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
   marks: List<TypeMark>,
@@ -95,24 +96,24 @@ let renderType = (t: Types.Type, state: InferState) =>
 
 let seedBuiltinValues = (env: Env.TypingEnv) => {
   let intType = Types.TNominal("Int", [])
-  let numberType = Types.TNumber
   let boolType = Types.TBool
   let charType = Types.TChar
   let stringType = Types.TString
   let voidType = Types.TVoid
   let listIntType = Types.TNominal("List", [intType])
   let orderingType = Types.TNominal("Ordering", [])
+  let tNum = Types.TVar(0)
   let binaryInt: Types.Scheme = {
     quantifiers: [],
     ty: Types.TFun(Types.TTuple([intType, intType]), intType),
   }
-  let binaryNumber: Types.Scheme = {
-    quantifiers: [],
-    ty: Types.TFun(Types.TTuple([numberType, numberType]), numberType),
+  let binaryNumeric: Types.Scheme = {
+    quantifiers: [0],
+    ty: Types.TFun(Types.TTuple([tNum, tNum]), tNum),
   }
-  let cmpNumber: Types.Scheme = {
-    quantifiers: [],
-    ty: Types.TFun(Types.TTuple([numberType, numberType]), boolType),
+  let cmpNumeric: Types.Scheme = {
+    quantifiers: [0],
+    ty: Types.TFun(Types.TTuple([tNum, tNum]), boolType),
   }
   let unaryBool: Types.Scheme = {
     quantifiers: [],
@@ -165,19 +166,20 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   Env.defineValue(env, "nativeStrFromLiteral", nativeStrFromLiteral)
   Env.defineValue(env, "nativeCharEq", nativeCharEq)
   Env.defineValue(env, "nativePrint", nativePrint)
+  Env.defineValue(env, "print", nativePrint)
   Env.defineValue(env, "Panic", panicValue)
   // Temporary builtin operator support until std-based operator resolution lands.
-  define("+", binaryNumber)
-  define("-", binaryNumber)
-  define("*", binaryNumber)
-  define("/", binaryNumber)
-  define("%", binaryNumber)
-  define("==", cmpNumber)
-  define("!=", cmpNumber)
-  define(">", cmpNumber)
-  define("<", cmpNumber)
-  define(">=", cmpNumber)
-  define("<=", cmpNumber)
+  define("+", binaryNumeric)
+  define("-", binaryNumeric)
+  define("*", binaryNumeric)
+  define("/", binaryNumeric)
+  define("%", binaryNumeric)
+  define("==", cmpNumeric)
+  define("!=", cmpNumeric)
+  define(">", cmpNumeric)
+  define("<", cmpNumeric)
+  define(">=", cmpNumeric)
+  define("<=", cmpNumeric)
   define("!", unaryBool)
   define("not", unaryBool)
   define("&&", {
@@ -215,6 +217,7 @@ let makeInitialState = () => {
   let infectionRegistry = InfectionRegistry.empty()
   let nodeTypes = Map.make()
   let topBindings = Map.make()
+  let topBindingRawTypes = Map.make()
   {
     nextVar: 0,
     subst,
@@ -222,6 +225,7 @@ let makeInitialState = () => {
     infectionRegistry,
     nodeTypes,
     topBindings,
+    topBindingRawTypes,
     constraints: [],
     matchArms: Map.make(),
     marks: [],
@@ -237,6 +241,22 @@ let recordConstraint = (state: InferState, constraint: Constraints.Constraint) =
 let originForNode = (nodeId: Number, description: String) =>
   Constraints.makeOrigin(nodeId, description)
 
+let recordNumericConstraint = (
+  state: InferState,
+  numeric: Constraints.NumericConstraint,
+  origin: Constraints.Origin,
+) => recordConstraint(state, Constraints.Numeric(numeric, origin))
+
+let recordNumericIs = (state: InferState, ty: Types.Type, origin: Constraints.Origin) =>
+  recordNumericConstraint(state, Constraints.IsNumeric(ty), origin)
+
+let recordNumericIntLiteral = (
+  state: InferState,
+  ty: Types.Type,
+  value: Number,
+  origin: Constraints.Origin,
+) => recordNumericConstraint(state, Constraints.IntLiteral(ty, value), origin)
+
 let addTypeMark = (
   state: InferState,
   reason: TypeMarkReason,
@@ -248,6 +268,7 @@ let addTypeMark = (
     match (constraint) {
       Constraints.Equality(_, _, o) => Some(o),
       Constraints.Domain(_, o) => Some(o),
+      Constraints.Numeric(_, o) => Some(o),
     }, state.constraints)
   let rec take = (items: List<Constraints.Origin>, n: Number, acc: List<Constraints.Origin>) =>
     if (n <= 0) {
@@ -798,6 +819,41 @@ let applyOpRuleAtCall = (
     },
   }
 
+let isNumericBinaryOp = (name: String) =>
+  name == "+" || name == "-" || name == "*" || name == "/" || name == "%"
+
+let isNumericComparisonOp = (name: String) =>
+  name == "==" || name == "!=" || name == ">" || name == "<" || name == ">=" || name == "<="
+
+let applyNumericDomainAtCall = (
+  callNodeId: Number,
+  opName: String,
+  argType: Types.Type,
+  resultType: Types.Type,
+  state: InferState,
+) => {
+  if (!(isNumericBinaryOp(opName) || isNumericComparisonOp(opName))) {
+    state
+  } else {
+    let origin = originForNode(callNodeId, "numeric domain")
+    let argApplied = apply(state, argType)
+    let rec constrainItems = (items: List<Types.Type>, st: InferState) =>
+      match (items) {
+        [] => st,
+        [head, ...tail] => constrainItems(tail, recordNumericIs(st, head, origin)),
+      }
+    let state1 = match (argApplied) {
+      Types.TTuple(items) => constrainItems(items, state),
+      _ => recordNumericIs(state, argApplied, origin),
+    }
+    if (isNumericBinaryOp(opName)) {
+      recordNumericIs(state1, apply(state1, resultType), origin)
+    } else {
+      state1
+    }
+  }
+}
+
 let occurs = (varId: Number, t: Types.Type, state: InferState) => {
   let fv = Types.freeVars(apply(state, t))
   Types.containsVar(fv, varId)
@@ -1283,8 +1339,8 @@ let rec unify = (
 
   match ((l, r)) {
     (Types.TNumber, Types.TNumber) => state1,
-    (Types.TNumber, Types.TNominal("Int", [])) => state1,
-    (Types.TNominal("Int", []), Types.TNumber) => state1,
+    (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => state1,
+    (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => state1,
     (Types.TBool, Types.TBool) => state1,
     (Types.TString, Types.TString) => state1,
     (Types.TByte, Types.TByte) => state1,
@@ -1555,21 +1611,30 @@ let rec withPatternBindings = (
       fn(state2)
     },
     CoreAst.Lit(_) => {
-      let litType = match (pattern.kind) {
-        CoreAst.Lit(CoreAst.Int(_)) => Types.TNumber,
-        CoreAst.Lit(CoreAst.Bool(_)) => Types.TBool,
-        CoreAst.Lit(CoreAst.Str(_)) => Types.TString,
-        CoreAst.Lit(CoreAst.Byte(_)) => Types.TByte,
-        CoreAst.Lit(CoreAst.Char(_)) => Types.TChar,
-        CoreAst.Lit(CoreAst.Unit) => Types.TVoid,
-        _ => Types.TNumber,
+      let (litType, stateLit) = match (pattern.kind) {
+        CoreAst.Lit(CoreAst.Int(value)) => {
+          let (numericTy, st1) = freshVar(state)
+          let st2 = recordNumericIntLiteral(
+            st1,
+            numericTy,
+            value,
+            originForNode(pattern.node.id, "literal pattern numeric")
+          )
+          (numericTy, st2)
+        },
+        CoreAst.Lit(CoreAst.Bool(_)) => (Types.TBool, state),
+        CoreAst.Lit(CoreAst.Str(_)) => (Types.TString, state),
+        CoreAst.Lit(CoreAst.Byte(_)) => (Types.TByte, state),
+        CoreAst.Lit(CoreAst.Char(_)) => (Types.TChar, state),
+        CoreAst.Lit(CoreAst.Unit) => (Types.TVoid, state),
+        _ => (Types.TNumber, state),
       }
       let state1 = unifyForNode(
         pattern.node.id,
         "literal pattern",
         expectedType,
         litType,
-        state
+        stateLit
       )
       fn(state1)
     },
@@ -1705,12 +1770,78 @@ let rec withPatternBindings = (
   }
 }
 
+let collectNumericConstraintVars = (state: InferState) => {
+  let seen: Map.Map<Number, Bool> = Map.make()
+  let addTypeVars = (ty: Types.Type) =>
+    List.forEach((id: Number) => {
+      Map.set(id, true, seen)
+      void
+    }, Types.freeVars(Types.applySubstType(state.subst, ty)))
+  List.forEach((constraint: Constraints.Constraint) => {
+    match (constraint) {
+      Constraints.Numeric(spec, _origin) =>
+        match (spec) {
+          Constraints.IsNumeric(ty) => addTypeVars(ty),
+          Constraints.IntLiteral(ty, _value) => addTypeVars(ty),
+        },
+      _ => void,
+    }
+  }, state.constraints)
+  seen
+}
+
+let normalizeNumericTypeForGeneralize = (ty: Types.Type, state: InferState) => {
+  let numericVars = collectNumericConstraintVars(state)
+  let rec rewrite = (current: Types.Type) =>
+    match (Types.applySubstType(state.subst, current)) {
+      Types.TVar(id) =>
+        if (Map.get(id, numericVars) != None) {
+          Types.TNumber
+        } else {
+          Types.TVar(id)
+        },
+      Types.TFun(a, b) => Types.TFun(rewrite(a), rewrite(b)),
+      Types.TTuple(items) => Types.TTuple(List.map(rewrite, items)),
+      Types.TNominal(name, args) => Types.TNominal(name, List.map(rewrite, args)),
+      other => other,
+    }
+  rewrite(ty)
+}
+
+let normalizeNumericTypeWithVarSet = (
+  ty: Types.Type,
+  subst: Types.Subst,
+  numericVars: Map.Map<Number, Bool>,
+) => {
+  let rec rewrite = (current: Types.Type) =>
+    match (Types.applySubstType(subst, current)) {
+      Types.TVar(id) =>
+        if (Map.get(id, numericVars) != None) {
+          Types.TNumber
+        } else {
+          Types.TVar(id)
+        },
+      Types.TFun(a, b) => Types.TFun(rewrite(a), rewrite(b)),
+      Types.TTuple(items) => Types.TTuple(List.map(rewrite, items)),
+      Types.TNominal(name, args) => Types.TNominal(name, List.map(rewrite, args)),
+      other => other,
+    }
+  rewrite(ty)
+}
+
 let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
   match (expr.kind) {
     CoreAst.Mark(_, inner) => inferExpr(inner, state),
-    CoreAst.Lit(CoreAst.Int(_value)) => {
-      let t = recordNodeType(expr.node.id, Types.TNumber, state)
-      (t, state)
+    CoreAst.Lit(CoreAst.Int(value)) => {
+      let (numericTy, state1) = freshVar(state)
+      let state2 = recordNumericIntLiteral(
+        state1,
+        numericTy,
+        value,
+        originForNode(expr.node.id, "integer literal")
+      )
+      let t = recordNodeType(expr.node.id, numericTy, state2)
+      (t, state2)
     },
     CoreAst.Lit(CoreAst.Bool(_)) => {
       let t = recordNodeType(expr.node.id, Types.TBool, state)
@@ -1736,6 +1867,20 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       let (t, state1) = lookupEnv(name, state)
       let tRecorded = recordNodeType(expr.node.id, t, state1)
       (tRecorded, state1)
+    },
+    CoreAst.Annotate(valueExpr, annotation) => {
+      let (valueType, state1) = inferExpr(valueExpr, state)
+      let annotationType = typeFromAnnotation(annotation)
+      let state2 = unifyForNode(
+        expr.node.id,
+        "expression annotation",
+        valueType,
+        annotationType,
+        state1
+      )
+      let annotatedType = apply(state2, annotationType)
+      let tRecorded = recordNodeType(expr.node.id, annotatedType, state2)
+      (tRecorded, state2)
     },
     CoreAst.Hole(_) => {
       let t = Types.THole(expr.node.id)
@@ -2235,11 +2380,12 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
             Some(annotation) => apply(state3, typeFromAnnotation(annotation)),
             None => apply(state3, tValueRaw),
           }
+          let tValueFinal = normalizeNumericTypeForGeneralize(tValue, state3)
           logState("let.preGeneralize", state3, nodeId=binding.node.id)
           let scheme = Types.generalize(
             Env.snapshotValues(state3.env),
             state3.subst,
-            tValue
+            tValueFinal
           )
           let (tBody, state3) = withBinding(
             name.text,
@@ -2267,11 +2413,12 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
             Some(annotation) => apply(state2, typeFromAnnotation(annotation)),
             None => apply(state2, tValueRaw),
           }
+          let tValueFinal = normalizeNumericTypeForGeneralize(tValue, state2)
           logState("let.preGeneralize", state2, nodeId=binding.node.id)
           let scheme = Types.generalize(
             Env.snapshotValues(state2.env),
             state2.subst,
-            tValue
+            tValueFinal
           )
           let (instType, nextVar) = Types.instantiate(scheme, state2.nextVar)
           let state3 = { ...state2, nextVar }
@@ -2384,12 +2531,28 @@ and inferFunctionApplication = (
       applyOpRuleAtCall(exprNodeId, name.text, tCallee, tArg, tRes, state5),
     _ => state5,
   }
-  let tAppliedBase = apply(state6, tRes)
+  let state6a = match (callee.kind) {
+    CoreAst.Ident(name) =>
+      applyNumericDomainAtCall(exprNodeId, name.text, normalizedArgType, tRes, state6),
+    _ => state6,
+  }
+  let state6b = match (callee.kind) {
+    CoreAst.Ident(name) when isNumericBinaryOp(name.text) =>
+      unifyForNode(
+        exprNodeId,
+        "numeric arithmetic default",
+        tRes,
+        Types.TNumber,
+        state6a
+      ),
+    _ => state6a,
+  }
+  let tAppliedBase = apply(state6b, tRes)
   let (tApplied, state7) = match (selectedWrapOpt) {
     Some(wrap) => (
-      wrapResultWithCarrier(tAppliedBase, wrap, state6),
+      wrapResultWithCarrier(tAppliedBase, wrap, state6b),
       noteEffectEvent(
-        state6,
+        state6b,
         exprNodeId,
         "propagation",
         "charged by "
@@ -2399,7 +2562,7 @@ and inferFunctionApplication = (
           ++ ") via argument propagation"
       ),
     ),
-    None => (tAppliedBase, state6),
+    None => (tAppliedBase, state6b),
   }
   let tRecorded = recordNodeType(exprNodeId, tApplied, state7)
   (tRecorded, state7)
@@ -2518,11 +2681,12 @@ let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
     _ => None,
   }
   let (tValue, state1) = inferBindingValue(binding, state)
+  let tValueFinal = normalizeNumericTypeForGeneralize(tValue, state1)
   logState("letBinding.preGeneralize", state1, nodeId=binding.node.id)
   let scheme = Types.generalize(
     Env.snapshotValues(state1.env),
     state1.subst,
-    tValue
+    tValueFinal
   )
   let name = Layer1Expr.bindingName(binding)
   match (declaredNameOpt) {
@@ -2534,7 +2698,8 @@ let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
       } else {
         Env.defineValue(state1.env, name, scheme)
         Map.set(name, scheme, state1.topBindings)
-        state1
+        Map.set(name, tValue, state1.topBindingRawTypes)
+        { ...state1, topBindingRawTypes: state1.topBindingRawTypes }
       },
   }
 }
@@ -2632,10 +2797,12 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
     match (remaining) {
       [] => st,
       [(name, placeholderType), ...rest] => {
-        let scheme = Types.generalize(baseValues, st.subst, placeholderType)
+        let schemeType = normalizeNumericTypeForGeneralize(placeholderType, st)
+        let scheme = Types.generalize(baseValues, st.subst, schemeType)
         Env.defineValue(st.env, name, scheme)
         Map.set(name, scheme, st.topBindings)
-        finalize(rest, st)
+        Map.set(name, placeholderType, st.topBindingRawTypes)
+        finalize(rest, { ...st, topBindingRawTypes: st.topBindingRawTypes })
       },
     }
 
@@ -2738,6 +2905,8 @@ let solveConstraints = (state: InferState) => {
         (Types.TVar(_), _) => false,
         (_, Types.TVar(_)) => false,
         (Types.TNumber, Types.TNumber) => false,
+        (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
+        (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => false,
         (Types.TBool, Types.TBool) => false,
         (Types.TString, Types.TString) => false,
         (Types.TByte, Types.TByte) => false,
@@ -2817,10 +2986,11 @@ let solveConstraints = (state: InferState) => {
     )
 
   // Hazel-style layering: Layer 1 has already enforced HM equality constraints.
-  // Layer 2 handles only deferred/domain constraints.
+  // Layer 2 handles only deferred domain-style constraints.
   let deferred = List.filter((constraint: Constraints.Constraint) =>
     match (constraint) {
       Constraints.Domain(_, _) => true,
+      Constraints.Numeric(_, _) => true,
       _ => false,
     }, state.constraints)
 
@@ -2832,16 +3002,31 @@ let solveConstraints = (state: InferState) => {
   match (Solver.solve(solverState)) {
     Ok(result) => {
       Env.applySubst(state.env, result.subst)
+      let numericVars = collectNumericConstraintVars(state)
       let solvedNodeTypes = Map.make()
       Map.forEach((id, ty) => {
-        let solved = Types.applySubstType(result.subst, ty)
+        let solved = normalizeNumericTypeWithVarSet(ty, result.subst, numericVars)
         Map.set(id, solved, solvedNodeTypes)
       }, state.nodeTypes)
+      let solvedTopBindings = Map.make()
+      List.forEach(((name, scheme): (String, Types.Scheme)) => {
+        let solvedTyFromScheme = normalizeNumericTypeWithVarSet(scheme.ty, result.subst, numericVars)
+        let solvedTy = if (scheme.quantifiers == []) {
+          match (Map.get(name, state.topBindingRawTypes)) {
+            Some(rawTy) => normalizeNumericTypeWithVarSet(rawTy, result.subst, numericVars),
+            None => solvedTyFromScheme,
+          }
+        } else {
+          solvedTyFromScheme
+        }
+        Map.set(name, { ...scheme, ty: solvedTy }: Types.Scheme, solvedTopBindings)
+      }, Map.toList(state.topBindings))
 
       let solvedState = {
         ...state,
         subst: result.subst,
         nodeTypes: solvedNodeTypes,
+        topBindings: solvedTopBindings,
         constraints: result.domainConstraints,
       }
       addUnfillableHoleMarks(solvedState, result.subst)
@@ -2864,6 +3049,14 @@ let solveConstraints = (state: InferState) => {
           ++ Types.typeToReadableString(left)
           ++ " with "
           ++ Types.typeToReadableString(right)
+      ),
+    Err(Solver.NumericViolation(origin, message)) =>
+      addTypeMark(
+        state,
+        TypeMismatch,
+        origin,
+        CoreAst.Inconsistent,
+        "Type error (" ++ origin.description ++ "): " ++ message
       ),
   }
 }
