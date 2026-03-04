@@ -735,5 +735,149 @@ test("virtual formatter emits inferred hole as virtual artifact", () => {
   assertEquals(canonicalNonWs("let thing = ?;"), canonicalNonWs(result.text))
 })
 
+test("virtual formatter emits recovered wildcard pattern as virtual artifact", () => {
+  let source = "let ="
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let wildcardArtifacts = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "_"
+        && artifact.reason == "recovered wildcard"
+        && artifact.repairClass == SurfaceAst.RecoveryOnly,
+    result.virtualArtifacts
+  )
+  assertTrue(List.length(wildcardArtifacts) > 0)
+})
+
+test("virtual formatter marks top-level missing semicolon as autofix when anchored to concrete token", () => {
+  let source = "let x = 1"
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let semicolonArtifacts = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == ";"
+        && artifact.reason == "missing semicolon"
+        && artifact.repairClass == SurfaceAst.AutoFix,
+    result.virtualArtifacts
+  )
+  assertTrue(List.length(semicolonArtifacts) > 0)
+})
+
+test("virtual formatter marks missing match-arm comma as autofix", () => {
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}"
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let commaArtifacts = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == ","
+        && artifact.reason == "missing comma"
+        && artifact.repairClass == SurfaceAst.AutoFix,
+    result.virtualArtifacts
+  )
+  assertTrue(List.length(commaArtifacts) > 0)
+})
+
+test("virtual formatter keeps trailing semicolon recovery-only on undecidable item", () => {
+  let source = "let x = {\n  1\n"
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let rbraceArtifacts = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "}"
+        && artifact.reason == "missing token"
+        && artifact.repairClass == SurfaceAst.AutoFix,
+    result.virtualArtifacts
+  )
+  let semicolonArtifacts = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == ";"
+        && artifact.reason == "missing semicolon"
+        && artifact.repairClass == SurfaceAst.RecoveryOnly,
+    result.virtualArtifacts
+  )
+  all([
+    assertTrue(List.length(rbraceArtifacts) > 0),
+    assertTrue(List.length(semicolonArtifacts) > 0),
+  ])
+})
+
+test("virtual formatter recovers bare top-level let without consuming next declaration", () => {
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}\n\n"
+      ++ "let\n\n"
+      ++ "let thing = 1\n\n"
+      ++ "let main = => print(thing)"
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let got = canonicalNonWs(result.text)
+  let expected = canonicalNonWs(
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => {x},\n"
+      ++ "  None => {Panic(\"panic\")}\n"
+      ++ "};\n\n"
+      ++ "let _ = ?;\n\n"
+      ++ "let thing = 1;\n\n"
+      ++ "let main = () => {print(thing)};"
+  )
+  assertEquals(expected, got)
+})
+
+test("virtual formatter keeps bare let recovery tokens non-autofix", () => {
+  let source = "let\n"
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let missingEqRecovery = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "="
+        && artifact.reason == "missing token"
+        && artifact.repairClass == SurfaceAst.RecoveryOnly,
+    result.virtualArtifacts
+  )
+  let semicolonRecovery = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == ";"
+        && artifact.reason == "missing semicolon"
+        && artifact.repairClass == SurfaceAst.RecoveryOnly,
+    result.virtualArtifacts
+  )
+  all([
+    assertTrue(List.length(missingEqRecovery) > 0),
+    assertTrue(List.length(semicolonRecovery) > 0),
+  ])
+})
+
+test("virtual artifacts carry structural repair classes", () => {
+  let source = "let main = => print(thing)"
+  let result = Formatter.formatResultWithMode(source, Formatter.Virtual)
+  let lBrace = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "{" && artifact.repairClass == SurfaceAst.AutoFix,
+    result.virtualArtifacts
+  )
+  let rBrace = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "}" && artifact.repairClass == SurfaceAst.AutoFix,
+    result.virtualArtifacts
+  )
+  let unitParam = List.filter(
+    (artifact: Formatter.VirtualArtifact) =>
+      artifact.text == "()"
+        && artifact.repairClass == SurfaceAst.OptionalCanonical,
+    result.virtualArtifacts
+  )
+  let paired =
+    match ((List.head(lBrace), List.head(rBrace))) {
+      (Some(lb), Some(rb)) => lb.repairPairId != None && lb.repairPairId == rb.repairPairId,
+      _ => false,
+    }
+  all([
+    assertTrue(List.length(unitParam) > 0),
+    assertTrue(List.length(lBrace) > 0),
+    assertTrue(List.length(rBrace) > 0),
+    assertTrue(paired),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

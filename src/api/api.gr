@@ -546,6 +546,15 @@ let typeMarksToJson = (marks: List<Infer.TypeMark>) =>
   "[" ++ joinStrings(",", List.map(typeMarkToJson, marks)) ++ "]"
 
 let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
+  let repairClass = match (artifact.repairClass) {
+    SurfaceAst.AutoFix => "AutoFix",
+    SurfaceAst.OptionalCanonical => "OptionalCanonical",
+    SurfaceAst.RecoveryOnly => "RecoveryOnly",
+  }
+  let repairPairJson = match (artifact.repairPairId) {
+    Some(pairId) => toString(pairId),
+    None => "null",
+  }
   "{\"kind\":\""
     ++ escapeJson(artifact.kind)
     ++ "\","
@@ -563,7 +572,11 @@ let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
     ++ ","
     ++ "\"reason\":\""
     ++ escapeJson(artifact.reason)
-    ++ "\"}"
+    ++ "\",\"repairClass\":\""
+    ++ repairClass
+    ++ "\",\"repairPairId\":"
+    ++ repairPairJson
+    ++ "}"
 }
 
 let virtualArtifactsToJson = (artifacts: List<Formatter.VirtualArtifact>) =>

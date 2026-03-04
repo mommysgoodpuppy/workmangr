@@ -201,6 +201,8 @@ let mkError = (message: String) => {
     node: { id: 0, span },
     kind: SurfaceAst.InvalidTopLevel("module"),
     expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemAny),
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
   }
   Error.compilerErrorFromMark(
     Error.Parsing,

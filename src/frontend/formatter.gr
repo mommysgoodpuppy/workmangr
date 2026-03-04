@@ -94,6 +94,8 @@ provide record VirtualArtifact {
   end: Number,
   sourceAnchor: Number,
   reason: String,
+  repairClass: SurfaceAst.RepairClass,
+  repairPairId: Option<Number>,
 }
 
 provide record SemicolonAddition {
@@ -148,7 +150,19 @@ let artifactFromVirtual = (
   end: Number,
   sourceAnchor: Number,
   reason: String,
-) => { kind: "ghostToken", text, start, end, sourceAnchor, reason }
+  repairClass: SurfaceAst.RepairClass,
+  repairPairId: Option<Number>,
+) =>
+  {
+    kind: "ghostToken",
+    text,
+    start,
+    end,
+    sourceAnchor,
+    reason,
+    repairClass,
+    repairPairId,
+  }
 
 let renderWithSettingsWithTokens = (
   program: SurfaceAst.Program,
@@ -219,6 +233,23 @@ let renderWithSettingsWithTokens = (
           }
         },
       }
+    }
+    find(tokensNoComments)
+  }
+
+  let hasConcreteWildcardToken = (span: Source.Span) => {
+    let rec find = (items: List<Lexer.Token>) => match (items) {
+      [] => false,
+      [tok, ...tail] => {
+        if (tok.span.start == span.start && tok.span.end == span.end) {
+          match (tok.kind) {
+            Lexer.Wildcard => true,
+            _ => find(tail),
+          }
+        } else {
+          find(tail)
+        }
+      },
     }
     find(tokensNoComments)
   }
@@ -578,15 +609,63 @@ let renderWithSettingsWithTokens = (
     }
   }
 
-  let emitVirtual = (text: String, anchor: Number, reason: String) => {
+  let emitVirtual = (
+    text: String,
+    anchor: Number,
+    reason: String,
+    repairClass: SurfaceAst.RepairClass,
+    repairPairId: Option<Number>,
+  ) => {
     if (mode == Virtual && settings.allowVirtualInsertions) {
       let start = renderedLen
       write(text)
       let end = renderedLen
       artifacts = [
-        artifactFromVirtual(text, start, end, anchor, reason),
+        artifactFromVirtual(
+          text,
+          start,
+          end,
+          anchor,
+          reason,
+          repairClass,
+          repairPairId
+        ),
         ...artifacts,
       ]
+    }
+  }
+
+  let hasAutoFixArtifactAtAnchor = (anchor: Number) => {
+    let rec find = (items: List<VirtualArtifact>) => match (items) {
+      [] => false,
+      [artifact, ...rest] =>
+        if (
+          artifact.sourceAnchor <= anchor
+          && anchor - artifact.sourceAnchor <= 1
+          && artifact.repairClass == SurfaceAst.AutoFix
+        ) {
+          true
+        } else {
+          find(rest)
+        },
+    }
+    find(artifacts)
+  }
+
+  let stackAutoFix = (
+    anchor: Number,
+    repairClass: SurfaceAst.RepairClass,
+  ) => {
+    if (
+      repairClass == SurfaceAst.RecoveryOnly
+      && (
+        hasConcreteTokenEndingAt(anchor)
+        || hasAutoFixArtifactAtAnchor(anchor)
+      )
+    ) {
+      SurfaceAst.AutoFix
+    } else {
+      repairClass
     }
   }
 
@@ -663,7 +742,13 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.UserTyped => write("?"),
     SurfaceAst.Inferred => if (shouldEmitInferredHole()) {
       if (settings.allowVirtualInsertions) {
-        emitVirtual("?", hole.node.span.end, "inferred hole")
+        emitVirtual(
+          "?",
+          hole.node.span.end,
+          "inferred hole",
+          SurfaceAst.RecoveryOnly,
+          None
+        )
       } else {
         write("?")
       }
@@ -676,7 +761,22 @@ let renderWithSettingsWithTokens = (
     withAttachments(pattern.attach, () => {
       match (pattern.kind) {
         SurfaceAst.Hole(hole) => emitHole(hole),
-        SurfaceAst.Wildcard => write("_"),
+        SurfaceAst.Wildcard =>
+          if (
+            mode == Virtual
+            && settings.allowVirtualInsertions
+            && !hasConcreteWildcardToken(pattern.node.span)
+          ) {
+            emitVirtual(
+              "_",
+              pattern.node.span.start,
+              "recovered wildcard",
+              SurfaceAst.RecoveryOnly,
+              None
+            )
+          } else {
+            write("_")
+          },
         SurfaceAst.Var(name) => write(name.text),
         SurfaceAst.Pin(name) => {
           write(name.text)
@@ -1106,7 +1206,9 @@ let renderWithSettingsWithTokens = (
                 emitVirtual(
                   "()",
                   paramNode.span.start,
-                  "inferred unit parameter"
+                  "inferred unit parameter",
+                  SurfaceAst.OptionalCanonical,
+                  None
                 )
                 space()
               }
@@ -1164,7 +1266,13 @@ let renderWithSettingsWithTokens = (
                     && settings.allowVirtualInsertions
                     && !hasCommaAfter(head.node.span.end)
                   ) {
-                    emitVirtual(",", head.node.span.end, "missing comma")
+                    emitVirtual(
+                      ",",
+                      head.node.span.end,
+                      "missing comma",
+                      SurfaceAst.AutoFix,
+                      None
+                    )
                   } else {
                     write(",")
                   }
@@ -1242,13 +1350,25 @@ let renderWithSettingsWithTokens = (
         ] => {
           match (lbMark.kind) {
             SurfaceAst.MissingToken("{") =>
-              emitVirtual("{", lbMark.node.span.start, "missing token"),
+              emitVirtual(
+                "{",
+                lbMark.node.span.start,
+                "missing token",
+                stackAutoFix(lbMark.node.span.start, lbMark.repairClass),
+                lbMark.repairPairId
+              ),
             _ => write("{"),
           }
           emitExpr(expr)
           match (rbMark.kind) {
             SurfaceAst.MissingToken("}") =>
-              emitVirtual("}", expr.node.span.end, "missing token"),
+              emitVirtual(
+                "}",
+                expr.node.span.end,
+                "missing token",
+                stackAutoFix(expr.node.span.end, rbMark.repairClass),
+                rbMark.repairPairId
+              ),
             _ => write("}"),
           }
         },
@@ -1269,6 +1389,19 @@ let renderWithSettingsWithTokens = (
         },
       }
     let missingRBrace = hasMissingRBrace(block.items)
+    let missingRBraceMark = {
+      let rec findMark = (items: List<SurfaceAst.BlockItem>) => match (items) {
+        [] => None,
+        [item, ...rest] => match (item) {
+          SurfaceAst.MarkItem(mark) => match (mark.kind) {
+            SurfaceAst.MissingRBrace => Some(mark),
+            _ => findMark(rest),
+          },
+          _ => findMark(rest),
+        },
+      }
+      findMark(block.items)
+    }
     let canFixSemicolonAfter = (prevOpt: Option<SurfaceAst.BlockItem>) =>
       match (prevOpt) {
         Some(SurfaceAst.ExprItem(expr)) => !exprHasHole(expr),
@@ -1434,7 +1567,13 @@ let renderWithSettingsWithTokens = (
                   SurfaceAst.MissingSemicolon => {
                     if (mode == Virtual && settings.allowVirtualInsertions) {
                       if (hasNextConcrete(tail)) {
-                        emitVirtual(";", mark.node.span.start, "missing semicolon")
+                        emitVirtual(
+                          ";",
+                          mark.node.span.start,
+                          "missing semicolon",
+                          stackAutoFix(mark.node.span.start, mark.repairClass),
+                          mark.repairPairId
+                        )
                       }
                     } else if (settings.insertSemis) {
                       if (
@@ -1476,7 +1615,26 @@ let renderWithSettingsWithTokens = (
         newline()
       }
     }
-    if (!(missingRBrace && mode != Virtual)) {
+    if (missingRBrace && mode == Virtual && settings.allowVirtualInsertions) {
+      match (missingRBraceMark) {
+        Some(mark) =>
+          emitVirtual(
+            "}",
+            mark.node.span.start,
+            "missing token",
+            stackAutoFix(mark.node.span.start, mark.repairClass),
+            mark.repairPairId
+          ),
+        None =>
+          emitVirtual(
+            "}",
+            block.node.span.end,
+            "missing token",
+            stackAutoFix(block.node.span.end, SurfaceAst.RecoveryOnly),
+            None
+          ),
+      }
+    } else if (!(missingRBrace && mode != Virtual)) {
       write("}")
     }
     }
@@ -1517,9 +1675,20 @@ let renderWithSettingsWithTokens = (
         emitTypeExpr(ty)
       },
     }
-    if (binding.hasEq || mode == Virtual) {
+    if (binding.hasEq) {
       space()
       write("=")
+      space()
+      emitExpr(binding.value)
+    } else if (mode == Virtual && settings.allowVirtualInsertions) {
+      space()
+      emitVirtual(
+        "=",
+        binding.name.node.span.end,
+        "missing token",
+        SurfaceAst.RecoveryOnly,
+        None
+      )
       space()
       emitExpr(binding.value)
     }
@@ -2012,7 +2181,13 @@ let renderWithSettingsWithTokens = (
         SurfaceAst.MissingToken(text) => if (
           mode == Virtual && settings.allowVirtualInsertions
         ) {
-          emitVirtual(text, mark.node.span.start, "missing token")
+          emitVirtual(
+            text,
+            mark.node.span.start,
+            "missing token",
+            mark.repairClass,
+            mark.repairPairId
+          )
         } else {
           write(text)
         },
@@ -2162,7 +2337,18 @@ let renderWithSettingsWithTokens = (
           if (hasTerminatorAfter(endSpan.end) && !missingRBrace) {
             write(";")
           } else if (mode == Virtual && settings.allowVirtualInsertions) {
-            emitVirtual(";", endSpan.end, "missing semicolon")
+            let semicolonClass = if (topItemIsDecidable(item)) {
+              stackAutoFix(endSpan.end, SurfaceAst.RecoveryOnly)
+            } else {
+              SurfaceAst.RecoveryOnly
+            }
+            emitVirtual(
+              ";",
+              endSpan.end,
+              "missing semicolon",
+              semicolonClass,
+              None
+            )
           } else if (
             settings.insertSemis
             && topItemIsDecidable(item)
@@ -2513,6 +2699,8 @@ let alignRealIfNeededWithSourceTokens = (
       node: { id: 0, span },
       kind: SurfaceAst.FormattingMismatch("real formatter divergence"),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let expectedSlice = sliceWithContext(source, mismatchStart, mismatchEnd, 5)
     let actualSlice = sliceWithContext(
@@ -2589,6 +2777,8 @@ let alignRealAndBrokenSpansWithSourceTokens = (
       node: { id: 0, span },
       kind: SurfaceAst.FormattingMismatch("real formatter divergence"),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let expectedSlice = sliceWithContext(source, mismatchStart, mismatchEnd, 5)
     let actualSlice = sliceWithContext(
@@ -3213,3 +3403,4 @@ provide let profileRealFix = (source: String) => {
   logTiming("realfix/total", totalStart, totalEnd)
   final.text
 }
+

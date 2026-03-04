@@ -148,6 +148,8 @@ let createDummyMark = (span: Source.Span) => {
     node,
     kind: SurfaceAst.UnknownTopLevel("lexing error"),
     expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
   }
   mark
 }

@@ -174,5 +174,25 @@ test("format inlays recover lambda arrow bare body to block", () => {
   ])
 })
 
+test("format inlays keep recovered wildcard binder virtual", () => {
+  let source = "let ="
+  let hints = Inlay.formatInlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  let preview = Inlay.previewFromHintsJson(source, hints, true)
+  let canonicalPreview = canonicalNonWs(preview)
+  let canonicalExpected = canonicalNonWs("let *_* = *?**;*")
+  let hasWildcardInlay = String.contains("\"label\":\"_\"", hints)
+  all([
+    assertTrue(hasWildcardInlay),
+    assertEquals(canonicalExpected, canonicalPreview),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

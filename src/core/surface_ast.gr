@@ -132,10 +132,17 @@ and provide enum ExpectedKind {
   ExpectToken,
   ExpectBlock,
 }
+and provide enum RepairClass {
+  AutoFix,
+  OptionalCanonical,
+  RecoveryOnly,
+}
 and provide record Mark {
   node: Node,
   kind: MarkKind,
   expected: ExpectedKind,
+  repairClass: RepairClass,
+  repairPairId: Option<Number>,
 }
 and provide enum MarkKind {
   UnknownTopLevel(String),

@@ -200,6 +200,8 @@ let ensureProgress = (before: ParseState, after: ParseState, context: String) =>
       node: { id: markId, span: tok.span },
       kind: SurfaceAst.UnexpectedToken(Lexer.tokenKindToString(tok.kind)),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     Error.createMarkedError(
       Error.Parsing,
@@ -276,6 +278,8 @@ let recoverMissingTopLevelSemicolon = (
     node: { id: markId, span: errSpan },
     kind: SurfaceAst.MissingSemicolon,
     expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.AutoFix,
+    repairPairId: None,
   }
   Error.createMarkedError(
     Error.Parsing,
@@ -320,6 +324,8 @@ let recoverMissingBlockSemicolon = (state: ParseState, anchorSpan: Source.Span) 
     node: { id: markId, span: errSpan },
     kind: SurfaceAst.MissingSemicolon,
     expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.AutoFix,
+    repairPairId: None,
   }
   Error.createMarkedError(
     Error.Parsing,
@@ -440,6 +446,8 @@ let makeInferredExprHole = (
     node: { id: markId, span },
     kind: SurfaceAst.MissingExpr(message),
     expected: SurfaceAst.ExpectExpr,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
   }
   let recoveryExpr = Error.createMarkedError(
     Error.Parsing,
@@ -474,6 +482,8 @@ let expectSimple = (expected, state: ParseState) => {
       node: { id: markId, span: tok.span },
       kind: SurfaceAst.MissingToken(Lexer.tokenKindToString(expected)),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let recoveryTok = Error.createMarkedError(
       Error.Parsing,
@@ -513,6 +523,8 @@ let expectName = (state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken("identifier"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryName = Error.createMarkedError(
         Error.Parsing,
@@ -558,6 +570,8 @@ let expectAnyName = (state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken("identifier"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryName = Error.createMarkedError(
         Error.Parsing,
@@ -611,6 +625,8 @@ let expectRuleName = (state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken("rule name"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryName = Error.createMarkedError(
         Error.Parsing,
@@ -675,6 +691,8 @@ let expectTypeParamName = (state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken("type parameter"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryName = Error.createMarkedError(
         Error.Parsing,
@@ -720,6 +738,8 @@ let expectConstructor = (state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken("constructor"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryName = Error.createMarkedError(
         Error.Parsing,
@@ -764,6 +784,8 @@ let expectKeyword = (keyword: String, state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken(keyword),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryTok = Error.createMarkedError(
         Error.Parsing,
@@ -791,6 +813,8 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
             node: { id: 0, span: tok.span },
             kind: SurfaceAst.UnexpectedToken("unmatched delimiter"),
             expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
           }
           Error.createMarkedError(
             Error.Parsing,
@@ -814,6 +838,8 @@ let fetchMate = (state: ParseState, tok: Lexer.Token) => {
         node: { id: 0, span: tok.span },
         kind: SurfaceAst.UnexpectedToken("unmatched delimiter"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       Error.createMarkedError(
         Error.Parsing,
@@ -853,11 +879,14 @@ let recoverArrowExprAsBlock = (
 ) => match (bodyExpr.kind) {
   Block(b) => (b, state),
   _ => {
-    let (lbraceMarkId, state1) = freshId(state)
+    let (pairId, state0) = freshId(state)
+    let (lbraceMarkId, state1) = freshId(state0)
     let lbraceMark: SurfaceAst.Mark = {
       node: { id: lbraceMarkId, span: bodyExpr.node.span },
       kind: SurfaceAst.MissingToken("{"),
       expected: SurfaceAst.ExpectBlock,
+      repairClass: SurfaceAst.AutoFix,
+      repairPairId: Some(pairId),
     }
     let lbraceItem: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
@@ -872,6 +901,8 @@ let recoverArrowExprAsBlock = (
       node: { id: rbraceMarkId, span: bodyExpr.node.span },
       kind: SurfaceAst.MissingToken("}"),
       expected: SurfaceAst.ExpectBlock,
+      repairClass: SurfaceAst.AutoFix,
+      repairPairId: Some(pairId),
     }
     let rbraceItem: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
@@ -930,6 +961,8 @@ let expectSimpleOrRecover = (expected, state: ParseState, context: String) => {
       node: { id: markId, span: tok.span },
       kind: SurfaceAst.MissingToken(Lexer.tokenKindToString(expected)),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let recoveryTok = Error.createMarkedError(
       Error.Parsing,
@@ -1462,6 +1495,8 @@ and parseBlock: Parser<SurfaceAst.Expr> = state => {
       node: { id: markId, span: markSpan },
       kind: SurfaceAst.MissingRBrace,
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let markItem: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
@@ -1588,6 +1623,8 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
                   Lexer.tokenKindToString(tokAt.kind),
                 ),
                 expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
               }
               let stateDropped = dropToken(stateMark)
               currentState = Error.createMarkedError(
@@ -1868,6 +1905,8 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
                 Lexer.tokenKindToString(tokAt.kind),
               ),
               expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
             }
             let stateDropped = dropToken(stateMark)
             currentState = Error.createMarkedError(
@@ -2026,6 +2065,8 @@ and expectStringLiteral = (state: ParseState) => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingToken("string literal"),
         expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryText = Error.createMarkedError(
         Error.Parsing,
@@ -2067,6 +2108,8 @@ and parseDirectiveTopItem = (state: ParseState) => {
       node: markNode,
       kind: SurfaceAst.InvalidTopLevel("non-canonical directive"),
       expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDirective),
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     Error.createMarkedError(
       Error.Parsing,
@@ -2298,6 +2341,8 @@ and parseTopLevels = (state: ParseState) => {
                   node: { id: exportId, span: exportTok.span },
                   kind: SurfaceAst.InvalidTopLevel("export"),
                   expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
                 }
                 let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
                   Error.Parsing,
@@ -2314,6 +2359,8 @@ and parseTopLevels = (state: ParseState) => {
                   node: { id: exportId, span: exportTok.span },
                   kind: SurfaceAst.InvalidTopLevel("export"),
                   expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
                 }
                 let recoveryItem: SurfaceAst.TopItem = Error.createMarkedError(
                   Error.Parsing,
@@ -2370,7 +2417,37 @@ and parseTopLevels = (state: ParseState) => {
 }
 and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
   let (id, state1) = freshId(state)
-  let (pattern, state2) = parsePattern(state1)
+  let current = currentToken(state1)
+  let shouldRecoverMissingPattern = match (startSpanOpt) {
+    Some(startSpan) =>
+      current.span.line > startSpan.line && isTopLevelBoundary(current),
+    None => false,
+  }
+  let (pattern, state2) = if (shouldRecoverMissingPattern) {
+    let (pat, stateP) = makeWildcardPattern(state1, current.span)
+    let (markId, stateM) = freshId(stateP)
+    let mark: SurfaceAst.Mark = {
+      node: { id: markId, span: current.span },
+      kind: SurfaceAst.MissingPattern("_"),
+      expected: SurfaceAst.ExpectPattern,
+      repairClass: SurfaceAst.RecoveryOnly,
+      repairPairId: None,
+    }
+    let recovered = Error.createMarkedError(
+      Error.Parsing,
+      mark,
+      "Expected pattern in let binding",
+      pat,
+      clues=[
+        Error.Expected("pattern"),
+        Error.Received(Lexer.tokenKindToString(current.kind)),
+      ],
+      severity=Error.SError
+    )
+    (recovered, stateM)
+  } else {
+    parsePattern(state1)
+  }
   let rec skipLineComments = (line: Number, stateX: ParseState) => {
     match (currentToken(stateX).kind) {
       Lexer.LineComment(_) when currentToken(stateX).span.line == line =>
@@ -2404,6 +2481,8 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
       node: { id: markId, span: errSpan },
       kind: SurfaceAst.MissingToken("="),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let recoveryState = Error.createMarkedError(
       Error.Parsing,
@@ -2423,6 +2502,8 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
       node: { id: markId, span: currentToken(state3).span },
       kind: SurfaceAst.MissingToken("="),
       expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
     }
     let recoveryState = Error.createMarkedError(
       Error.Parsing,
@@ -3217,6 +3298,8 @@ and parseBlockItems = (state: ParseState) => {
             node: { id, span: atTok.span },
             kind: SurfaceAst.UnexpectedToken(","),
             expected: SurfaceAst.ExpectToken,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
           }
           let item: SurfaceAst.BlockItem = Error.createMarkedError(
             Error.Parsing,
@@ -3233,6 +3316,8 @@ and parseBlockItems = (state: ParseState) => {
             node: { id, span: atTok.span },
             kind: SurfaceAst.MissingSemicolon,
             expected: SurfaceAst.ExpectToken,
+            repairClass: SurfaceAst.AutoFix,
+            repairPairId: None,
           }
           let item: SurfaceAst.BlockItem = Error.createMarkedError(
             Error.Parsing,
@@ -3289,6 +3374,8 @@ and parseBlockItems = (state: ParseState) => {
               node: { id: 0, span: tok.span },
               kind: SurfaceAst.InvalidTopLevel("directive in block"),
               expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDirective),
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
             }
             // Guarantee progress even if directive recovery returned without consuming input.
             let recoverState = dropToken(state1)
@@ -3333,6 +3420,8 @@ and parseBlockItems = (state: ParseState) => {
               node: { id: 0, span: tok.span },
               kind: SurfaceAst.InvalidTopLevel("let group in block"),
               expected: SurfaceAst.ExpectTopItem(SurfaceAst.TopItemDeclGroup),
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
             }
             let blockItem: SurfaceAst.BlockItem = Error.createMarkedError(
               Error.Parsing,
@@ -3639,6 +3728,8 @@ and parsePatternWithPinMode = (state: ParseState, pinBareIdent: Bool) => {
         node: { id: markId, span },
         kind: SurfaceAst.MissingPattern(""),
         expected: SurfaceAst.ExpectPattern,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryPat = Error.createMarkedError(
         Error.Parsing,
@@ -3849,6 +3940,8 @@ and parseTypeAtom: Parser<SurfaceAst.TypeExpr> = state => {
         node: { id: markId, span: tok.span },
         kind: SurfaceAst.MissingTypeExpr(""),
         expected: SurfaceAst.ExpectTypeExpr,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryExpr = Error.createMarkedError(
         Error.Parsing,
@@ -4054,6 +4147,8 @@ and parseMatch = (state: ParseState) => {
               node: { id: markId, span: scrutinee.node.span },
               kind: SurfaceAst.UnexpectedToken("unsupported expression"),
               expected: SurfaceAst.ExpectPattern,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
             }
             Error.createMarkedError(
               Error.Parsing,
@@ -4089,6 +4184,8 @@ and parseMatch = (state: ParseState) => {
           node: { id: markId, span: currentToken(state4).span },
           kind: SurfaceAst.MissingBlock("match arrow form"),
           expected: SurfaceAst.ExpectBlock,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
         }
         let recoveryItems = Error.createMarkedError(
           Error.Parsing,
@@ -4107,6 +4204,8 @@ and parseMatch = (state: ParseState) => {
         node: { id: markId, span: currentToken(state3).span },
         kind: SurfaceAst.MissingBlock("match body"),
         expected: SurfaceAst.ExpectBlock,
+    repairClass: SurfaceAst.RecoveryOnly,
+    repairPairId: None,
       }
       let recoveryExpr = Error.createMarkedError(
         Error.Parsing,
@@ -4153,3 +4252,4 @@ let parseWithRecovery = (source: String) => {
 provide let parseResult = (source: String) => parseWithRecovery(source)
 
 provide let parse = (source: String) => parseResult(source).program
+
