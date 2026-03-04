@@ -362,25 +362,29 @@ let applyInlaysPreview = (
   let padded = pad(Array.toList(linesList), maxLineFromInlays, [])
   let lines = Array.fromList(padded)
   let lineMap = Map.make()
-  let rec add = items => match (items) {
+  let rec add = (items, order: Number) => match (items) {
     [] => void,
     [(line, col, text), ...rest] => {
       let existing = match (Map.get(line, lineMap)) {
         Some(list) => list,
         None => [],
       }
-      Map.set(line, [(col, text), ...existing], lineMap)
-      add(rest)
+      // Preserve backend emission order; same-position inserts use this as tie-break.
+      Map.set(line, [(col, text, order), ...existing], lineMap)
+      add(rest, order + 1)
     },
   }
-  add(inlays)
-  let sortColsDesc = (items: List<(Number, String)>) => {
+  add(inlays, 0)
+  let sortColsDesc = (items: List<(Number, String, Number)>) => {
     let rec insert = (item, sorted) => match (sorted) {
       [] => [item],
       [head, ...tail] => {
-        let (c1, _t1) = item
-        let (c2, _t2) = head
-        if (c1 < c2) {
+        let (c1, _t1, o1) = item
+        let (c2, _t2, o2) = head
+        if (
+          c1 < c2
+          || (c1 == c2 && o1 < o2)
+        ) {
           [head, ...insert(item, tail)]
         } else {
           [item, head, ...tail]
@@ -403,7 +407,7 @@ let applyInlaysPreview = (
     }
     let rec applyLine = (text: String, xs) => match (xs) {
       [] => text,
-      [(col, insertText), ...rest] => {
+      [(col, insertText, _order), ...rest] => {
         let maxCol = String.length(text)
         let safeCol = if (col < 0) {
           0
@@ -1229,25 +1233,28 @@ let inlayHintsForSourceWithTiming = (
     let padded = pad(Array.toList(linesList), maxLineFromInlays, [])
     let lines = Array.fromList(padded)
     let lineMap = Map.make()
-    let rec add = items => match (items) {
+    let rec add = (items, order: Number) => match (items) {
       [] => void,
       [(line, col, text), ...rest] => {
         let existing = match (Map.get(line, lineMap)) {
           Some(list) => list,
           None => [],
         }
-        Map.set(line, [(col, text), ...existing], lineMap)
-        add(rest)
+        Map.set(line, [(col, text, order), ...existing], lineMap)
+        add(rest, order + 1)
       },
     }
-    add(inlays)
-    let sortColsDesc = (items: List<(Number, String)>) => {
+    add(inlays, 0)
+    let sortColsDesc = (items: List<(Number, String, Number)>) => {
       let rec insert = (item, sorted) => match (sorted) {
         [] => [item],
         [head, ...tail] => {
-          let (c1, _t1) = item
-          let (c2, _t2) = head
-          if (c1 < c2) {
+          let (c1, _t1, o1) = item
+          let (c2, _t2, o2) = head
+          if (
+            c1 < c2
+            || (c1 == c2 && o1 < o2)
+          ) {
             [head, ...insert(item, tail)]
           } else {
             [item, head, ...tail]
@@ -1270,7 +1277,7 @@ let inlayHintsForSourceWithTiming = (
       }
       let rec applyLine = (text: String, xs) => match (xs) {
         [] => text,
-        [(col, insertText), ...rest] => {
+        [(col, insertText, _order), ...rest] => {
           let maxCol = String.length(text)
           let safeCol = if (col < 0) {
             0
