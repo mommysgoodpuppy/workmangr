@@ -2352,7 +2352,9 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
   } else {
     (None, state2b)
   }
-  let (state4, hasEq) = if (kindIs(currentToken(state3).kind, Lexer.Eq)) {
+  let (state4, hasEq) = if (
+    kindIs(currentToken(state3).kind, Lexer.Eq)
+  ) {
     let (_, nextState) = expectSimple(Lexer.Eq, state3)
     (nextState, true)
   } else if (isValueBoundary(currentToken(state3)) || isOpaqueLineStart(state3)) {
@@ -2403,7 +2405,7 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
   ) {
     makeInferredExprHole(
       state4,
-      pattern.node.span,
+      currentToken(state4).span,
       "Expected expression after '=' in let binding",
       [
         Error.Expected("expression"),

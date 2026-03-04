@@ -18,6 +18,13 @@ let escapeJson = (s: String) => {
   String.replaceAll("\t", "\\t", step4)
 }
 
+let canonicalNonWs = (text: String) => {
+  let noSpace = String.replaceAll(" ", "", text)
+  let noTab = String.replaceAll("\t", "", noSpace)
+  let noLf = String.replaceAll("\n", "", noTab)
+  String.replaceAll("\r", "", noLf)
+}
+
 test("type inlays still render under missing semicolon recovery", () => {
   let source = "let x = 1\nlet y = x;"
   let hints = Inlay.inlayHintsForSource(
@@ -97,6 +104,28 @@ test("format inlays recover missing match-arm comma as separate token", () => {
   all([
     assertTrue(hasComma),
     assertFalse(hasMergedComma),
+  ])
+})
+
+test("format inlays keep inferred hole before semicolon in missing let rhs", () => {
+  let source = "let thing = "
+  let hints = Inlay.formatInlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  let preview = Inlay.previewFromHintsJson(source, hints, true)
+  let canonicalPreview = canonicalNonWs(preview)
+  let canonicalExpected = canonicalNonWs("let thing = *?**;*")
+  let hasVirtualQ = String.contains("\"label\":\"?\"", hints)
+  let hasVirtualSemi = String.contains("\"label\":\";\"", hints)
+  all([
+    assertTrue(hasVirtualQ),
+    assertTrue(hasVirtualSemi),
+    assertEquals(canonicalExpected, canonicalPreview),
   ])
 })
 

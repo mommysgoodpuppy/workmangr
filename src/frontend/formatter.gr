@@ -662,7 +662,11 @@ let renderWithSettingsWithTokens = (
   let emitHole = (hole: SurfaceAst.Hole) => match (hole.origin) {
     SurfaceAst.UserTyped => write("?"),
     SurfaceAst.Inferred => if (shouldEmitInferredHole()) {
-      write("?")
+      if (settings.allowVirtualInsertions) {
+        emitVirtual("?", hole.node.span.end, "inferred hole")
+      } else {
+        write("?")
+      }
     } else {
       void
     },
