@@ -18,7 +18,7 @@ from "./compile_cli.gr" include CompileCli
 from "./lsp/inlay.gr" include Inlay
 
 let usage =
-  "Usage: wmgr type [--line <line>] [--std-root <path>] <file.wm> | wmgr ast <file.wm> | wmgr compile [--std-root <path>] <file.wm> | wmgr inlay <file.wm>"
+  "Usage: wmgr type [--line <line>] [--std-root <path>] <file.wm> | wmgr ast <file.wm> | wmgr compile [--std-root <path>] <file.wm> | wmgr inlay [--no-type] <file.wm>"
 
 let exitWith = (code: Number, message: String) => {
   print(message)
@@ -132,22 +132,55 @@ let main = () => {
         }
       }
 
-      let (lineFilter, stdRootArg, fileFromArg) = if (
+      let rec parseInlayArgs = (
+        idx: Number,
+        includeTypeInlays: Bool,
+        filePath: Option<String>,
+      ) => if (idx >= argCount) {
+        (includeTypeInlays, filePath)
+      } else {
+        let arg = Array.get(idx, args)
+        if (arg == "--no-type") {
+          parseInlayArgs(idx + 1, false, filePath)
+        } else if (String.startsWith("-", arg)) {
+          exitWith(1, "Unknown inlay option: " ++ arg)
+          (includeTypeInlays, filePath)
+        } else {
+          match (filePath) {
+            Some(_) => {
+              exitWith(1, "Multiple input files provided")
+              (includeTypeInlays, filePath)
+            },
+            None => parseInlayArgs(idx + 1, includeTypeInlays, Some(arg)),
+          }
+        }
+      }
+
+      let (lineFilter, stdRootArg, fileFromArg, includeTypeInlays) = if (
         command == "type"
         || command == "compile"
       ) {
-        parseTypeArgs(2, None, None, None)
-      } else if (command == "ast" || command == "inlay") {
+        let (lineFilter, stdRootArg, fileFromArg) = parseTypeArgs(
+          2,
+          None,
+          None,
+          None
+        )
+        (lineFilter, stdRootArg, fileFromArg, true)
+      } else if (command == "ast") {
         if (argCount > 2) {
-          (None, None, Some(Array.get(2, args)))
+          (None, None, Some(Array.get(2, args)), true)
         } else {
-          (None, None, None)
+          (None, None, None, true)
         }
+      } else if (command == "inlay") {
+        let (includeType, filePath) = parseInlayArgs(2, true, None)
+        (None, None, filePath, includeType)
       } else {
         if (argCount > 1) {
-          (None, None, Some(Array.get(1, args)))
+          (None, None, Some(Array.get(1, args)), true)
         } else {
-          (None, None, None)
+          (None, None, None, true)
         }
       }
       let stdRoot = match (
@@ -197,31 +230,9 @@ let main = () => {
                     ),
                 }
               } else if (command == "inlay") {
-                let mut sawPreviewHeader = false
-                let mut preview = source
-                let captureDebug = (text: String) => {
-                  if (sawPreviewHeader) {
-                    preview = text
-                    sawPreviewHeader = false
-                  } else if (text == "[LSP] preview:") {
-                    sawPreviewHeader = true
-                  } else {
-                    void
-                  }
-                }
-                let escapeJson = (s: String) => {
-                  let step1 = String.replaceAll("\\", "\\\\", s)
-                  let step2 = String.replaceAll("\"", "\\\"", step1)
-                  let step3 = String.replaceAll("\n", "\\n", step2)
-                  let step4 = String.replaceAll("\r", "\\r", step3)
-                  String.replaceAll("\t", "\\t", step4)
-                }
-                let _ = Inlay.formatInlayHintsForSource(
+                let preview = Inlay.previewForSource(
                   source,
-                  0,
-                  String.length(source),
-                  captureDebug,
-                  escapeJson,
+                  includeTypeInlays,
                   true
                 )
                 print(preview)

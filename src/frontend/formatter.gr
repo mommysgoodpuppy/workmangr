@@ -92,6 +92,7 @@ provide record VirtualArtifact {
   text: String,
   start: Number,
   end: Number,
+  sourceAnchor: Number,
   reason: String,
 }
 
@@ -145,8 +146,9 @@ let artifactFromVirtual = (
   text: String,
   start: Number,
   end: Number,
+  sourceAnchor: Number,
   reason: String,
-) => { kind: "ghostToken", text, start, end, reason }
+) => { kind: "ghostToken", text, start, end, sourceAnchor, reason }
 
 let renderWithSettingsWithTokens = (
   program: SurfaceAst.Program,
@@ -581,7 +583,10 @@ let renderWithSettingsWithTokens = (
       let start = renderedLen
       write(text)
       let end = renderedLen
-      artifacts = [artifactFromVirtual(text, start, end, reason), ...artifacts]
+      artifacts = [
+        artifactFromVirtual(text, start, end, anchor, reason),
+        ...artifacts,
+      ]
     }
   }
 
@@ -1239,7 +1244,7 @@ let renderWithSettingsWithTokens = (
           emitExpr(expr)
           match (rbMark.kind) {
             SurfaceAst.MissingToken("}") =>
-              emitVirtual("}", rbMark.node.span.start, "missing token"),
+              emitVirtual("}", expr.node.span.end, "missing token"),
             _ => write("}"),
           }
         },

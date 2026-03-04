@@ -558,6 +558,9 @@ let virtualArtifactToJson = (artifact: Formatter.VirtualArtifact) => {
     ++ "\"end\":"
     ++ toString(artifact.end)
     ++ ","
+    ++ "\"sourceAnchor\":"
+    ++ toString(artifact.sourceAnchor)
+    ++ ","
     ++ "\"reason\":\""
     ++ escapeJson(artifact.reason)
     ++ "\"}"

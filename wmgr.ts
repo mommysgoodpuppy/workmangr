@@ -91,6 +91,7 @@ Examples:
   deno run -A wmgr.ts type /Users/profilence/git/workman/aoc2016/1.wm
   deno run -A wmgr.ts type --line 96 /Users/profilence/git/workman/aoc2016/1.wm
   deno run -A wmgr.ts ast /Users/profilence/git/workman/std/prelude.wm
+  deno run -A wmgr.ts inlay ./simple.wm
   deno run -A wmgr.ts run ./simple.wm
 `;
 

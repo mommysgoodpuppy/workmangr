@@ -62,9 +62,41 @@ test("format inlays recover match arrow bare clause bodies", () => {
   let hasAnyInsertion = String.contains("\"label\":\"", hints)
   let hasImpossibleChunk = String.contains("{x,", hints)
     || String.contains("};let", hints)
+  let hasMergedCloseSemi = String.contains("\"label\":\"};\"", hints)
+  let hasSeparateRBrace = String.contains("\"label\":\"}\"", hints)
+  let hasSeparateSemi = String.contains("\"label\":\";\"", hints)
+  let hasSpuriousParen = String.contains("\"label\":\"(\"", hints)
   all([
     assertTrue(hasAnyInsertion),
     assertFalse(hasImpossibleChunk),
+    assertFalse(hasMergedCloseSemi),
+    assertTrue(hasSeparateRBrace),
+    assertTrue(hasSeparateSemi),
+    assertFalse(hasSpuriousParen),
+  ])
+})
+
+test("format inlays recover missing match-arm comma as separate token", () => {
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}"
+  let hints = Inlay.inlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  let hasComma = String.contains("\"label\":\",\"", hints)
+    || String.contains("\"label\":\",\"", hints)
+  let hasMergedComma = String.contains("\"label\":\"},\"", hints)
+    || String.contains("\"label\":\",}\"", hints)
+  all([
+    assertTrue(hasComma),
+    assertFalse(hasMergedComma),
   ])
 })
 

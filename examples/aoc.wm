@@ -15,8 +15,13 @@ let makeStep = (v, n) => {
 
 let charComma = ",";
 let charCloseParen = ")";
-let mulLiteral = [.."mul("];
+let mulLiteral = [..List.fromString("mul(")];
 let mulLiteralLength = List.length(mulLiteral);
+
+let xample = match(in) => {
+  Some(x) => x,
+  None => Panic("panic") 
+}
 
 let readRequiredDigit = (chars, i) => {
   match(List.at(chars, i)) {
