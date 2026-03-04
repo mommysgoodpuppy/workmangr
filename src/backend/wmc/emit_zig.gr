@@ -225,6 +225,9 @@ let tryCollectLinearTrace = (cfg: WmcMir.UnifiedCfgFunction) => {
       match (WmcMir.findUnifiedBlock(cfg, currentId)) {
         None => None,
         Some(block) => {
+          if (block.effects != []) {
+            None
+          } else {
           let nextAssignsRev = List.append(List.reverse(block.assigns), assignsRev)
           let nextBlocksRev = [block, ...blocksRev]
           match (block.term) {
@@ -237,6 +240,7 @@ let tryCollectLinearTrace = (cfg: WmcMir.UnifiedCfgFunction) => {
                 returnName: name,
               }: LinearTrace),
             _ => None,
+          }
           }
         },
       }
@@ -356,11 +360,7 @@ let rec emitUnifiedRValue = (rhs: WmcMir.UnifiedRValue, mapping: List<(String, S
     WmcMir.URLit(CoreAst.Byte(_)) => "0",
     WmcMir.URVar(name) => lookupNameMap(mapping, name),
     WmcMir.URCall(callee, arg) =>
-      if (callee == "__wm_print") {
-        "(blk: { __wm_print(" ++ lookupNameMap(mapping, arg) ++ "); break :blk 0; })"
-      } else {
-        lookupNameMap(mapping, callee) ++ "(" ++ lookupNameMap(mapping, arg) ++ ")"
-      },
+      lookupNameMap(mapping, callee) ++ "(" ++ lookupNameMap(mapping, arg) ++ ")",
     WmcMir.URBinOp(op, left, right) =>
       "(" ++ lookupNameMap(mapping, left) ++ " " ++ op ++ " " ++ lookupNameMap(mapping, right) ++ ")",
     WmcMir.URTuple(_) => "0",
@@ -378,13 +378,14 @@ let referencedVarsInRValue = (rhs: WmcMir.UnifiedRValue) =>
 let cfgUsesBuiltinPrint = (blocks: List<WmcMir.UnifiedBlock>) =>
   List.some(
     (block: WmcMir.UnifiedBlock) =>
-      List.some(
-        (assign: WmcMir.UnifiedAssign) => match (assign.rhs) {
-          WmcMir.URCall(callee, _arg) => callee == "__wm_print",
-          _ => false,
-        },
-        block.assigns
-      ),
+      List.some((fx: WmcMir.UnifiedEffectCall) => fx.callee == "__wm_print", block.effects)
+        || List.some(
+          (assign: WmcMir.UnifiedAssign) => match (assign.rhs) {
+            WmcMir.URCall(callee, _arg) => callee == "__wm_print",
+            _ => false,
+          },
+          block.assigns
+        ),
     blocks
   )
 
@@ -519,13 +520,18 @@ let emitUnifiedCfgBlockLines = (
   resultTy: String,
 ) => {
   let header = indent2(toString(block.id) ++ " => {")
+  let effectLines = List.map((fx: WmcMir.UnifiedEffectCall) =>
+    indent3(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");"), block.effects)
   let assignLines = List.map((a: WmcMir.UnifiedAssign) => {
     let zigName = lookupNameMap(mapping, a.name)
     let rhsText = emitUnifiedRValue(a.rhs, mapping)
     indent3(zigName ++ " = " ++ rhsText ++ ";")
   }, block.assigns)
   let termLines = emitUnifiedTerminatorLines(block.term, mapping, resultTy)
-  List.append([header], List.append(assignLines, List.append(termLines, [indent2("},")])))
+  List.append(
+    [header],
+    List.append(effectLines, List.append(assignLines, List.append(termLines, [indent2("},")])))
+  )
 }
 
 provide let emitUnifiedCfgNoArgSpecializedInt = (

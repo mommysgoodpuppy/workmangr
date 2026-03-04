@@ -17,9 +17,15 @@ provide enum UnifiedRValue {
 
 provide enum rec UnifiedStmt {
   UAssign(String, UnifiedRValue),
+  UEffectCall(String, String),
   UBranchBool(String, List<UnifiedStmt>, List<UnifiedStmt>),
   UFail,
   UReturn(String),
+}
+
+provide record UnifiedEffectCall {
+  callee: String,
+  arg: String,
 }
 
 provide record UnifiedAssign {
@@ -36,6 +42,7 @@ provide enum UnifiedTerminator {
 
 provide record UnifiedBlock {
   id: BlockId,
+  effects: List<UnifiedEffectCall>,
   assigns: List<UnifiedAssign>,
   term: UnifiedTerminator,
 }

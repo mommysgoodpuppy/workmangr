@@ -239,6 +239,9 @@ Deno.test("wm compile emits void Zig main for void workman main", async () => {
   if (!emitted.includes(`pub fn main() void`)) {
     throw new Error(`expected Zig main void return type, got:\n${emitted}`);
   }
+  if (emitted.includes("blk: { __wm_print(")) {
+    throw new Error(`expected direct void print call emission, got:\n${emitted}`);
+  }
   if (!output.includes("42")) {
     throw new Error(`expected print output "42", got ${JSON.stringify(output)}`);
   }

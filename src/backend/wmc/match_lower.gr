@@ -79,8 +79,13 @@ let freshId = (state: BuildState) =>
 let pushBlock = (state: BuildState, block: WmcMir.UnifiedBlock) =>
   { nextId: state.nextId, blocksRev: [block, ...state.blocksRev] }: BuildState
 
-let mkBlock = (id: WmcMir.BlockId, assigns: List<WmcMir.UnifiedAssign>, term: WmcMir.UnifiedTerminator) =>
-  ({ id, assigns, term }: WmcMir.UnifiedBlock)
+let mkBlock = (
+  id: WmcMir.BlockId,
+  effects: List<WmcMir.UnifiedEffectCall>,
+  assigns: List<WmcMir.UnifiedAssign>,
+  term: WmcMir.UnifiedTerminator,
+) =>
+  ({ id, effects, assigns, term }: WmcMir.UnifiedBlock)
 
 record PatternPlanAcc {
   testsRev: List<PatternTest>,
@@ -349,13 +354,13 @@ let rec lowerTreeToCfg = (
   match (tree) {
     DTFail => {
       let (id, state1) = freshId(state)
-      (id, pushBlock(state1, mkBlock(id, [], WmcMir.UTFail)))
+      (id, pushBlock(state1, mkBlock(id, [], [], WmcMir.UTFail)))
     },
     DTSelectClause(clause) =>
       match (WmcMirLower.lowerExprToCfgFragmentNoArg(clause.body, resultName, exitId, state.nextId)) {
         None => {
           let (id, state1) = freshId(state)
-          (id, pushBlock(state1, mkBlock(id, [], WmcMir.UTFail)))
+          (id, pushBlock(state1, mkBlock(id, [], [], WmcMir.UTFail)))
         },
         Some(fragment) => {
           let state1 = {
@@ -379,7 +384,7 @@ let rec lowerTreeToCfg = (
           WmcMir.UTBranchBool(scrutineeVar, failId, passId),
         _ => WmcMir.UTGoto(failId),
       }
-      (id, pushBlock(state3, mkBlock(id, [], term)))
+      (id, pushBlock(state3, mkBlock(id, [], [], term)))
     },
     DTGuard(guardExpr, onTrue, onFalse) => {
       let (trueId, state1) = lowerTreeToCfg(onTrue, scrutineeVar, resultName, exitId, state)
@@ -389,7 +394,7 @@ let rec lowerTreeToCfg = (
         WmcTCoreNorm.NEIdent(name) => WmcMir.UTBranchBool(name, trueId, falseId),
         _ => WmcMir.UTGoto(falseId),
       }
-      (id, pushBlock(state3, mkBlock(id, [], term)))
+      (id, pushBlock(state3, mkBlock(id, [], [], term)))
     },
     DTSwitchConstructor(_, defaultTree) =>
       lowerTreeToCfg(defaultTree, scrutineeVar, resultName, exitId, state),
@@ -402,13 +407,14 @@ let lowerDecisionTreeToCfg = (tree: DecisionTree, scrutinee: WmcTCoreNorm.Expr) 
     WmcTCoreNorm.NEIdent(scrutineeVar) => {
       let resultName = "__u_match_result"
       let (exitId, state1) = freshId(emptyState)
-      let state2 = pushBlock(state1, mkBlock(exitId, [], WmcMir.UTReturn(resultName)))
+      let state2 = pushBlock(state1, mkBlock(exitId, [], [], WmcMir.UTReturn(resultName)))
       let (treeEntry, state3) = lowerTreeToCfg(tree, scrutineeVar, resultName, exitId, state2)
       let (entryId, state4) = freshId(state3)
       let state5 = pushBlock(
         state4,
         mkBlock(
           entryId,
+          [],
           [{ name: resultName, rhs: WmcMir.URLit(CoreAst.Int(0)) }: WmcMir.UnifiedAssign],
           WmcMir.UTGoto(treeEntry),
         ),
@@ -419,14 +425,14 @@ let lowerDecisionTreeToCfg = (tree: DecisionTree, scrutinee: WmcTCoreNorm.Expr) 
       let resultName = "__u_match_result"
       let scrutineeVar = "__u_match_scrut"
       let (exitId, state1) = freshId(emptyState)
-      let state2 = pushBlock(state1, mkBlock(exitId, [], WmcMir.UTReturn(resultName)))
+      let state2 = pushBlock(state1, mkBlock(exitId, [], [], WmcMir.UTReturn(resultName)))
       let (treeEntry, state3) = lowerTreeToCfg(tree, scrutineeVar, resultName, exitId, state2)
       let (entryId, state4) = freshId(state3)
       let preAssigns = [
         { name: resultName, rhs: WmcMir.URLit(CoreAst.Int(0)) }: WmcMir.UnifiedAssign,
         { name: scrutineeVar, rhs: WmcMir.URLit(CoreAst.Bool(b)) }: WmcMir.UnifiedAssign,
       ]
-      let state5 = pushBlock(state4, mkBlock(entryId, preAssigns, WmcMir.UTGoto(treeEntry)))
+      let state5 = pushBlock(state4, mkBlock(entryId, [], preAssigns, WmcMir.UTGoto(treeEntry)))
       Some({ entry: entryId, blocks: List.reverse(state5.blocksRev) }: WmcMir.UnifiedCfgFunction)
     },
     _ => None,

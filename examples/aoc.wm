@@ -1,0 +1,108 @@
+from "std/char" import {toDigit}; 
+from "std/list" import * as List; 
+
+type ParseResult =
+  | NotMul
+  | ExpectedDigit
+  | ExpectedComma
+  | ExpectedCloseParen;
+
+record ParseStep = { value: Int, next: Int };
+
+let makeStep = (v, n) => {
+  .{ value= v, next= n }
+};
+
+let charComma = ",";
+let charCloseParen = ")";
+let mulLiteral = [.."mul("];
+let mulLiteralLength = List.length(mulLiteral);
+
+let readRequiredDigit = (chars, i) => {
+  match(List.at(chars, i)) {
+    Ok(c) => {
+      match(charToDigit(c)) {
+        Some(digit) => makeStep(Ok(digit), i + 1),
+        None() => makeStep(Err(ExpectedDigit), i + 1)
+      }
+    },
+    Err(err) => { makeStep(Err(err), i + 1) }
+  }
+};
+
+let rec extendDigits = (chars, step, count) => {
+  if (count == 3) {
+    step
+  } else {
+    match(List.at(chars, step.next)) {
+      Err(_) => step,
+      Ok(code) => {
+        match(charToDigit(code)) {
+          None() => step,
+          Some(digit) => {
+            const combined = makeStep(
+              step.value * 10 + digit,
+              step.next + 1,
+            );
+            return extendDigits(chars, combined, count + 1);
+          }
+        }
+      }
+    }
+  }
+}
+
+let expectCharAt = (chars, i, expected, error) => {
+  match(list.at(chars, i)) {
+    Ok(code) => {
+      if (code == expected) {
+        Ok(i + 1)
+      } else {
+        Err(error)
+      }
+    },
+    _ => { Err(error) }
+  }
+};
+
+let expectMulLiteral = (chars, i) => {
+  if (chars :> list.slice(i, i + mulLiteralLength) :> strEq(mulLiteral)) {
+    Ok(i + mulLiteralLength)
+  } else {
+    Err(NotMul)
+  }
+};
+
+let parseMulAt = (chars, i) => {
+  let afterMul = chars :> expectMulLiteral(i);
+  let leftStep = extendDigits(chars, readRequiredDigit(chars, afterMul), 1);
+  let afterComma = expectCharAt(chars, leftStep.next, charComma, ExpectedComma);
+  let rightStep = extendDigits(chars, readRequiredDigit(chars, afterComma), 1);
+  makeStep(
+    leftStep.value * rightStep.value,
+    expectCharAt(chars, rightStep.next, charCloseParen, ExpectedCloseParen)
+  )
+};
+
+let rec scan = (chars, i, acc) => {
+  match(list.at(chars, i)) {
+    Err(_) => { acc },
+    Ok(_) => {
+      match(parseMulAt(chars, i)) {
+        Ok(step) => { scan(chars, step.next, acc + step.value) },
+        Err(err) => {
+          print(err);
+          print(stringConcat("skipping at ", intToString(i)));
+          scan(chars, i + 1, acc)
+        }
+      }
+    }
+  }
+};
+
+let corruptedMemory = "xmul(2,4)%&mul[3,7]!@^do_not_mul(5,5)+mul(32,64]then(mul(11,8)mul(8,5))";
+
+let main = () => {
+  let chars = [..corruptedMemory];
+  print(scan(chars, 0, 0))
+};

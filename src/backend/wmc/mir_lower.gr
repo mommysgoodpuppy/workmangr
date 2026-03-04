@@ -232,10 +232,16 @@ and lowerUnifiedCall = (
       match (lowerUnifiedExpr(arg, env, fenv, st)) {
         (None, st2) => (None, st2),
         (Some((argStmts, argVar)), st2) => {
-          let (out, st3) = freshName("print", st2)
+          let (out, st3) = freshName("unit", st2)
           (
             Some((
-              List.append(argStmts, [WmcMir.UAssign(out, WmcMir.URCall("__wm_print", argVar))]),
+              List.append(
+                argStmts,
+                [
+                  WmcMir.UEffectCall("__wm_print", argVar),
+                  WmcMir.UAssign(out, WmcMir.URLit(CoreAst.Unit)),
+                ]
+              ),
               out,
             )),
             st3,
@@ -326,9 +332,10 @@ let pushUnifiedCfgBlock = (state: UnifiedCfgBuildState, block: WmcMir.UnifiedBlo
 
 let mkUnifiedCfgBlock = (
   id: WmcMir.BlockId,
+  effects: List<WmcMir.UnifiedEffectCall>,
   assigns: List<WmcMir.UnifiedAssign>,
   term: WmcMir.UnifiedTerminator,
-) => ({ id, assigns, term }: WmcMir.UnifiedBlock)
+) => ({ id, effects, assigns, term }: WmcMir.UnifiedBlock)
 
 let rec lowerUnifiedStmtSeqToCfg = (
   stmts: List<WmcMir.UnifiedStmt>,
@@ -338,7 +345,7 @@ let rec lowerUnifiedStmtSeqToCfg = (
   match (stmts) {
     [] => {
       let (id, state1) = freshUnifiedCfgId(state)
-      let block = mkUnifiedCfgBlock(id, [], cont)
+      let block = mkUnifiedCfgBlock(id, [], [], cont)
       (id, pushUnifiedCfgBlock(state1, block))
     },
     [stmt, ...tail] =>
@@ -348,7 +355,19 @@ let rec lowerUnifiedStmtSeqToCfg = (
           let (id, state2) = freshUnifiedCfgId(state1)
           let block = mkUnifiedCfgBlock(
             id,
+            [],
             [{ name, rhs }: WmcMir.UnifiedAssign],
+            WmcMir.UTGoto(nextId),
+          )
+          (id, pushUnifiedCfgBlock(state2, block))
+        },
+        WmcMir.UEffectCall(callee, arg) => {
+          let (nextId, state1) = lowerUnifiedStmtSeqToCfg(tail, cont, state)
+          let (id, state2) = freshUnifiedCfgId(state1)
+          let block = mkUnifiedCfgBlock(
+            id,
+            [{ callee, arg }: WmcMir.UnifiedEffectCall],
+            [],
             WmcMir.UTGoto(nextId),
           )
           (id, pushUnifiedCfgBlock(state2, block))
@@ -358,17 +377,17 @@ let rec lowerUnifiedStmtSeqToCfg = (
           let (thenId, state2) = lowerUnifiedStmtSeqToCfg(thenStmts, WmcMir.UTGoto(nextId), state1)
           let (elseId, state3) = lowerUnifiedStmtSeqToCfg(elseStmts, WmcMir.UTGoto(nextId), state2)
           let (id, state4) = freshUnifiedCfgId(state3)
-          let block = mkUnifiedCfgBlock(id, [], WmcMir.UTBranchBool(cond, thenId, elseId))
+          let block = mkUnifiedCfgBlock(id, [], [], WmcMir.UTBranchBool(cond, thenId, elseId))
           (id, pushUnifiedCfgBlock(state4, block))
         },
         WmcMir.UFail => {
           let (id, state1) = freshUnifiedCfgId(state)
-          let block = mkUnifiedCfgBlock(id, [], WmcMir.UTFail)
+          let block = mkUnifiedCfgBlock(id, [], [], WmcMir.UTFail)
           (id, pushUnifiedCfgBlock(state1, block))
         },
         WmcMir.UReturn(name) => {
           let (id, state1) = freshUnifiedCfgId(state)
-          let block = mkUnifiedCfgBlock(id, [], WmcMir.UTReturn(name))
+          let block = mkUnifiedCfgBlock(id, [], [], WmcMir.UTReturn(name))
           (id, pushUnifiedCfgBlock(state1, block))
         },
       },
@@ -439,6 +458,7 @@ provide let lowerExprToCfgFragmentNoArg = (
       let mappedBlocks = List.map((b: WmcMir.UnifiedBlock) =>
         {
           id: b.id + startId,
+          effects: b.effects,
           assigns: remapAssignsForReturn(b.assigns, b.term, resultName),
           term: remapTermForExit(b.term, startId, exitId),
         }: WmcMir.UnifiedBlock, cfg.blocks)
