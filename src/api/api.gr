@@ -167,6 +167,7 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Block(_) => "Block",
       SurfaceAst.Paren(_) => "Paren",
       SurfaceAst.Tuple(_) => "Tuple",
+      SurfaceAst.List(_) => "List",
       SurfaceAst.RecordLit(_) => "RecordLit",
       SurfaceAst.Seq(_) => "Seq",
       SurfaceAst.Hole(_) => "Hole",
@@ -247,6 +248,13 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Tuple(exprs) => {
         let tupleExprs = List.map(e => exprToJson(e, depth + 1), exprs)
         ",\"children\":[" ++ joinStrings(",", tupleExprs) ++ "]"
+      },
+      SurfaceAst.List(items) => {
+        let itemExprs = List.map((item: SurfaceAst.ListItem) => match (item) {
+          SurfaceAst.Elem(e) => exprToJson(e, depth + 1),
+          SurfaceAst.Spread(e) => exprToJson(e, depth + 1),
+        }, items)
+        ",\"children\":[" ++ joinStrings(",", itemExprs) ++ "]"
       },
       SurfaceAst.Seq(exprs) => {
         let seqExprs = List.map(e => exprToJson(e, depth + 1), exprs)
@@ -448,6 +456,20 @@ let originToJson = (origin: Constraints.Origin) =>
     ++ escapeJson(origin.description)
     ++ "\"}"
 
+let numericConstraintToJson = (numeric: Constraints.NumericConstraint) =>
+  match (numeric) {
+    Constraints.IsNumeric(ty) =>
+      "{\"kind\":\"IsNumeric\",\"type\":\""
+        ++ escapeJson(Types.typeToReadableString(ty))
+        ++ "\"}",
+    Constraints.IntLiteral(ty, value) =>
+      "{\"kind\":\"IntLiteral\",\"type\":\""
+        ++ escapeJson(Types.typeToReadableString(ty))
+        ++ "\",\"value\":"
+        ++ toString(value)
+        ++ "}",
+  }
+
 let constraintToJson = (constraint: Constraints.Constraint) => match (constraint) {
   Constraints.Equality(left, right, origin) =>
     "{\"kind\":\"Equality\",\"left\":\""
@@ -461,6 +483,12 @@ let constraintToJson = (constraint: Constraints.Constraint) => match (constraint
     "{\"kind\":\"Domain\",\"label\":\""
       ++ escapeJson(label)
       ++ "\",\"origin\":"
+      ++ originToJson(origin)
+      ++ "}",
+  Constraints.Numeric(spec, origin) =>
+    "{\"kind\":\"Numeric\",\"spec\":"
+      ++ numericConstraintToJson(spec)
+      ++ ",\"origin\":"
       ++ originToJson(origin)
       ++ "}",
 }

@@ -141,6 +141,46 @@ test("parser supports if condition with equality comparison", () => {
   assertFalse(hasErrors)
 })
 
+test("parser supports list literals and spread items", () => {
+  clearErrors()
+  let source = "let x = [1, ..xs, 3]; let y = [..\"mul(\"];"
+  let parsed = Parser.parse(source)
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(g1), SurfaceAst.DeclGroup(g2)] => {
+      let xOk = match (g1.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.List([
+              SurfaceAst.Elem({ kind: SurfaceAst.Lit(SurfaceAst.Int(1)), _ }),
+              SurfaceAst.Spread({ kind: SurfaceAst.Ident({ text, _ }), _ }),
+              SurfaceAst.Elem({ kind: SurfaceAst.Lit(SurfaceAst.Int(3)), _ }),
+            ]) when text == "xs" => true,
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      let yOk = match (g2.decls) {
+        [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+          [binding] => match (binding.value.kind) {
+            SurfaceAst.List([
+              SurfaceAst.Spread({ kind: SurfaceAst.Lit(SurfaceAst.Str(s)), _ }),
+            ]) when s == "mul(" => true,
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      }
+      xOk && yOk
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
 test("parser supports unary bang, unary minus, and not-equals", () => {
   clearErrors()
   let source =
@@ -421,6 +461,65 @@ test("parser disambiguates match bundle literal vs scrutinee vs arrow sugar", ()
     assertTrue(arrowOk),
     assertFalse(hasErrors),
   ])
+})
+
+test("parser recovers match arrow clauses with non-block bodies", () => {
+  clearErrors()
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x,\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}"
+  let parsed = Parser.parse(source)
+
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Match(m) => match (m.bundle.items) {
+            [
+              { kind: SurfaceAst.Clause(c1), _ },
+              { kind: SurfaceAst.Clause(c2), _ },
+            ] =>
+              match ((c1.body.items, c2.body.items)) {
+                (
+                  [
+                    SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("{"), _ }),
+                    SurfaceAst.ExprItem({ kind: SurfaceAst.Ident({ text: "x", _ }), _ }),
+                    SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("}"), _ }),
+                  ],
+                  [
+                    SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("{"), _ }),
+                    SurfaceAst.ExprItem({ kind: SurfaceAst.Postfix(_), _ }),
+                    SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("}"), _ }),
+                  ],
+                ) => true,
+                _ => false,
+              },
+            _ => false,
+          },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+
+  let marked = getMarkedErrors()
+  let missingBraceWarnings = List.length(List.filter(
+    (entry: Error.MarkedError) => match (entry) {
+      { mark, error } => match ((mark.kind, error.severity)) {
+        (SurfaceAst.MissingToken("{"), Error.Warning) => true,
+        (SurfaceAst.MissingToken("}"), Error.Warning) => true,
+        _ => false,
+      },
+    },
+    marked
+  ))
+  assertTrue(shapeOk)
+  assertTrue(missingBraceWarnings >= 4)
 })
 
 test("raw-like directives remain non-canonical in WMC parser mode", () => {

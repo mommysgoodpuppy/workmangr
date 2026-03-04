@@ -182,6 +182,14 @@ let emitUnsupportedPatternExpr = (
   }: CoreAst.Pattern
 }
 
+let rec hasListSpread = (items: List<SurfaceAst.ListItem>) => match (items) {
+  [] => false,
+  [item, ...rest] => match (item) {
+    SurfaceAst.Spread(_) => true,
+    SurfaceAst.Elem(_) => hasListSpread(rest),
+  },
+}
+
 let rec exprToPattern = (expr: SurfaceAst.Expr) => {
   match (expr.kind) {
     SurfaceAst.Ident({ text, _ }) when text == "_" => makeWildcardPattern(expr.node),
@@ -547,6 +555,84 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
     SurfaceAst.Paren(inner) => lowerExpr(inner),
     SurfaceAst.Tuple(exprs) =>
       makeExpr(expr.node, CoreAst.Tuple(List.map(lowerExpr, exprs))),
+    SurfaceAst.List(items) =>
+      if (hasListSpread(items)) {
+        let emptyExpr = makeIdentExpr(expr.node, "Empty")
+        let linkExpr = makeIdentExpr(expr.node, "Link")
+        let appendExpr = makeIdentExpr(expr.node, "List.append")
+        let buildListChunk = (chunkItems: List<SurfaceAst.Expr>) => {
+          let rec foldRight = (remainingRev: List<SurfaceAst.Expr>, acc: CoreAst.Expr) =>
+            match (remainingRev) {
+              [] => acc,
+              [value, ...rest] => {
+                let loweredValue = lowerExpr(value)
+                let pair = makeTupleExpr(expr.node, [loweredValue, acc])
+                let next = makeExpr(expr.node, CoreAst.Apply(linkExpr, pair))
+                foldRight(rest, next)
+              },
+            }
+          foldRight(List.reverse(chunkItems), emptyExpr)
+        }
+        let makeAppend = (left: CoreAst.Expr, right: CoreAst.Expr) => {
+          let args = makeTupleExpr(expr.node, [left, right])
+          makeExpr(expr.node, CoreAst.Apply(appendExpr, args))
+        }
+        let rec flushChunk = (
+          chunkRev: List<SurfaceAst.Expr>,
+          segmentsRev: List<CoreAst.Expr>,
+        ) => {
+          if (chunkRev == []) {
+            segmentsRev
+          } else {
+            let chunk = buildListChunk(List.reverse(chunkRev))
+            [chunk, ...segmentsRev]
+          }
+        }
+        let rec collectSegments = (
+          remaining: List<SurfaceAst.ListItem>,
+          chunkRev: List<SurfaceAst.Expr>,
+          segmentsRev: List<CoreAst.Expr>,
+        ) => {
+          match (remaining) {
+            [] => flushChunk(chunkRev, segmentsRev),
+            [item, ...rest] => match (item) {
+              SurfaceAst.Elem(value) =>
+                collectSegments(rest, [value, ...chunkRev], segmentsRev),
+              SurfaceAst.Spread(value) => {
+                let withFlushed = flushChunk(chunkRev, segmentsRev)
+                let spreadExpr = lowerExpr(value)
+                collectSegments(rest, [], [spreadExpr, ...withFlushed])
+              },
+            },
+          }
+        }
+        let segments = List.reverse(collectSegments(items, [], []))
+        match (segments) {
+          [] => emptyExpr,
+          [only] => makeAppend(emptyExpr, only),
+          [first, ...rest] => List.reduce(makeAppend, first, rest),
+        }
+      } else {
+        let emptyExpr = makeIdentExpr(expr.node, "Empty")
+        let linkExpr = makeIdentExpr(expr.node, "Link")
+        let rec foldRight = (
+          remainingRev: List<SurfaceAst.ListItem>,
+          acc: CoreAst.Expr,
+        ) =>
+          match (remainingRev) {
+            [] => acc,
+            [item, ...rest] => match (item) {
+              SurfaceAst.Elem(value) => {
+                let loweredValue = lowerExpr(value)
+                let pair = makeTupleExpr(expr.node, [loweredValue, acc])
+                let next = makeExpr(expr.node, CoreAst.Apply(linkExpr, pair))
+                foldRight(rest, next)
+              },
+              SurfaceAst.Spread(_) => foldRight(rest, acc),
+            },
+          }
+        foldRight(List.reverse(items), emptyExpr)
+      },
     SurfaceAst.RecordLit(items) =>
       makeExpr(expr.node, CoreAst.RecordLit(List.map(lowerRecordItem, items))),
     SurfaceAst.Seq(items) => lowerSeqExpr(expr.node, items),

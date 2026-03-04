@@ -1743,6 +1743,53 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
         }
       }
     },
+    Lexer.LBracket => {
+      let (_, state2) = expectSimple(Lexer.LBracket, state1)
+      let mut items: List<SurfaceAst.ListItem> = []
+      let mut currentState = state2
+      while (
+        !kindIs(currentToken(currentState).kind, Lexer.RBracket)
+        && !kindIs(currentToken(currentState).kind, Lexer.EOF)
+      ) {
+        let before = currentState
+        if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+          // Skip leading/trailing commas.
+          let (_, stateTemp) = expectSimple(Lexer.Comma, currentState)
+          currentState = stateTemp
+        } else if (kindIs(currentToken(currentState).kind, Lexer.DPeriod)) {
+          let (_, stateTemp) = expectSimple(Lexer.DPeriod, currentState)
+          let (spreadValue, stateNext) = parseExpr(stateTemp)
+          let spreadItem = (SurfaceAst.Spread(spreadValue): SurfaceAst.ListItem)
+          items = [spreadItem, ...items]
+          currentState = stateNext
+          if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+            let (_, stateAfterComma) = expectSimple(Lexer.Comma, currentState)
+            currentState = stateAfterComma
+          }
+        } else {
+          let (itemExpr, stateNext) = parseExpr(currentState)
+          items = [SurfaceAst.Elem(itemExpr), ...items]
+          currentState = stateNext
+          if (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
+            let (_, stateAfterComma) = expectSimple(Lexer.Comma, currentState)
+            currentState = stateAfterComma
+          }
+        }
+        currentState = ensureProgress(before, currentState, "list literal")
+      }
+      let (rbracketTok, state3) = expectSimpleOrRecover(
+        Lexer.RBracket,
+        currentState,
+        "to close list literal"
+      )
+      let span = spanFromTokens(tok.span, rbracketTok.span)
+      let expr: SurfaceAst.Expr = makeExpr(
+        id,
+        span,
+        SurfaceAst.List(List.reverse(items))
+      )
+      (expr, state3)
+    },
     Lexer.Question => {
       let state2 = dropToken(state1)
       let expr: SurfaceAst.Expr = makeExpr(
@@ -3883,30 +3930,77 @@ and parseMatch = (state: ParseState) => {
               (None, state_temp)
             }
             let (_, state_temp2) = expectSimple(Lexer.FatArrow, state_temp1)
-            let (blockExpr, state_temp3) = parseBlock(state_temp2)
-            let (body, state_temp4) = match (blockExpr.kind) {
-              Block(b) => (b, state_temp3),
-              _ => {
-                let (markId, state_temp4) = freshId(state_temp3)
-                let mark: SurfaceAst.Mark = {
-                  node: { id: markId, span: blockExpr.node.span },
-                  kind: SurfaceAst.MissingBlock("after =>"),
-                  expected: SurfaceAst.ExpectBlock,
-                }
-                let recoveryBlock = Error.createMarkedError(
-                  Error.Parsing,
-                  mark,
-                  "Expected block after =>",
-                  {
-                    node: blockExpr.node,
-                    items: [SurfaceAst.ExprItem(blockExpr)],
-                    body: blockExpr,
-                  },
-                  clues=[Error.Received("non-block expression")],
-                  severity=Error.SError
-                )
-                (recoveryBlock, state_temp4)
-              },
+            let (body, state_temp4) = if (
+              kindIs(currentToken(state_temp2).kind, Lexer.LBrace)
+            ) {
+              let (blockExpr, state_temp3) = parseBlock(state_temp2)
+              match (blockExpr.kind) {
+                Block(b) => (b, state_temp3),
+                _ => {
+                  let (markId, state_temp4) = freshId(state_temp3)
+                  let mark: SurfaceAst.Mark = {
+                    node: { id: markId, span: blockExpr.node.span },
+                    kind: SurfaceAst.MissingBlock("after =>"),
+                    expected: SurfaceAst.ExpectBlock,
+                  }
+                  let recoveryBlock = Error.createMarkedError(
+                    Error.Parsing,
+                    mark,
+                    "Expected block after =>",
+                    {
+                      node: blockExpr.node,
+                      items: [SurfaceAst.ExprItem(blockExpr)],
+                      body: blockExpr,
+                    },
+                    clues=[Error.Received("non-block expression")],
+                    severity=Error.Warning
+                  )
+                  (recoveryBlock, state_temp4)
+                },
+              }
+            } else {
+              // Recovery path: accept `pat => expr` in match bundles and
+              // synthesize explicit missing-brace markers around `expr`
+              // so formatter/inlay can repair from structural AST facts.
+              let (bodyExpr, state_temp3) = parseInfix(state_temp2)
+              let (lbraceMarkId, state_temp4) = freshId(state_temp3)
+              let lbraceMark: SurfaceAst.Mark = {
+                node: { id: lbraceMarkId, span: bodyExpr.node.span },
+                kind: SurfaceAst.MissingToken("{"),
+                expected: SurfaceAst.ExpectBlock,
+              }
+              let lbraceItem: SurfaceAst.BlockItem = Error.createMarkedError(
+                Error.Parsing,
+                lbraceMark,
+                "Expected block after =>",
+                SurfaceAst.MarkItem(lbraceMark),
+                clues=[Error.Note("accepted `=> expr` for recovery; formatter can rewrite to `=> { expr }`")],
+                severity=Error.Warning
+              )
+              let (rbraceMarkId, state_temp5) = freshId(state_temp4)
+              let rbraceMark: SurfaceAst.Mark = {
+                node: { id: rbraceMarkId, span: bodyExpr.node.span },
+                kind: SurfaceAst.MissingToken("}"),
+                expected: SurfaceAst.ExpectBlock,
+              }
+              let rbraceItem: SurfaceAst.BlockItem = Error.createMarkedError(
+                Error.Parsing,
+                rbraceMark,
+                "Expected block after =>",
+                SurfaceAst.MarkItem(rbraceMark),
+                clues=[Error.Note("accepted `=> expr` for recovery; formatter can rewrite to `=> { expr }`")],
+                severity=Error.Warning
+              )
+              let (blockId, state_temp6) = freshId(state_temp5)
+              let blockSpan = bodyExpr.node.span
+              (
+                {
+                  node: { id: blockId, span: blockSpan },
+                  items: [lbraceItem, SurfaceAst.ExprItem(bodyExpr), rbraceItem],
+                  body: bodyExpr,
+                },
+                state_temp6,
+              )
             }
             let (clauseId, state_temp5) = freshId(state_temp4)
             let span = spanFromTokens(pat.node.span, body.node.span)

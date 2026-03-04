@@ -100,7 +100,7 @@ let commentSpans = (source: String) => {
 }
 
 let insideComment = (offset: Number, spans: List<(Number, Number)>) => {
-  let rec check = (items) => match (items) {
+  let rec check = items => match (items) {
     [] => false,
     [(s, e), ...rest] => {
       if (offset >= s && offset < e) {
@@ -114,6 +114,73 @@ let insideComment = (offset: Number, spans: List<(Number, Number)>) => {
 }
 
 let tokensEqual = (a: Lexer.Token, b: Lexer.Token) => a.kind == b.kind
+
+let isDepthSensitiveKind = (kind: Lexer.TokenKind) => match (kind) {
+  Lexer.LParen |
+  Lexer.RParen |
+  Lexer.LBrace |
+  Lexer.DotBrace |
+  Lexer.RBrace |
+  Lexer.LBracket |
+  Lexer.RBracket |
+  Lexer.Comma |
+  Lexer.SemiColon => true,
+  _ => false,
+}
+
+let depthAdvance = (
+  kind: Lexer.TokenKind,
+  paren: Number,
+  brace: Number,
+  bracket: Number,
+) => match (kind) {
+  Lexer.LParen => (paren + 1, brace, bracket),
+  Lexer.RParen => (Number.max(0, paren - 1), brace, bracket),
+  Lexer.LBrace => (paren, brace + 1, bracket),
+  Lexer.DotBrace => (paren, brace + 1, bracket),
+  Lexer.RBrace => (paren, Number.max(0, brace - 1), bracket),
+  Lexer.LBracket => (paren, brace, bracket + 1),
+  Lexer.RBracket => (paren, brace, Number.max(0, bracket - 1)),
+  _ => (paren, brace, bracket),
+}
+
+let tokenDepthProfiles = (tokens: List<Lexer.Token>) => {
+  let rec loop = (
+    remaining: List<Lexer.Token>,
+    paren: Number,
+    brace: Number,
+    bracket: Number,
+    acc: List<(Lexer.Token, Number, Number, Number)>,
+  ) => match (remaining) {
+    [] => List.reverse(acc),
+    [tok, ...rest] => {
+      let profile = (tok, paren, brace, bracket)
+      let (nextParen, nextBrace, nextBracket) = depthAdvance(
+        tok.kind,
+        paren,
+        brace,
+        bracket
+      )
+      loop(rest, nextParen, nextBrace, nextBracket, [profile, ...acc])
+    },
+  }
+  loop(tokens, 0, 0, 0, [])
+}
+
+let profilesMatch = (
+  src: (Lexer.Token, Number, Number, Number),
+  virt: (Lexer.Token, Number, Number, Number),
+) => match ((src, virt)) {
+  ((srcTok, sp, sb, sk), (virtTok, vp, vb, vk)) => {
+    if (!tokensEqual(srcTok, virtTok)) {
+      false
+    } else if (isDepthSensitiveKind(srcTok.kind)) {
+      sp == vp && sb == vb && sk == vk
+    } else {
+      true
+    }
+  },
+}
 
 let lastNonEmptyLineEndOffset = (source: String) => {
   let len = String.length(source)
@@ -206,77 +273,79 @@ let splitChunkTexts = (texts: List<String>) => {
     items: List<String>,
     inlineAcc: List<String>,
     trailingAcc: List<String>,
-  ) =>
-    match (items) {
-      [] => (List.reverse(inlineAcc), List.reverse(trailingAcc)),
-      [t, ...rest] => {
-        let (inlinePart, trailingPart) = splitInlineAndTrailing(t)
-        let nextInline = if (String.length(inlinePart) > 0) {
-          [inlinePart, ...inlineAcc]
-        } else {
-          inlineAcc
-        }
-        let nextTrailing = if (
-          String.length(trailingPart) > 0
-          && containsSemicolonOrRBrace(trailingPart)
-        ) {
-          [trailingPart, ...trailingAcc]
-        } else {
-          trailingAcc
-        }
-        loop(rest, nextInline, nextTrailing)
-      },
-    }
+  ) => match (items) {
+    [] => (List.reverse(inlineAcc), List.reverse(trailingAcc)),
+    [t, ...rest] => {
+      let (inlinePart, trailingPart) = splitInlineAndTrailing(t)
+      let nextInline = if (String.length(inlinePart) > 0) {
+        [inlinePart, ...inlineAcc]
+      } else {
+        inlineAcc
+      }
+      let nextTrailing = if (
+        String.length(trailingPart) > 0
+        && containsSemicolonOrRBrace(trailingPart)
+      ) {
+        [trailingPart, ...trailingAcc]
+      } else {
+        trailingAcc
+      }
+      loop(rest, nextInline, nextTrailing)
+    },
+  }
   loop(texts, [], [])
 }
 
 let joinNonEmpty = (parts: List<String>) =>
-  Array.join(
-    "",
-    Array.fromList(List.filter(s => String.length(s) > 0, parts))
-  )
+  Array.join("", Array.fromList(List.filter(s => String.length(s) > 0, parts)))
+
+let joinRaw = (parts: List<String>) => Array.join("", Array.fromList(parts))
+
+let renderInlayText = (text: String) => {
+  let noCr = String.replaceAll("\r", "", text)
+  String.replaceAll("\n", "[LF]", noCr)
+}
 
 let chunksHaveNonWhitespace = (chunks: List<InsertChunk>) => {
-  let rec loop = (items: List<InsertChunk>) =>
-    match (items) {
-      [] => false,
-      [chunk, ...rest] => if (!isWhitespaceOnly(chunk.text)) {
-        true
-      } else {
-        loop(rest)
-      },
-    }
+  let rec loop = (items: List<InsertChunk>) => match (items) {
+    [] => false,
+    [chunk, ...rest] => if (!isWhitespaceOnly(chunk.text)) {
+      true
+    } else {
+      loop(rest)
+    },
+  }
   loop(chunks)
 }
 
-let nowNs = () =>
-  match (Time.monotonicTime()) {
-    Ok(t) => t,
-    Err(_) => 0L,
-  }
+let nowNs = () => match (Time.monotonicTime()) {
+  Ok(t) => t,
+  Err(_) => 0L,
+}
 
 let nsToMs = (startNs: Int64, endNs: Int64) =>
-  Float64.fromNumber((Int64.toNumber(endNs) - Int64.toNumber(startNs)) / 1000000)
+  Float64.fromNumber(
+    (Int64.toNumber(endNs) - Int64.toNumber(startNs)) / 1000000
+  )
 
 let maybeLogTiming = (
   timingPrefix: Option<String>,
   phase: String,
   startNs: Int64,
   endNs: Int64,
-) =>
-  match (timingPrefix) {
-    Some(prefix) =>
-      print(
-        "[InlayTiming] "
-          ++ prefix
-          ++ "/"
-          ++ phase
-          ++ ": "
-          ++ toString(nsToMs(startNs, endNs))
-          ++ "ms"
-      ),
-    None => void,
-  }
+) => match (timingPrefix) {
+  Some(prefix) =>
+    print(
+      "[InlayTiming] "
+        ++ prefix
+        ++ "/"
+        ++ phase
+        ++ ": "
+        ++ toString(nsToMs(startNs, endNs))
+        ++ "ms"
+    ),
+  None => void,
+}
 
 let offsetToPosition = (source: String, offset: Number) => {
   let lc = Source.offsetToLineCol(source, offset)
@@ -310,11 +379,7 @@ let spanToEndPosition = (span: Source.Span) => {
   { line: line0, character: startCol0 + width }
 }
 
-let inRangeByOffset = (
-  span: Source.Span,
-  rangeStart: Number,
-  rangeEnd: Number,
-) => {
+let inRangeByOffset = (span: Source.Span, rangeStart: Number, rangeEnd: Number) => {
   let pos = if (span.end > span.start) {
     span.end
   } else {
@@ -323,16 +388,14 @@ let inRangeByOffset = (
   pos >= rangeStart && pos <= rangeEnd
 }
 
-let lookupNameTypeHint = (
-  infer: Infer.InferState,
-  name: CoreAst.Name,
-) => match (Map.get(name.node.id, infer.nodeTypes)) {
-  Some(ty) => {
-    let rendered = TypeDisplay.render(Types.applySubstType(infer.subst, ty))
-    Some((name.node.span, ": " ++ rendered))
-  },
-  None => None,
-}
+let lookupNameTypeHint = (infer: Infer.InferState, name: CoreAst.Name) =>
+  match (Map.get(name.node.id, infer.nodeTypes)) {
+    Some(ty) => {
+      let rendered = TypeDisplay.render(Types.applySubstType(infer.subst, ty))
+      Some((name.node.span, ": " ++ rendered))
+    },
+    None => None,
+  }
 
 let rec typeInlaysFromExpr = (
   expr: CoreAst.Expr,
@@ -382,7 +445,8 @@ let rec typeInlaysFromExpr = (
           List.append(
             typeInlaysFromExpr(clause.body, infer, rangeStart, rangeEnd),
             match (clause.guard) {
-              Some(guardExpr) => typeInlaysFromExpr(guardExpr, infer, rangeStart, rangeEnd),
+              Some(guardExpr) =>
+                typeInlaysFromExpr(guardExpr, infer, rangeStart, rangeEnd),
               None => [],
             }
           ),
@@ -395,24 +459,31 @@ let rec typeInlaysFromExpr = (
       List.append(
         typeInlaysFromExpr(thenExpr, infer, rangeStart, rangeEnd),
         match (elseOpt) {
-          Some(elseExpr) => typeInlaysFromExpr(elseExpr, infer, rangeStart, rangeEnd),
+          Some(elseExpr) =>
+            typeInlaysFromExpr(elseExpr, infer, rangeStart, rangeEnd),
           None => [],
         }
       )
     ),
   CoreAst.Tuple(items) =>
-    List.flatten(List.map(item => typeInlaysFromExpr(item, infer, rangeStart, rangeEnd), items)),
-  CoreAst.RecordLit(items) =>
     List.flatten(
-      List.map((item: CoreAst.RecordItem) => match (item) {
-        CoreAst.Field(_, valueExpr) => typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
-        CoreAst.Spread(valueExpr) => typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
-      }, items)
+      List.map(
+        item => typeInlaysFromExpr(item, infer, rangeStart, rangeEnd),
+        items
+      )
     ),
+  CoreAst.RecordLit(items) =>
+    List.flatten(List.map((item: CoreAst.RecordItem) => match (item) {
+      CoreAst.Field(_, valueExpr) =>
+        typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
+      CoreAst.Spread(valueExpr) =>
+        typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
+    }, items)),
   CoreAst.Annotate(valueExpr, _annotation) =>
     typeInlaysFromExpr(valueExpr, infer, rangeStart, rangeEnd),
-  CoreAst.Mark(_, inner) => typeInlaysFromExpr(inner, infer, rangeStart, rangeEnd),
-  _ => []
+  CoreAst.Mark(_, inner) =>
+    typeInlaysFromExpr(inner, infer, rangeStart, rangeEnd),
+  _ => [],
 }
 
 let typeInlaysFromLoweredProgram = (
@@ -421,41 +492,56 @@ let typeInlaysFromLoweredProgram = (
   rangeStart: Number,
   rangeEnd: Number,
 ) => {
-  List.flatten(List.map((item: CoreAst.TopItem) => match (item) {
-    CoreAst.DeclGroup(group) =>
-      List.flatten(List.map((decl: CoreAst.Decl) => match (decl) {
-        CoreAst.LetDecl(letDecl) =>
-          List.flatten(List.map((binding: CoreAst.LetBinding) => {
-            let bindingHint = if (binding.annotation == None) {
-              match (binding.name.kind) {
-                CoreAst.Var(name) | CoreAst.Pin(name) =>
-                  match (lookupNameTypeHint(infer, name)) {
-                    Some((span, label)) when inRangeByOffset(span, rangeStart, rangeEnd) =>
-                      [
-                        "{\"position\":{\"line\":"
-                          ++ toString(spanToEndPosition(span).line)
-                          ++ ",\"character\":"
-                          ++ toString(spanToEndPosition(span).character)
-                          ++ "},\"label\":\""
-                          ++ escapeJsonText(label)
-                          ++ "\",\"kind\":1,\"paddingLeft\":true,\"paddingRight\":false}",
-                      ],
-                    _ => [],
-                  },
-                _ => [],
-              }
-            } else {
-              []
-            }
-            List.append(
-              bindingHint,
-              typeInlaysFromExpr(binding.value, infer, rangeStart, rangeEnd)
-            )
-          }, letDecl.bindings)),
-        _ => [],
-      }, group.decls)),
-    _ => [],
-  }, program.items))
+  List.flatten(
+    List.map((item: CoreAst.TopItem) => match (item) {
+      CoreAst.DeclGroup(group) =>
+        List.flatten(
+          List.map((decl: CoreAst.Decl) => match (decl) {
+            CoreAst.LetDecl(letDecl) =>
+              List.flatten(
+                List.map((binding: CoreAst.LetBinding) => {
+                  let bindingHint = if (binding.annotation == None) {
+                    match (binding.name.kind) {
+                      CoreAst.Var(name) | CoreAst.Pin(name) =>
+                        match (lookupNameTypeHint(infer, name)) {
+                          Some((span, label)) when inRangeByOffset(
+                            span,
+                            rangeStart,
+                            rangeEnd
+                          ) =>
+                            [
+                              "{\"position\":{\"line\":"
+                                ++ toString(spanToEndPosition(span).line)
+                                ++ ",\"character\":"
+                                ++ toString(spanToEndPosition(span).character)
+                                ++ "},\"label\":\""
+                                ++ escapeJsonText(label)
+                                ++ "\",\"kind\":1,\"paddingLeft\":true,\"paddingRight\":false}",
+                            ],
+                          _ => [],
+                        },
+                      _ => [],
+                    }
+                  } else {
+                    []
+                  }
+                  List.append(
+                    bindingHint,
+                    typeInlaysFromExpr(
+                      binding.value,
+                      infer,
+                      rangeStart,
+                      rangeEnd
+                    )
+                  )
+                }, letDecl.bindings)
+              ),
+            _ => [],
+          }, group.decls)
+        ),
+      _ => [],
+    }, program.items)
+  )
 }
 
 provide let typeInlayHintsFromLoweredProgram = (
@@ -679,8 +765,10 @@ let virtualInsertionsFromScan = (source: String, virtualText: String) => {
     t => !tokenIsIgnorable(t),
     Lexer.lex(virtualText)
   )
-  let srcArr = Array.fromList(srcTokens)
-  let virtArr = Array.fromList(virtTokens)
+  let srcProfiles = tokenDepthProfiles(srcTokens)
+  let virtProfiles = tokenDepthProfiles(virtTokens)
+  let srcArr = Array.fromList(srcProfiles)
+  let virtArr = Array.fromList(virtProfiles)
   let n = Array.length(srcArr)
   let m = Array.length(virtArr)
   let trailingAnchor = lastNonEmptyLineEndOffset(source)
@@ -704,12 +792,14 @@ let virtualInsertionsFromScan = (source: String, virtualText: String) => {
     let mut vi = 0
     let mut prevVirtEnd = 0
     while (si < n && vi < m) {
-      let srcTok = Array.get(si, srcArr)
+      let srcProfile = Array.get(si, srcArr)
+      let (srcTok, _sp, _sb, _sk) = srcProfile
       let mut vj = vi
       let mut found = false
       while (vj < m) {
-        let virtTok = Array.get(vj, virtArr)
-        if (tokensEqual(srcTok, virtTok)) {
+        let virtProfile = Array.get(vj, virtArr)
+        let (virtTok, _vp, _vb, _vk) = virtProfile
+        if (profilesMatch(srcProfile, virtProfile)) {
           found = true
           break
         }
@@ -718,7 +808,7 @@ let virtualInsertionsFromScan = (source: String, virtualText: String) => {
       if (!found) {
         break
       } else {
-        let matchTok = Array.get(vj, virtArr)
+        let (matchTok, _mp, _mb, _mk) = Array.get(vj, virtArr)
         if (matchTok.span.start > prevVirtEnd) {
           let text = String.slice(
             prevVirtEnd,
@@ -782,12 +872,14 @@ provide let formatTargetWithSemicolons = (
     (chunk: InsertChunk) => {
       let semis = extractSemicolons(chunk.text)
       if (String.length(semis) > 0) {
-        Some({
-          anchorOffset: chunk.anchorOffset,
-          virtOffset: chunk.virtOffset,
-          text: semis,
-          trailing: chunk.trailing,
-        })
+        Some(
+          {
+            anchorOffset: chunk.anchorOffset,
+            virtOffset: chunk.virtOffset,
+            text: semis,
+            trailing: chunk.trailing,
+          },
+        )
       } else {
         None
       }
@@ -804,8 +896,8 @@ let inlayHintsForSourceWithTiming = (
   source: String,
   rangeStart: Number,
   rangeEnd: Number,
-  debug: (String) => Void,
-  escapeJson: (String) => String,
+  debug: String => Void,
+  escapeJson: String => String,
   debugEnabled: Bool,
   timingPrefix: Option<String>,
 ) => {
@@ -1053,100 +1145,100 @@ let inlayHintsForSourceWithTiming = (
         if (!hasSignal) {
           render(rest, acc)
         } else {
-        debug("[LSP] anchor=" ++ toString(offset))
-        debug("  inlineChunks=" ++ toString(inlineChunks))
-        debug("  trailingChunks=" ++ toString(trailingChunks))
-        let inlineTexts = List.map((c: InsertChunk) => c.text, inlineChunks)
-        let trailingTexts = List.map((c: InsertChunk) => c.text, trailingChunks)
-        let (inlineCore, trailingCore) = splitChunkTexts(inlineTexts)
-        let (inlineFromTrailing, trailingFromTrailing) = splitChunkTexts(
-          trailingTexts
-        )
-        let inlineText = joinNonEmpty(List.append(inlineCore, inlineFromTrailing))
-        let trailingText = joinNonEmpty(
-          List.append(trailingCore, trailingFromTrailing)
-        )
-        debug("  inlineText=\"" ++ inlineText ++ "\"")
-        debug("  trailingText=\"" ++ trailingText ++ "\"")
-        let basePos = offsetToPosition(source, offset)
-        let acc1 = if (
-          offset >= rangeStart
-          && offset <= rangeEnd
-          && String.length(inlineText) > 0
-          && (allowWhitespaceInlays || !isWhitespaceOnly(inlineText))
-        ) {
-          let inlinePos = basePos
-          debug(
-            "[LSP] inline inlay at line "
-              ++ toString(inlinePos.line)
-              ++ " char "
-              ++ toString(inlinePos.character)
-              ++ " text=\""
-              ++ inlineText
-              ++ "\""
+          debug("[LSP] anchor=" ++ toString(offset))
+          debug("  inlineChunks=" ++ toString(inlineChunks))
+          debug("  trailingChunks=" ++ toString(trailingChunks))
+          let inlineTexts = List.map((c: InsertChunk) => c.text, inlineChunks)
+          let trailingTexts = List.map(
+            (c: InsertChunk) => c.text,
+            trailingChunks
           )
-          debugInlays = [
-            (inlinePos.line, inlinePos.character, inlineText),
-            ...debugInlays
-          ]
-          let hint = "{\"position\":{\"line\":"
-            ++ toString(inlinePos.line)
-            ++ ",\"character\":"
-            ++ toString(inlinePos.character)
-            ++ "},\"label\":\""
-            ++ escapeJson(inlineText)
-            ++ "\",\"kind\":1"
-            ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
-          [hint, ...acc]
-        } else {
-          acc
-        }
-        let sampleText = match (Map.get(offset, anchorSampleText)) {
-          Some(text) => text,
-          None => "",
-        }
-        let acc2 = if (
-          String.length(trailingText) > 0
-          && (allowWhitespaceInlays || !isWhitespaceOnly(trailingText))
-        ) {
-          let lastNl = lastNewlineIndex(sampleText)
-          let pos = if (lastNl >= 0) {
-            let nlCount = countNewlines(
-              String.slice(0, end=lastNl + 1, sampleText)
+          // Keep the diff authoritative: render chunk text verbatim per stream.
+          let inlineText = joinRaw(inlineTexts)
+          let trailingText = joinRaw(trailingTexts)
+          let inlineRenderedText = renderInlayText(inlineText)
+          let trailingRenderedText = renderInlayText(trailingText)
+          debug("  inlineText=\"" ++ inlineRenderedText ++ "\"")
+          debug("  trailingText=\"" ++ trailingRenderedText ++ "\"")
+          let basePos = offsetToPosition(source, offset)
+          let acc1 = if (
+            offset >= rangeStart
+            && offset <= rangeEnd
+            && String.length(inlineRenderedText) > 0
+            && (allowWhitespaceInlays || !isWhitespaceOnly(inlineRenderedText))
+          ) {
+            let inlinePos = basePos
+            debug(
+              "[LSP] inline inlay at line "
+                ++ toString(inlinePos.line)
+                ++ " char "
+                ++ toString(inlinePos.character)
+                ++ " text=\""
+                ++ inlineRenderedText
+                ++ "\""
             )
-            {
-              line: basePos.line + nlCount,
-              character: 0,
-            }
+            debugInlays = [
+              (inlinePos.line, inlinePos.character, inlineRenderedText),
+              ...debugInlays
+            ]
+            let hint = "{\"position\":{\"line\":"
+              ++ toString(inlinePos.line)
+              ++ ",\"character\":"
+              ++ toString(inlinePos.character)
+              ++ "},\"label\":\""
+              ++ escapeJson(inlineRenderedText)
+              ++ "\",\"kind\":1"
+              ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
+            [hint, ...acc]
           } else {
-            basePos
+            acc
           }
-          debug(
-            "[LSP] trailing inlay at line "
+          let sampleText = match (Map.get(offset, anchorSampleText)) {
+            Some(text) => text,
+            None => "",
+          }
+          let acc2 = if (
+            String.length(trailingRenderedText) > 0
+            && (
+              allowWhitespaceInlays
+              || !isWhitespaceOnly(trailingRenderedText)
+            )
+          ) {
+            let lastNl = lastNewlineIndex(sampleText)
+            let pos = if (lastNl >= 0) {
+              let nlCount = countNewlines(
+                String.slice(0, end=lastNl + 1, sampleText)
+              )
+              { line: basePos.line + nlCount, character: 0 }
+            } else {
+              basePos
+            }
+            debug(
+              "[LSP] trailing inlay at line "
+                ++ toString(pos.line)
+                ++ " char "
+                ++ toString(pos.character)
+                ++ " text=\""
+                ++ trailingRenderedText
+                ++ "\""
+            )
+            debugInlays = [
+              (pos.line, pos.character, trailingRenderedText),
+              ...debugInlays
+            ]
+            let hint = "{\"position\":{\"line\":"
               ++ toString(pos.line)
-              ++ " char "
+              ++ ",\"character\":"
               ++ toString(pos.character)
-              ++ " text=\""
-              ++ trailingText
-              ++ "\""
-          )
-          debugInlays = [
-            (pos.line, pos.character, trailingText),
-            ...debugInlays
-          ]
-          let hint = "{\"position\":{\"line\":"
-            ++ toString(pos.line)
-            ++ ",\"character\":"
-            ++ toString(pos.character)
-            ++ "},\"label\":\""
-            ++ escapeJson(trailingText)
-            ++ "\",\"kind\":1"
-            ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
-          [hint, ...acc1]
-        } else {
-          acc1
-        }
-        render(rest, acc2)
+              ++ "},\"label\":\""
+              ++ escapeJson(trailingRenderedText)
+              ++ "\",\"kind\":1"
+              ++ ",\"paddingLeft\":false,\"paddingRight\":false}"
+            [hint, ...acc1]
+          } else {
+            acc1
+          }
+          render(rest, acc2)
         }
       },
     }
@@ -1173,8 +1265,8 @@ provide let inlayHintsForSource = (
   source: String,
   rangeStart: Number,
   rangeEnd: Number,
-  debug: (String) => Void,
-  escapeJson: (String) => String,
+  debug: String => Void,
+  escapeJson: String => String,
   debugEnabled: Bool,
 ) => {
   // TODO(remove): legacy single-file inference path kept for inlay unit tests.
@@ -1193,13 +1285,22 @@ provide let inlayHintsForSource = (
   let parsed = Parser.parseResult(source)
   let lowered = Lower.lowerProgram(parsed.program)
   let infer = Infer.inferProgram(lowered)
-  let typeJson = typeInlayHintsFromLoweredProgram(lowered, infer, rangeStart, rangeEnd)
+  let typeJson = typeInlayHintsFromLoweredProgram(
+    lowered,
+    infer,
+    rangeStart,
+    rangeEnd
+  )
   if (formatJson == "[]") {
     typeJson
   } else if (typeJson == "[]") {
     formatJson
   } else {
-    let leftInner = String.slice(1, end=String.length(formatJson) - 1, formatJson)
+    let leftInner = String.slice(
+      1,
+      end=String.length(formatJson) - 1,
+      formatJson
+    )
     let rightInner = String.slice(1, end=String.length(typeJson) - 1, typeJson)
     "[" ++ leftInner ++ "," ++ rightInner ++ "]"
   }
@@ -1209,8 +1310,8 @@ provide let formatInlayHintsForSource = (
   source: String,
   rangeStart: Number,
   rangeEnd: Number,
-  debug: (String) => Void,
-  escapeJson: (String) => String,
+  debug: String => Void,
+  escapeJson: String => String,
   debugEnabled: Bool,
 ) =>
   inlayHintsForSourceWithTiming(
@@ -1227,8 +1328,8 @@ provide let inlayHintsForSourceProfile = (
   source: String,
   rangeStart: Number,
   rangeEnd: Number,
-  debug: (String) => Void,
-  escapeJson: (String) => String,
+  debug: String => Void,
+  escapeJson: String => String,
   debugEnabled: Bool,
   timingPrefix: String,
 ) =>
@@ -1241,3 +1342,28 @@ provide let inlayHintsForSourceProfile = (
     debugEnabled,
     Some(timingPrefix)
   )
+
+provide let debugPreviewForSource = (source: String) => {
+  let mut sawPreviewHeader = false
+  let mut preview = source
+  let captureDebug = (text: String) => {
+    if (sawPreviewHeader) {
+      preview = text
+      sawPreviewHeader = false
+    } else if (text == "[LSP] preview:") {
+      sawPreviewHeader = true
+    } else {
+      void
+    }
+  }
+  let _ = inlayHintsForSourceWithTiming(
+    source,
+    0,
+    String.length(source),
+    captureDebug,
+    escapeJsonText,
+    true,
+    None
+  )
+  preview
+}

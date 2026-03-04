@@ -15,9 +15,10 @@ from "./report.gr" include Report
 from "../frontend/parser.gr" include Parser
 from "../frontend/lower.gr" include Lower
 from "./compile_cli.gr" include CompileCli
+from "./lsp/inlay.gr" include Inlay
 
 let usage =
-  "Usage: wmgr type [--line <line>] [--std-root <path>] <file.wm> | wmgr ast <file.wm> | wmgr compile [--std-root <path>] <file.wm>"
+  "Usage: wmgr type [--line <line>] [--std-root <path>] <file.wm> | wmgr ast <file.wm> | wmgr compile [--std-root <path>] <file.wm> | wmgr inlay <file.wm>"
 
 let exitWith = (code: Number, message: String) => {
   print(message)
@@ -52,7 +53,11 @@ let main = () => {
     Err(_ex) => exitWith(1, "Failed to read argv"),
     Ok(args) => {
       let argCount = Array.length(args)
-      let commandFromArg = if (argCount > 1) { Some(Array.get(1, args)) } else { None }
+      let commandFromArg = if (argCount > 1) {
+        Some(Array.get(1, args))
+      } else {
+        None
+      }
 
       let command = match (commandFromArg) {
         Some(cmd) => cmd,
@@ -67,70 +72,72 @@ let main = () => {
         lineFilter: Option<Number>,
         stdRoot: Option<String>,
         filePath: Option<String>,
-      ) =>
-        if (idx >= argCount) {
-          (lineFilter, stdRoot, filePath)
-        } else {
-          let arg = Array.get(idx, args)
-          if (arg == "--line") {
-            if (idx + 1 >= argCount) {
-              exitWith(1, "Missing value for --line")
-              (lineFilter, stdRoot, filePath)
-            } else {
-              let lineStr = Array.get(idx + 1, args)
-              let parsed = Number.parseInt(lineStr, radix=10)
-              match (parsed) {
-                Ok(lineNum) when lineNum > 0 =>
-                  parseTypeArgs(idx + 2, Some(lineNum), stdRoot, filePath),
-                _ => {
-                  exitWith(1, "Invalid line number, must be a positive integer")
-                  (lineFilter, stdRoot, filePath)
-                },
-              }
-            }
-          } else if (arg == "--std-root") {
-            if (idx + 1 >= argCount) {
-              exitWith(1, "Missing value for --std-root")
-              (lineFilter, stdRoot, filePath)
-            } else {
-              let root = Array.get(idx + 1, args)
-              if (root == "") {
-                exitWith(1, "Invalid --std-root value")
-                (lineFilter, stdRoot, filePath)
-              } else {
-                parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
-              }
-            }
-          } else if (arg == "--std") {
-            if (idx + 1 >= argCount) {
-              exitWith(1, "Missing value for --std")
-              (lineFilter, stdRoot, filePath)
-            } else {
-              let root = Array.get(idx + 1, args)
-              if (root == "") {
-                exitWith(1, "Invalid --std value")
-                (lineFilter, stdRoot, filePath)
-              } else {
-                parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
-              }
-            }
-          } else if (String.startsWith("-", arg)) {
-            exitWith(1, "Unknown type option: " ++ arg)
+      ) => if (idx >= argCount) {
+        (lineFilter, stdRoot, filePath)
+      } else {
+        let arg = Array.get(idx, args)
+        if (arg == "--line") {
+          if (idx + 1 >= argCount) {
+            exitWith(1, "Missing value for --line")
             (lineFilter, stdRoot, filePath)
           } else {
-            match (filePath) {
-              Some(_) => {
-                exitWith(1, "Multiple input files provided")
+            let lineStr = Array.get(idx + 1, args)
+            let parsed = Number.parseInt(lineStr, radix=10)
+            match (parsed) {
+              Ok(lineNum) when lineNum > 0 =>
+                parseTypeArgs(idx + 2, Some(lineNum), stdRoot, filePath),
+              _ => {
+                exitWith(1, "Invalid line number, must be a positive integer")
                 (lineFilter, stdRoot, filePath)
               },
-              None => parseTypeArgs(idx + 1, lineFilter, stdRoot, Some(arg)),
             }
           }
+        } else if (arg == "--std-root") {
+          if (idx + 1 >= argCount) {
+            exitWith(1, "Missing value for --std-root")
+            (lineFilter, stdRoot, filePath)
+          } else {
+            let root = Array.get(idx + 1, args)
+            if (root == "") {
+              exitWith(1, "Invalid --std-root value")
+              (lineFilter, stdRoot, filePath)
+            } else {
+              parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
+            }
+          }
+        } else if (arg == "--std") {
+          if (idx + 1 >= argCount) {
+            exitWith(1, "Missing value for --std")
+            (lineFilter, stdRoot, filePath)
+          } else {
+            let root = Array.get(idx + 1, args)
+            if (root == "") {
+              exitWith(1, "Invalid --std value")
+              (lineFilter, stdRoot, filePath)
+            } else {
+              parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
+            }
+          }
+        } else if (String.startsWith("-", arg)) {
+          exitWith(1, "Unknown type option: " ++ arg)
+          (lineFilter, stdRoot, filePath)
+        } else {
+          match (filePath) {
+            Some(_) => {
+              exitWith(1, "Multiple input files provided")
+              (lineFilter, stdRoot, filePath)
+            },
+            None => parseTypeArgs(idx + 1, lineFilter, stdRoot, Some(arg)),
+          }
         }
+      }
 
-      let (lineFilter, stdRootArg, fileFromArg) = if (command == "type" || command == "compile") {
+      let (lineFilter, stdRootArg, fileFromArg) = if (
+        command == "type"
+        || command == "compile"
+      ) {
         parseTypeArgs(2, None, None, None)
-      } else if (command == "ast") {
+      } else if (command == "ast" || command == "inlay") {
         if (argCount > 2) {
           (None, None, Some(Array.get(2, args)))
         } else {
@@ -143,7 +150,9 @@ let main = () => {
           (None, None, None)
         }
       }
-      let stdRoot = match ((stdRootArg, envLookup("WMGR_STD_ROOT"), envLookup("WORKMAN_STD_ROOT"))) {
+      let stdRoot = match (
+        (stdRootArg, envLookup("WMGR_STD_ROOT"), envLookup("WORKMAN_STD_ROOT"))
+      ) {
         (Some(root), _, _) => Some(root),
         (None, Some(root), _) => Some(root),
         (None, None, envRoot) => envRoot,
@@ -156,8 +165,10 @@ let main = () => {
 
       match ((command, filePathOpt)) {
         (_cmd, None) => exitWith(1, usage),
-        (cmd, Some(_)) when cmd != "type" && cmd != "ast" && cmd != "compile" =>
-          exitWith(1, usage),
+        (cmd, Some(_)) when cmd != "type"
+          && cmd != "ast"
+          && cmd != "compile"
+          && cmd != "inlay" => exitWith(1, usage),
         (_, Some(filePath)) => {
           let path = Path.fromString(filePath)
           match (Fs.Utf8.readFile(path)) {
@@ -185,6 +196,35 @@ let main = () => {
                         ++ " (entrypoint=main)"
                     ),
                 }
+              } else if (command == "inlay") {
+                let mut sawPreviewHeader = false
+                let mut preview = source
+                let captureDebug = (text: String) => {
+                  if (sawPreviewHeader) {
+                    preview = text
+                    sawPreviewHeader = false
+                  } else if (text == "[LSP] preview:") {
+                    sawPreviewHeader = true
+                  } else {
+                    void
+                  }
+                }
+                let escapeJson = (s: String) => {
+                  let step1 = String.replaceAll("\\", "\\\\", s)
+                  let step2 = String.replaceAll("\"", "\\\"", step1)
+                  let step3 = String.replaceAll("\n", "\\n", step2)
+                  let step4 = String.replaceAll("\r", "\\r", step3)
+                  String.replaceAll("\t", "\\t", step4)
+                }
+                let _ = Inlay.formatInlayHintsForSource(
+                  source,
+                  0,
+                  String.length(source),
+                  captureDebug,
+                  escapeJson,
+                  true
+                )
+                print(preview)
               } else {
                 let baseOptions = ModuleSystem.defaultOptions()
                 let options = match (stdRoot) {
@@ -203,7 +243,8 @@ let main = () => {
                   None =>
                     exitWith(
                       1,
-                      "Failed to infer entry module summary for " ++ inferred.graph.entry
+                      "Failed to infer entry module summary for "
+                        ++ inferred.graph.entry
                     ),
                 }
               }

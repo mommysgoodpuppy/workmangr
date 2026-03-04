@@ -71,6 +71,7 @@ provide enum rec ExprKind {
   Block(Block),
   Paren(Expr),
   Tuple(List<Expr>),
+  List(List<ListItem>),
   RecordLit(List<RecordItem>),
   Seq(List<Expr>),
   Hole(Hole),

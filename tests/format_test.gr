@@ -59,6 +59,40 @@ type ParseResult = NotMul
   assertEquals(marks, [])
 })
 
+test("formatting list literal with spread", () => {
+  let source = "
+let mulLiteral = [..\"mul(\", \"x\"];
+"
+  Error.clearErrors()
+  let formatted1 = Formatter.formatWithMode(source, Formatter.RealFix)
+  let formatted2 = Formatter.formatWithMode(formatted1, Formatter.RealFix)
+  let marks = Error.getMarkedErrors()
+  assertEquals(canonicalNonWs(source), canonicalNonWs(formatted1))
+  assertEquals(formatted1, formatted2)
+  assertEquals(marks, [])
+})
+
+test("formatter recovers match arrow clauses with bare expression bodies", () => {
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x,\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}"
+  let expectedVirtual =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => { x },\n"
+      ++ "  None => { Panic(\"panic\") }\n"
+      ++ "};"
+  let expectedFix = source ++ ";"
+
+  Error.clearErrors()
+  let virtualOut = Formatter.formatWithMode(source, Formatter.Virtual)
+  let fixOut = Formatter.formatWithMode(source, Formatter.RealFix)
+
+  assertEquals(canonicalNonWs(expectedVirtual), canonicalNonWs(virtualOut))
+  assertEquals(canonicalNonWs(expectedFix), canonicalNonWs(fixOut))
+})
+
 test("formatter produces mark on broken input", () => {
   let source = "
 record broekn = .{ value: Int, next: Int };

@@ -141,9 +141,12 @@ let rec spaces = (n: Number) => {
   }
 }
 
-let artifactFromVirtual = (text: String, anchor: Number, reason: String) => {
-  { kind: "ghostToken", text, start: anchor, end: anchor, reason }
-}
+let artifactFromVirtual = (
+  text: String,
+  start: Number,
+  end: Number,
+  reason: String,
+) => { kind: "ghostToken", text, start, end, reason }
 
 let renderWithSettingsWithTokens = (
   program: SurfaceAst.Program,
@@ -193,6 +196,23 @@ let renderWithSettingsWithTokens = (
         } else {
           match (tok.kind) {
             Lexer.SemiColon => true,
+            _ => false,
+          }
+        },
+      }
+    }
+    find(tokensNoComments)
+  }
+
+  let hasCommaAfter = (endIndex: Number) => {
+    let rec find = (tokens: List<Lexer.Token>) => {
+      match (tokens) {
+        [] => false,
+        [tok, ...tail] => if (tok.span.start < endIndex) {
+          find(tail)
+        } else {
+          match (tok.kind) {
+            Lexer.Comma => true,
             _ => false,
           }
         },
@@ -266,6 +286,7 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.Paren(inner) => exprHasHole(inner),
     SurfaceAst.Seq(items) => anyExprList(items),
     SurfaceAst.Tuple(items) => anyExprList(items),
+    SurfaceAst.List(items) => anyListItems(items),
     SurfaceAst.RecordLit(items) => anyRecordItems(items),
     SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
       exprHasHole(cond) || exprHasHole(thenExpr) || match (elseExprOpt) {
@@ -312,6 +333,16 @@ let renderWithSettingsWithTokens = (
         SurfaceAst.Spread(value) => exprHasHole(value),
       }
       hasHole || anyRecordItems(xs)
+    },
+  }
+  and anyListItems = (items: List<SurfaceAst.ListItem>) => match (items) {
+    [] => false,
+    [item, ...xs] => {
+      let hasHole = match (item) {
+        SurfaceAst.Elem(value) => exprHasHole(value),
+        SurfaceAst.Spread(value) => exprHasHole(value),
+      }
+      hasHole || anyListItems(xs)
     },
   }
   and anyBlockItems = (items: List<SurfaceAst.BlockItem>) => match (items) {
@@ -422,6 +453,7 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.Paren(inner) => exprHasMissingRBrace(inner),
     SurfaceAst.Seq(items) => anyExprMissingRBrace(items),
     SurfaceAst.Tuple(items) => anyExprMissingRBrace(items),
+    SurfaceAst.List(items) => anyListItemsMissingRBrace(items),
     SurfaceAst.RecordLit(items) => anyRecordItemsMissingRBrace(items),
     SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
       exprHasMissingRBrace(cond)
@@ -485,25 +517,41 @@ let renderWithSettingsWithTokens = (
         hasMissing || anyRecordItemsMissingRBrace(xs)
       },
     }
+  and anyListItemsMissingRBrace = (items: List<SurfaceAst.ListItem>) =>
+    match (items) {
+      [] => false,
+      [item, ...xs] => {
+        let hasMissing = match (item) {
+          SurfaceAst.Elem(value) => exprHasMissingRBrace(value),
+          SurfaceAst.Spread(value) => exprHasMissingRBrace(value),
+        }
+        hasMissing || anyListItemsMissingRBrace(xs)
+      },
+    }
   let mut chunks: List<String> = []
   let mut artifacts: List<VirtualArtifact> = []
   let mut semicolonAdditions: List<SemicolonAddition> = []
   let mut indent = 0
   let mut atLineStart = true
+  let mut renderedLen = 0
 
   let write = (text: String) => {
     if (settings.emitText) {
       if (atLineStart) {
-        chunks = [spaces(indent), ...chunks]
+        let indentText = spaces(indent)
+        chunks = [indentText, ...chunks]
+        renderedLen += String.length(indentText)
         atLineStart = false
       }
       chunks = [text, ...chunks]
+      renderedLen += String.length(text)
     }
   }
 
   let newline = () => {
     if (settings.emitText) {
       chunks = ["\n", ...chunks]
+      renderedLen += 1
       atLineStart = true
     }
   }
@@ -512,6 +560,7 @@ let renderWithSettingsWithTokens = (
     if (settings.emitText) {
       if (!atLineStart) {
         chunks = [" ", ...chunks]
+        renderedLen += 1
       }
     }
   }
@@ -519,7 +568,9 @@ let renderWithSettingsWithTokens = (
   let emitIndent = () => {
     if (settings.emitText) {
       if (atLineStart) {
-        chunks = [spaces(indent), ...chunks]
+        let indentText = spaces(indent)
+        chunks = [indentText, ...chunks]
+        renderedLen += String.length(indentText)
         atLineStart = false
       }
     }
@@ -527,8 +578,10 @@ let renderWithSettingsWithTokens = (
 
   let emitVirtual = (text: String, anchor: Number, reason: String) => {
     if (mode == Virtual && settings.allowVirtualInsertions) {
+      let start = renderedLen
       write(text)
-      artifacts = [artifactFromVirtual(text, anchor, reason), ...artifacts]
+      let end = renderedLen
+      artifacts = [artifactFromVirtual(text, start, end, reason), ...artifacts]
     }
   }
 
@@ -906,6 +959,17 @@ let renderWithSettingsWithTokens = (
           emitCommaSeparated(emitExpr, items)
           write(")")
         },
+        SurfaceAst.List(items) => {
+          write("[")
+          emitCommaSeparated(item => match (item) {
+            SurfaceAst.Elem(value) => emitExpr(value),
+            SurfaceAst.Spread(value) => {
+              write("..")
+              emitExpr(value)
+            },
+          }, items)
+          write("]")
+        },
         SurfaceAst.Seq(items) => {
           write("(")
           let rec emitSeq = (seqItems: List<SurfaceAst.Expr>) => {
@@ -1078,9 +1142,30 @@ let renderWithSettingsWithTokens = (
           }
           write("{")
           if (matchExpr.bundle.items != []) {
-            space()
-            emitCommaSeparated(emitFnItem, matchExpr.bundle.items)
-            space()
+            newline()
+            indent += 2
+            let rec emitMatchItems = (items: List<SurfaceAst.FnItem>) =>
+              match (items) {
+                [] => void,
+                [single] => emitFnItem(single),
+                [head, ...tail] => {
+                  emitFnItem(head)
+                  if (
+                    mode == Virtual
+                    && settings.allowVirtualInsertions
+                    && !hasCommaAfter(head.node.span.end)
+                  ) {
+                    emitVirtual(",", head.node.span.end, "missing comma")
+                  } else {
+                    write(",")
+                  }
+                  newline()
+                  emitMatchItems(tail)
+                },
+              }
+            emitMatchItems(matchExpr.bundle.items)
+            indent -= 2
+            newline()
           }
           write("}")
         },
@@ -1130,6 +1215,37 @@ let renderWithSettingsWithTokens = (
     }
   }
   and emitBlock = (block: SurfaceAst.Block) => {
+    let isMissingBraceRecoveryExprBlock = (items: List<SurfaceAst.BlockItem>) =>
+      match (items) {
+        [
+          SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(lb), _ }),
+          SurfaceAst.ExprItem(_),
+          SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(rb), _ }),
+        ] => lb == "{" && rb == "}",
+        _ => false,
+      }
+    if (isMissingBraceRecoveryExprBlock(block.items)) {
+      match (block.items) {
+        [
+          SurfaceAst.MarkItem(lbMark),
+          SurfaceAst.ExprItem(expr),
+          SurfaceAst.MarkItem(rbMark),
+        ] => {
+          match (lbMark.kind) {
+            SurfaceAst.MissingToken("{") =>
+              emitVirtual("{", lbMark.node.span.start, "missing token"),
+            _ => write("{"),
+          }
+          emitExpr(expr)
+          match (rbMark.kind) {
+            SurfaceAst.MissingToken("}") =>
+              emitVirtual("}", rbMark.node.span.start, "missing token"),
+            _ => write("}"),
+          }
+        },
+        _ => void,
+      }
+    } else {
     write("{")
     let hasBody = block.items != []
     let rec hasMissingRBrace = (items: List<SurfaceAst.BlockItem>) =>
@@ -1309,7 +1425,7 @@ let renderWithSettingsWithTokens = (
                   SurfaceAst.MissingSemicolon => {
                     if (mode == Virtual && settings.allowVirtualInsertions) {
                       if (hasNextConcrete(tail)) {
-                        write(";")
+                        emitVirtual(";", mark.node.span.start, "missing semicolon")
                       }
                     } else if (settings.insertSemis) {
                       if (
@@ -1353,6 +1469,7 @@ let renderWithSettingsWithTokens = (
     }
     if (!(missingRBrace && mode != Virtual)) {
       write("}")
+    }
     }
   }
   and emitFnItem = (item: SurfaceAst.FnItem) => {
@@ -1883,7 +2000,13 @@ let renderWithSettingsWithTokens = (
         SurfaceAst.InvalidTopLevel(text) => write(text),
         SurfaceAst.MissingSemicolon => void,
         SurfaceAst.MissingRBrace => void,
-        SurfaceAst.MissingToken(text) => write(text),
+        SurfaceAst.MissingToken(text) => if (
+          mode == Virtual && settings.allowVirtualInsertions
+        ) {
+          emitVirtual(text, mark.node.span.start, "missing token")
+        } else {
+          write(text)
+        },
         SurfaceAst.MissingExpr(text) => write(text),
         SurfaceAst.MissingPattern(text) => write(text),
         SurfaceAst.MissingTypeExpr(text) => write(text),
@@ -2030,7 +2153,7 @@ let renderWithSettingsWithTokens = (
           if (hasTerminatorAfter(endSpan.end) && !missingRBrace) {
             write(";")
           } else if (mode == Virtual && settings.allowVirtualInsertions) {
-            write(";")
+            emitVirtual(";", endSpan.end, "missing semicolon")
           } else if (
             settings.insertSemis
             && topItemIsDecidable(item)

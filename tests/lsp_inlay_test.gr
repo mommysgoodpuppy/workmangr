@@ -44,5 +44,29 @@ test("format inlays do not synthesize legacy import artifacts", () => {
   assertTrue(!String.contains("import std/list;", hints))
 })
 
+test("format inlays recover match arrow bare clause bodies", () => {
+  let source =
+    "let xample = match(in) => {\n"
+      ++ "  Some(x) => x,\n"
+      ++ "  None => Panic(\"panic\")\n"
+      ++ "}"
+  let hints = Inlay.inlayHintsForSource(
+    source,
+    0,
+    String.length(source),
+    noop,
+    escapeJson,
+    false
+  )
+  // Expect structural insertions for synthesized clause blocks and top-level semicolon.
+  let hasAnyInsertion = String.contains("\"label\":\"", hints)
+  let hasImpossibleChunk = String.contains("{x,", hints)
+    || String.contains("};let", hints)
+  all([
+    assertTrue(hasAnyInsertion),
+    assertFalse(hasImpossibleChunk),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

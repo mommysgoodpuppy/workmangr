@@ -155,6 +155,21 @@ let rec visitExpr = (store: NS.NodeStore, expr: SurfaceAst.Expr) => {
         NS.addChild(s, expr.node.id, "item", e.node.id)
       }, store, exprs)
     },
+    SurfaceAst.List(items) => {
+      let store = NS.updatePreview(store, expr.node.id, "List")
+      List.reduce((s, item) => {
+        match (item) {
+          SurfaceAst.Elem(e) => {
+            let s = visitExpr(s, e)
+            NS.addChild(s, expr.node.id, "item", e.node.id)
+          },
+          SurfaceAst.Spread(e) => {
+            let s = visitExpr(s, e)
+            NS.addChild(s, expr.node.id, "spread", e.node.id)
+          },
+        }
+      }, store, items)
+    },
     SurfaceAst.Seq(exprs) => {
       let store = NS.updatePreview(store, expr.node.id, "Seq")
       List.reduce((s, e) => {

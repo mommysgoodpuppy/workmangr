@@ -244,6 +244,70 @@ test("call with multiple args lowers to tuple", () => {
   )
 })
 
+test("list spread lowers via List.append with empty-left for single spread", () => {
+  let source = "let mulLiteral = [..\"mul(\"];"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      match (binding.value.kind) {
+        CoreAst.Apply(callee, arg) =>
+          match ((callee.kind, arg.kind)) {
+            (
+              CoreAst.Ident({ text: "List.append", _ }),
+              CoreAst.Tuple([left, right]),
+            ) =>
+              match ((left.kind, right.kind)) {
+                (
+                  CoreAst.Ident({ text: "Empty", _ }),
+                  CoreAst.Lit(CoreAst.Str("mul(")),
+                ) => Ok(void),
+                _ => Err("expected List.append(Empty, \"mul(\")"),
+              },
+            _ => Err("expected List.append call for single spread list"),
+          },
+        _ => Err("expected apply"),
+      }
+    },
+  )
+})
+
+test("mixed list spread lowers with List.append composition", () => {
+  let source = "let xs = [1, ..rest, 3];"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectSingleLetDecl(dg),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) => {
+      let hasListAppend = match (binding.value.kind) {
+        CoreAst.Apply(callee, _arg) => match (callee.kind) {
+          CoreAst.Ident({ text: "List.append", _ }) => true,
+          _ => false,
+        },
+        _ => false,
+      }
+      if (hasListAppend) {
+        Ok(void)
+      } else {
+        Err("expected lowered mixed spread list to use List.append")
+      }
+    },
+  )
+})
+
 test("mut let group lowers with mut group kind", () => {
   let source = "let mut counter = 0;"
   let program = Frontend.parseAndLower(source)
