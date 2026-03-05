@@ -18,6 +18,7 @@ from "../../core/error.gr" include Error
 from "../../core/module_infer.gr" include ModuleInfer
 from "../../core/types.gr" include Types
 from "../../module/module_system.gr" include ModuleSystem
+from "../../frontend/lexer.gr" include Lexer
 from "./format.gr" include Format
 from "./inlay.gr" include Inlay
 from "./layer1/type_display.gr" include TypeDisplay
@@ -500,6 +501,65 @@ let pathToUri = (path: String) => {
   } else {
     "file://" ++ encoded
   }
+}
+
+let spanContainsOffset = (span: Source.Span, offset: Number) => {
+  if (span.end <= span.start) {
+    offset == span.start
+  } else {
+    offset >= span.start && offset < span.end
+  }
+}
+
+let tokenSpanNearOffset = (source: String, offset: Number) => {
+  let tokens = Lexer.lex(source)
+  let sourceLen = String.length(source)
+  let clamp = (value: Number) => {
+    if (value < 0) {
+      0
+    } else if (value > sourceLen) {
+      sourceLen
+    } else {
+      value
+    }
+  }
+  let candidates = [
+    clamp(offset),
+    clamp(offset - 1),
+    clamp(offset + 1),
+    clamp(offset - 2),
+    clamp(offset + 2),
+  ]
+  let tokenSpanAt = (target: Number) => {
+    let rec loop = (rest: List<Lexer.Token>) =>
+      match (rest) {
+        [] => None,
+        [tok, ...tail] =>
+          match (tok.kind) {
+            Lexer.EOF => loop(tail),
+            _ =>
+              if (
+                spanContainsOffset(tok.span, target)
+                  || (tok.span.end > tok.span.start && target == tok.span.end)
+              ) {
+                Some(tok.span)
+              } else {
+                loop(tail)
+              },
+          },
+      }
+    loop(tokens)
+  }
+  let rec choose = (rest: List<Number>) =>
+    match (rest) {
+      [] => None,
+      [candidate, ...tail] =>
+        match (tokenSpanAt(candidate)) {
+          Some(span) => Some(span),
+          None => choose(tail),
+        },
+    }
+  choose(candidates)
 }
 
 let hoverRangeJson = (source: String, span: Source.Span) => {
@@ -1116,8 +1176,9 @@ let handleHover = (
                       match (Map.get(definition.modulePath, inferred.modules)) {
                         Some(defSummary) =>
                           match (ModuleInfer.typeAtOffsetInSummary(defSummary, definition.span.start)) {
-                            Some(defTypeAt) => match (defTypeAt.ty) {
-                              Types.TFun(_, _) => defTypeAt.ty,
+                            Some(defTypeAt) => match ((found.ty, defTypeAt.ty)) {
+                              (Types.TVoid, replacementTy) => replacementTy,
+                              (_currentTy, Types.TFun(_, _)) => defTypeAt.ty,
                               _ => found.ty,
                             },
                             None => found.ty,
@@ -1133,9 +1194,13 @@ let handleHover = (
                     summary,
                     found.nodeId
                   )
+                  let hoverSpan = match (tokenSpanNearOffset(source, offset)) {
+                    Some(tokenSpan) => tokenSpan,
+                    None => found.span,
+                  }
                   sendResponse(
                     idText,
-                    hoverJsonForTypeValue(source, found.span, selectedType, effectNotes)
+                    hoverJsonForTypeValue(source, hoverSpan, selectedType, effectNotes)
                   )
                 },
                 None => {

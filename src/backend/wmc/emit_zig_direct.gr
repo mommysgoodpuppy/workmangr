@@ -1,0 +1,1091 @@
+module WmcEmitZigDirect
+
+from "char" include Char
+from "list" include List
+from "string" include String
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/source.gr" include Source
+from "../../core/types.gr" include Types
+from "./expr_inline.gr" include WmcExprInline
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+from "./emit_zig.gr" include WmcEmitZig
+
+record DirectState {
+  nextId: Number,
+}
+
+let emptyState = { nextId: 0 }: DirectState
+
+record LocalFnBinding {
+  fnName: String,
+  capturedArgs: List<String>,
+}
+
+record ExprEmit {
+  lines: List<String>,
+  exprText: String,
+  helperFns: List<String>,
+  usesPrint: Bool,
+  state: DirectState,
+}
+
+record FunctionEmit {
+  helperFns: List<String>,
+  fnSource: String,
+  usesPrint: Bool,
+  state: DirectState,
+}
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let indent = (s: String) => "  " ++ s
+
+let lineTextAt = (source: String, targetLine: Number) => {
+  let len = String.length(source)
+  let rec loop = (idx: Number, line: Number, start: Number) => {
+    if (idx >= len) {
+      if (line == targetLine) {
+        Some(String.slice(start, end=len, source))
+      } else {
+        None
+      }
+    } else {
+      let ch = String.charAt(idx, source)
+      if (ch == '\n') {
+        if (line == targetLine) {
+          Some(String.slice(start, end=idx, source))
+        } else {
+          loop(idx + 1, line + 1, idx + 1)
+        }
+      } else {
+        loop(idx + 1, line, start)
+      }
+    }
+  }
+  loop(0, 1, 0)
+}
+
+let wmSourceComment = (node: WmcTCore.TypedNode, sourceText: Option<String>) =>
+  {
+    let span: Source.Span = node.span
+    let base = "// wm: node="
+      ++ toString(node.id)
+      ++ " at "
+      ++ toString(span.line)
+      ++ ":"
+      ++ toString(span.col)
+      ++ " ["
+      ++ toString(span.start)
+      ++ ".."
+      ++ toString(span.end)
+      ++ "]"
+    match (sourceText) {
+      None => base,
+      Some(src) =>
+        match (lineTextAt(src, span.line)) {
+          None => base,
+          Some(line) => base ++ " | " ++ String.replaceAll("\r", "", line),
+        },
+    }
+  }
+
+let isAsciiLetter = (c: Char) =>
+  {
+    let code = Char.code(c)
+    (code >= Char.code('a') && code <= Char.code('z'))
+      || (code >= Char.code('A') && code <= Char.code('Z'))
+  }
+
+let isAsciiDigit = (c: Char) => {
+  let code = Char.code(c)
+  code >= Char.code('0') && code <= Char.code('9')
+}
+
+let isZigReserved = (name: String) =>
+  name == "align"
+    || name == "allowzero"
+    || name == "and"
+    || name == "anyframe"
+    || name == "anytype"
+    || name == "asm"
+    || name == "async"
+    || name == "await"
+    || name == "break"
+    || name == "catch"
+    || name == "comptime"
+    || name == "const"
+    || name == "continue"
+    || name == "defer"
+    || name == "else"
+    || name == "enum"
+    || name == "errdefer"
+    || name == "error"
+    || name == "export"
+    || name == "extern"
+    || name == "false"
+    || name == "for"
+    || name == "if"
+    || name == "inline"
+    || name == "linksection"
+    || name == "noalias"
+    || name == "noinline"
+    || name == "nosuspend"
+    || name == "opaque"
+    || name == "or"
+    || name == "orelse"
+    || name == "packed"
+    || name == "pub"
+    || name == "resume"
+    || name == "return"
+    || name == "struct"
+    || name == "suspend"
+    || name == "switch"
+    || name == "test"
+    || name == "threadlocal"
+    || name == "true"
+    || name == "try"
+    || name == "union"
+    || name == "unreachable"
+    || name == "usingnamespace"
+    || name == "var"
+    || name == "volatile"
+    || name == "while"
+    || name == "_"
+
+let sanitizeIdentBase = (input: String) => {
+  if (String.length(input) == 0) {
+    "_wm"
+  } else {
+    let rec loop = (idx: Number, out: String) => {
+      if (idx >= String.length(input)) {
+        out
+      } else {
+        let ch = String.charAt(idx, input)
+        let keep = isAsciiLetter(ch) || isAsciiDigit(ch) || ch == '_'
+        let next = if (keep) { out ++ Char.toString(ch) } else { out ++ "_" }
+        loop(idx + 1, next)
+      }
+    }
+    let raw = loop(0, "")
+    if (raw == "") {
+      "_wm"
+    } else {
+      let first = String.charAt(0, raw)
+      if (isAsciiDigit(first)) { "_" ++ raw } else { raw }
+    }
+  }
+}
+
+let sanitizeLocalBase = (name: String) => {
+  let base = sanitizeIdentBase(name)
+  if (isZigReserved(base)) { base ++ "_wm" } else { base }
+}
+
+let rec lookupEnv = (env: List<(String, String)>, name: String) =>
+  match (env) {
+    [] => sanitizeLocalBase(name),
+    [(k, v), ...tail] => if (k == name) { v } else { lookupEnv(tail, name) },
+  }
+
+let rec lookupEnvOpt = (env: List<(String, String)>, name: String) =>
+  match (env) {
+    [] => None,
+    [(k, v), ...tail] => if (k == name) { Some(v) } else { lookupEnvOpt(tail, name) },
+  }
+
+let rec lookupLocalFn = (env: List<(String, LocalFnBinding)>, name: String) =>
+  match (env) {
+    [] => None,
+    [(k, v), ...tail] => if (k == name) { Some(v) } else { lookupLocalFn(tail, name) },
+  }
+
+let nextTmp = (hint: String, state: DirectState) =>
+  (
+    "__wm_" ++ sanitizeLocalBase(hint) ++ "_" ++ toString(state.nextId),
+    { nextId: state.nextId + 1 }: DirectState,
+  )
+
+let boolClauseBodies = (clauses: List<WmcTCoreNorm.MatchClause>) =>
+  match (clauses) {
+    [c1, c2] =>
+      if (c1.guard != None || c2.guard != None) {
+        None
+      } else {
+        match ((c1.param.kind, c2.param.kind)) {
+          (WmcTCoreNorm.NPLit(CoreAst.Bool(true)), WmcTCoreNorm.NPLit(CoreAst.Bool(false))) =>
+            Some((c1.body, c2.body)),
+          (WmcTCoreNorm.NPLit(CoreAst.Bool(false)), WmcTCoreNorm.NPLit(CoreAst.Bool(true))) =>
+            Some((c2.body, c1.body)),
+          _ => None,
+        }
+      },
+    _ => None,
+  }
+
+let atomLiteralToZig = (lit: CoreAst.AtomLiteral) =>
+  match (lit) {
+    CoreAst.Int(n) => toString(n),
+    CoreAst.Bool(true) => "true",
+    CoreAst.Bool(false) => "false",
+    CoreAst.Unit => "0",
+    CoreAst.Byte(n) => toString(n),
+    CoreAst.Char(_ch) => "0",
+    CoreAst.Str(_s) => "0",
+  }
+
+let wrapBlockExpr = (lines: List<String>, exprText: String) =>
+  if (lines == []) {
+    exprText
+  } else {
+    "blk: {\n"
+      ++ joinStrings("\n", List.map(indent, lines))
+      ++ "\n"
+      ++ indent("break :blk " ++ exprText ++ ";")
+      ++ "\n"
+      ++ "}"
+  }
+
+let appendExprEmit = (left: ExprEmit, right: ExprEmit, exprText: String) =>
+  {
+    lines: List.append(left.lines, right.lines),
+    exprText,
+    helperFns: List.append(left.helperFns, right.helperFns),
+    usesPrint: left.usesPrint || right.usesPrint,
+    state: right.state,
+  }: ExprEmit
+
+let withNodeComment = (node: WmcTCore.TypedNode, line: String, sourceText: Option<String>) =>
+  [wmSourceComment(node, sourceText), line]
+
+let rec containsString = (items: List<String>, target: String) =>
+  match (items) {
+    [] => false,
+    [head, ...tail] => if (head == target) { true } else { containsString(tail, target) },
+  }
+
+let dedupeStrings = (items: List<String>) => {
+  let rec loop = (rest: List<String>, accRev: List<String>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [item, ...tail] =>
+        if (containsString(accRev, item)) {
+          loop(tail, accRev)
+        } else {
+          loop(tail, [item, ...accRev])
+        },
+    }
+  loop(items, [])
+}
+
+let isIntrinsicName = (name: String) =>
+  name == "+"
+    || name == "-"
+    || name == "*"
+    || name == "print"
+    || name == "intAdd"
+    || name == "intSub"
+    || name == "intMul"
+    || name == WmcTCoreNorm.zeroArgThunkParamName
+
+let rec freeNamesExpr = (expr: WmcTCoreNorm.Expr, bound: List<String>) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELit(_) => [],
+    WmcTCoreNorm.NEUnknown(_) => [],
+    WmcTCoreNorm.NEIdent(name) =>
+      if (containsString(bound, name) || isIntrinsicName(name)) { [] } else { [name] },
+    WmcTCoreNorm.NETuple(items) =>
+      dedupeStrings(List.flatten(List.map((item: WmcTCoreNorm.Expr) => freeNamesExpr(item, bound), items))),
+    WmcTCoreNorm.NELambda(param, body) => freeNamesExpr(body, [param, ...bound]),
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      dedupeStrings(List.append(freeNamesExpr(callee, bound), freeNamesExpr(arg, bound))),
+    WmcTCoreNorm.NEMatch(m) => {
+      let scrut = freeNamesExpr(m.scrutinee, bound)
+      let clauseVars = List.flatten(List.map((clause: WmcTCoreNorm.MatchClause) => {
+        let guardVars = match (clause.guard) {
+          None => [],
+          Some(g) => freeNamesExpr(g, bound),
+        }
+        dedupeStrings(List.append(guardVars, freeNamesExpr(clause.body, bound)))
+      }, m.clauses))
+      dedupeStrings(List.append(scrut, clauseVars))
+    },
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      dedupeStrings(List.append(
+        freeNamesExpr(valueExpr, bound),
+        freeNamesExpr(bodyExpr, [name, ...bound]),
+      )),
+  }
+
+let rec decomposeLetLambdaValue = (expr: WmcTCoreNorm.Expr) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      match (decomposeLetLambdaValue(bodyExpr)) {
+        Some((bindings, param, fnBody, lambdaNode)) =>
+          Some(([(name, valueExpr, valueExpr.node), ...bindings], param, fnBody, lambdaNode)),
+        None => None,
+      },
+    WmcTCoreNorm.NELambda(param, fnBody) => Some(([], param, fnBody, expr.node)),
+    _ => None,
+  }
+
+let rec emitExpr = (
+  expr: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELit(lit) =>
+      {
+        lines: [],
+        exprText: atomLiteralToZig(lit),
+        helperFns: [],
+        usesPrint: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NEIdent(name) =>
+      {
+        lines: [],
+        exprText: lookupEnv(env, name),
+        helperFns: [],
+        usesPrint: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NEUnknown(_) =>
+      {
+        lines: [],
+        exprText: "0",
+        helperFns: [],
+        usesPrint: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NETuple(_items) =>
+      {
+        lines: [],
+        exprText: "0",
+        helperFns: [],
+        usesPrint: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NELambda(_param, _body) =>
+      {
+        lines: [],
+        exprText: "0",
+        helperFns: [],
+        usesPrint: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      match (valueExpr.kind) {
+        WmcTCoreNorm.NELambda(param, fnBody) => {
+          let zigName = sanitizeLocalBase(name)
+          let (localFnName, st1) = nextTmp(name, state)
+          let capturedNames = List.filterMap((captureName: String) =>
+            match (lookupEnvOpt(env, captureName)) {
+              None => None,
+              Some(capturedZigName) => Some((captureName, capturedZigName)),
+            },
+            freeNamesExpr(fnBody, [param]),
+          )
+          let (paramTy, returnTy) = match (valueExpr.node.ty) {
+            Some(Types.TFun(paramTy, returnTy)) =>
+              (WmcEmitZig.zigTypeNameFromType(paramTy), WmcEmitZig.zigTypeNameFromType(returnTy)),
+            _ => ("comptime_int", "comptime_int"),
+          }
+          let paramZig = sanitizeLocalBase(param)
+          let fnParamSig = joinStrings(
+            ", ",
+            List.append(
+              List.map(
+                ((captureName, _captureZig): (String, String)) =>
+                  sanitizeLocalBase(captureName) ++ "_env: comptime_int",
+                capturedNames,
+              ),
+              [paramZig ++ ": " ++ paramTy],
+            ),
+          )
+          let fnBodyOut = emitExpr(
+            fnBody,
+            List.append(
+              List.map(
+                ((captureName, captureZig): (String, String)) =>
+                  (captureName, sanitizeLocalBase(captureName) ++ "_env"),
+                capturedNames,
+              ),
+              [(param, paramZig)],
+            ),
+            fnEnv,
+            st1,
+            sourceText,
+          )
+          let fnLines = List.append(
+            withNodeComment(
+              valueExpr.node,
+              "fn " ++ localFnName ++ "(" ++ fnParamSig ++ ") " ++ returnTy ++ " {",
+              sourceText,
+            ),
+            List.append(
+              List.map(indent, fnBodyOut.lines),
+              List.append(
+                (
+                  if (returnTy == "void") {
+                    List.append(
+                      List.map(indent, withNodeComment(fnBody.node, "_ = " ++ fnBodyOut.exprText ++ ";", sourceText)),
+                      List.map(indent, withNodeComment(fnBody.node, "return;", sourceText)),
+                    )
+                  } else {
+                    List.map(
+                      indent,
+                      withNodeComment(fnBody.node, "return " ++ fnBodyOut.exprText ++ ";", sourceText),
+                    )
+                  }
+                ),
+                ["}"],
+              )
+            ),
+          )
+          let localFnBinding: LocalFnBinding = {
+            fnName: localFnName,
+            capturedArgs: List.map(
+              ((_, captureZig): (String, String)) => captureZig,
+              capturedNames,
+            ),
+          }
+          let capturesNeeded = capturedNames != []
+          let nextFnEnv = if (capturesNeeded) { [(name, localFnBinding), ...fnEnv] } else { fnEnv }
+          let bodyOut = emitExpr(
+            bodyExpr,
+            [(name, zigName), ...env],
+            nextFnEnv,
+            fnBodyOut.state,
+            sourceText,
+          )
+          if (name == "_" || capturesNeeded) {
+            {
+              lines: bodyOut.lines,
+              exprText: bodyOut.exprText,
+              helperFns: List.append(
+                [joinStrings("\n", fnLines)],
+                List.append(fnBodyOut.helperFns, bodyOut.helperFns),
+              ),
+              usesPrint: fnBodyOut.usesPrint || bodyOut.usesPrint,
+              state: bodyOut.state,
+            }: ExprEmit
+          } else {
+            {
+              lines: List.append(
+                withNodeComment(valueExpr.node, "const " ++ zigName ++ " = " ++ localFnName ++ ";", sourceText),
+                bodyOut.lines,
+              ),
+              exprText: bodyOut.exprText,
+              helperFns: List.append(
+                [joinStrings("\n", fnLines)],
+                List.append(fnBodyOut.helperFns, bodyOut.helperFns),
+              ),
+              usesPrint: fnBodyOut.usesPrint || bodyOut.usesPrint,
+              state: bodyOut.state,
+            }: ExprEmit
+          }
+        },
+        _ => {
+          match (if (name == "_") { None } else { decomposeLetLambdaValue(valueExpr) }) {
+            Some((captureLets, param, fnBody, lambdaNode)) => {
+              let rec emitCaptureLets = (
+                lets: List<(String, WmcTCoreNorm.Expr, WmcTCore.TypedNode)>,
+                envX: List<(String, String)>,
+                stX: DirectState,
+                linesRev: List<String>,
+                helperRev: List<String>,
+                usesPrintX: Bool,
+              ) =>
+                match (lets) {
+                  [] =>
+                    (
+                      envX,
+                      stX,
+                      List.reverse(linesRev),
+                      List.reverse(helperRev),
+                      usesPrintX,
+                    ),
+                  [(capName, capExpr, capNode), ...tail] => {
+                    let capOut = emitExpr(capExpr, envX, fnEnv, stX, sourceText)
+                    let (capZig, stY) = nextTmp(capName, capOut.state)
+                    let nextLinesRev = List.append(
+                      List.reverse(
+                        List.append(
+                          capOut.lines,
+                          withNodeComment(capNode, "const " ++ capZig ++ " = " ++ capOut.exprText ++ ";", sourceText),
+                        )
+                      ),
+                      linesRev,
+                    )
+                    emitCaptureLets(
+                      tail,
+                      [(capName, capZig), ...envX],
+                      stY,
+                      nextLinesRev,
+                      List.append(List.reverse(capOut.helperFns), helperRev),
+                      usesPrintX || capOut.usesPrint,
+                    )
+                  },
+                }
+              let (closureEnv, stCaptured, capturedLines, capturedHelpers, captureUsesPrint) = emitCaptureLets(
+                captureLets,
+                env,
+                state,
+                [],
+                [],
+                false,
+              )
+              let (localFnName, stFnName) = nextTmp(name, stCaptured)
+              let capturedNames = List.filterMap((captureName: String) =>
+                match (lookupEnvOpt(closureEnv, captureName)) {
+                  None => None,
+                  Some(capturedZigName) => Some((captureName, capturedZigName)),
+                },
+                freeNamesExpr(fnBody, [param]),
+              )
+              let (paramTy, returnTy) = match (valueExpr.node.ty) {
+                Some(Types.TFun(paramTy, returnTy)) =>
+                  (WmcEmitZig.zigTypeNameFromType(paramTy), WmcEmitZig.zigTypeNameFromType(returnTy)),
+                _ => ("comptime_int", "comptime_int"),
+              }
+              let paramZig = sanitizeLocalBase(param)
+              let fnParamSig = joinStrings(
+                ", ",
+                List.append(
+                  List.map(
+                    ((captureName, _captureZig): (String, String)) =>
+                      sanitizeLocalBase(captureName) ++ "_env: comptime_int",
+                    capturedNames,
+                  ),
+                  [paramZig ++ ": " ++ paramTy],
+                ),
+              )
+              let fnBodyOut = emitExpr(
+                fnBody,
+                List.append(
+                  List.map(
+                    ((captureName, _captureZig): (String, String)) =>
+                      (captureName, sanitizeLocalBase(captureName) ++ "_env"),
+                    capturedNames,
+                  ),
+                  [(param, paramZig)],
+                ),
+                fnEnv,
+                stFnName,
+                sourceText,
+              )
+              let fnLines = List.append(
+                withNodeComment(
+                  lambdaNode,
+                  "fn " ++ localFnName ++ "(" ++ fnParamSig ++ ") " ++ returnTy ++ " {",
+                  sourceText,
+                ),
+                List.append(
+                  List.map(indent, fnBodyOut.lines),
+                  List.append(
+                    (
+                      if (returnTy == "void") {
+                        List.append(
+                          List.map(indent, withNodeComment(fnBody.node, "_ = " ++ fnBodyOut.exprText ++ ";", sourceText)),
+                          List.map(indent, withNodeComment(fnBody.node, "return;", sourceText)),
+                        )
+                      } else {
+                        List.map(
+                          indent,
+                          withNodeComment(fnBody.node, "return " ++ fnBodyOut.exprText ++ ";", sourceText),
+                        )
+                      }
+                    ),
+                    ["}"],
+                  )
+                ),
+              )
+              let localFnBinding: LocalFnBinding = {
+                fnName: localFnName,
+                capturedArgs: List.map(
+                  ((_, captureZig): (String, String)) => captureZig,
+                  capturedNames,
+                ),
+              }
+              let bodyOut = emitExpr(
+                bodyExpr,
+                [(name, sanitizeLocalBase(name)), ...env],
+                [(name, localFnBinding), ...fnEnv],
+                fnBodyOut.state,
+                sourceText,
+              )
+              {
+                lines: List.append(capturedLines, bodyOut.lines),
+                exprText: bodyOut.exprText,
+                helperFns: List.append(
+                  capturedHelpers,
+                  List.append(
+                    [joinStrings("\n", fnLines)],
+                    List.append(fnBodyOut.helperFns, bodyOut.helperFns),
+                  ),
+                ),
+                usesPrint: captureUsesPrint || fnBodyOut.usesPrint || bodyOut.usesPrint,
+                state: bodyOut.state,
+              }: ExprEmit
+            },
+            None =>
+              {
+                let valueOut = emitExpr(valueExpr, env, fnEnv, state, sourceText)
+                if (name == "_") {
+                  let bodyOut = emitExpr(bodyExpr, env, fnEnv, valueOut.state, sourceText)
+                  {
+                    lines: List.append(
+                      valueOut.lines,
+                      List.append(
+                        withNodeComment(valueExpr.node, "_ = " ++ valueOut.exprText ++ ";", sourceText),
+                        bodyOut.lines,
+                      ),
+                    ),
+                    exprText: bodyOut.exprText,
+                    helperFns: List.append(valueOut.helperFns, bodyOut.helperFns),
+                    usesPrint: valueOut.usesPrint || bodyOut.usesPrint,
+                    state: bodyOut.state,
+                  }: ExprEmit
+                } else {
+                  let zigName = sanitizeLocalBase(name)
+                  let bodyOut = emitExpr(bodyExpr, [(name, zigName), ...env], fnEnv, valueOut.state, sourceText)
+                  {
+                    lines: List.append(
+                      valueOut.lines,
+                      List.append(
+                        withNodeComment(valueExpr.node, "const " ++ zigName ++ " = " ++ valueOut.exprText ++ ";", sourceText),
+                        bodyOut.lines,
+                      ),
+                    ),
+                    exprText: bodyOut.exprText,
+                    helperFns: List.append(valueOut.helperFns, bodyOut.helperFns),
+                    usesPrint: valueOut.usesPrint || bodyOut.usesPrint,
+                    state: bodyOut.state,
+                  }: ExprEmit
+                }
+              },
+          }
+        },
+      },
+    WmcTCoreNorm.NEMatch(m) =>
+      match (boolClauseBodies(m.clauses)) {
+        None =>
+          {
+            lines: [],
+            exprText: "0",
+            helperFns: [],
+            usesPrint: false,
+            state,
+          }: ExprEmit,
+        Some((thenExpr, elseExpr)) => {
+          let condOut = emitExpr(m.scrutinee, env, fnEnv, state, sourceText)
+          let thenOut = emitExpr(thenExpr, env, fnEnv, condOut.state, sourceText)
+          let elseOut = emitExpr(elseExpr, env, fnEnv, thenOut.state, sourceText)
+          appendExprEmit(
+            condOut,
+            {
+              lines: [],
+              exprText:
+                "if ("
+                  ++ condOut.exprText
+                  ++ ") "
+                  ++ wrapBlockExpr(thenOut.lines, thenOut.exprText)
+                  ++ " else "
+                  ++ wrapBlockExpr(elseOut.lines, elseOut.exprText),
+              helperFns: List.append(thenOut.helperFns, elseOut.helperFns),
+              usesPrint: thenOut.usesPrint || elseOut.usesPrint,
+              state: elseOut.state,
+            }: ExprEmit,
+            "if ("
+              ++ condOut.exprText
+              ++ ") "
+              ++ wrapBlockExpr(thenOut.lines, thenOut.exprText)
+              ++ " else "
+              ++ wrapBlockExpr(elseOut.lines, elseOut.exprText),
+          )
+        },
+      },
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      match (callee.kind) {
+        WmcTCoreNorm.NEApply(callee2, left) =>
+          match (callee2.kind) {
+            WmcTCoreNorm.NEIdent(op) =>
+              if (op == "+" || op == "-" || op == "*") {
+                let leftOut = emitExpr(left, env, fnEnv, state, sourceText)
+                let rightOut = emitExpr(arg, env, fnEnv, leftOut.state, sourceText)
+                appendExprEmit(
+                  leftOut,
+                  rightOut,
+                  "(" ++ leftOut.exprText ++ " " ++ op ++ " " ++ rightOut.exprText ++ ")",
+                )
+              } else {
+                let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+                appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
+              },
+            _ => {
+              let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
+              let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+              appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
+            },
+          },
+        WmcTCoreNorm.NEIdent(op) =>
+          match (lookupLocalFn(fnEnv, op)) {
+            Some(localFn) => {
+              let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+              let callArgs = joinStrings(", ", List.append(localFn.capturedArgs, [argOut.exprText]))
+              {
+                lines: argOut.lines,
+                exprText: localFn.fnName ++ "(" ++ callArgs ++ ")",
+                helperFns: argOut.helperFns,
+                usesPrint: argOut.usesPrint,
+                state: argOut.state,
+              }: ExprEmit
+            },
+            None =>
+          match (arg.kind) {
+            WmcTCoreNorm.NETuple([left, right]) =>
+              if (op == "+" || op == "-" || op == "*") {
+                let leftOut = emitExpr(left, env, fnEnv, state, sourceText)
+                let rightOut = emitExpr(right, env, fnEnv, leftOut.state, sourceText)
+                appendExprEmit(
+                  leftOut,
+                  rightOut,
+                  "(" ++ leftOut.exprText ++ " " ++ op ++ " " ++ rightOut.exprText ++ ")",
+                )
+              } else if (op == "print") {
+                let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+                {
+                  lines: List.append(
+                    argOut.lines,
+                    withNodeComment(callee.node, "__wm_print(" ++ argOut.exprText ++ ");", sourceText),
+                  ),
+                  exprText: "0",
+                  helperFns: argOut.helperFns,
+                  usesPrint: true || argOut.usesPrint,
+                  state: argOut.state,
+                }: ExprEmit
+              } else {
+                let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+                appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
+              },
+            _ =>
+              if (op == "print") {
+                let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+                {
+                  lines: List.append(
+                    argOut.lines,
+                    withNodeComment(callee.node, "__wm_print(" ++ argOut.exprText ++ ");", sourceText),
+                  ),
+                  exprText: "0",
+                  helperFns: argOut.helperFns,
+                  usesPrint: true || argOut.usesPrint,
+                  state: argOut.state,
+                }: ExprEmit
+              } else {
+                let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+                appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
+              },
+          },
+          },
+        WmcTCoreNorm.NEIdent(name) when name == "print" => {
+          let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+          {
+            lines: List.append(
+              argOut.lines,
+              withNodeComment(callee.node, "__wm_print(" ++ argOut.exprText ++ ");", sourceText),
+            ),
+            exprText: "0",
+            helperFns: argOut.helperFns,
+            usesPrint: true || argOut.usesPrint,
+            state: argOut.state,
+          }: ExprEmit
+        },
+        _ => {
+          let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
+          let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+          appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
+        },
+      },
+  }
+
+let emitFunctionFromExpr = (
+  fnName: String,
+  paramOpt: Option<(String, String)>,
+  resultTy: String,
+  expr: WmcTCoreNorm.Expr,
+  state: DirectState,
+  sourceText: Option<String>,
+  headerNode: Option<WmcTCore.TypedNode>,
+  isPublic: Bool,
+) => {
+  let fnNameZig = sanitizeLocalBase(fnName)
+  let (env, paramSig) = match (paramOpt) {
+    None => ([], ""),
+    Some((paramName, paramTy)) => {
+      let paramZig = sanitizeLocalBase(paramName)
+      ([(paramName, paramZig)], paramZig ++ ": " ++ paramTy)
+    },
+  }
+let out = emitExpr(expr, env, [], state, sourceText)
+  let headerSourceNode = match (headerNode) {
+    Some(node) => node,
+    None => expr.node,
+  }
+  let header = match (paramOpt) {
+    None => (if (isPublic) { "pub fn " } else { "fn " }) ++ fnNameZig ++ "() " ++ resultTy ++ " {",
+    Some(_) => (if (isPublic) { "pub fn " } else { "fn " }) ++ fnNameZig ++ "(" ++ paramSig ++ ") " ++ resultTy ++ " {",
+  }
+  let returnLines = if (resultTy == "void") {
+    List.append(
+      List.map(indent, withNodeComment(expr.node, "_ = " ++ out.exprText ++ ";", sourceText)),
+      List.map(indent, withNodeComment(expr.node, "return;", sourceText)),
+    )
+  } else {
+    List.map(indent, withNodeComment(expr.node, "return " ++ out.exprText ++ ";", sourceText))
+  }
+  {
+    helperFns: out.helperFns,
+    fnSource: joinStrings(
+      "\n",
+      List.append(
+        withNodeComment(headerSourceNode, header, sourceText),
+        List.append(List.map(indent, out.lines), List.append(returnLines, ["}"])),
+      ),
+    ),
+    usesPrint: out.usesPrint,
+    state: out.state,
+  }: FunctionEmit
+}
+
+let findTopFunctionType = (rawModule: WmcTCore.Module, name: String) => {
+  let rec loop = (rest: List<WmcTCore.TopValueBinding>) =>
+    match (rest) {
+      [] => ("comptime_int", "comptime_int"),
+      [binding, ...tail] =>
+        if (binding.name == name) {
+          match (binding.binding.value.node.ty) {
+            Some(Types.TFun(paramTy, returnTy)) =>
+              (WmcEmitZig.zigTypeNameFromType(paramTy), WmcEmitZig.zigTypeNameFromType(returnTy)),
+            _ => ("comptime_int", "comptime_int"),
+          }
+        } else {
+          loop(tail)
+        },
+    }
+  loop(rawModule.values)
+}
+
+let findTopDef = (defs: List<WmcExprInline.SimpleFnDef>, target: String) => {
+  let rec loop = (rest: List<WmcExprInline.SimpleFnDef>) =>
+    match (rest) {
+      [] => None,
+      [item, ...tail] => if (item.name == target) { Some(item) } else { loop(tail) },
+    }
+  loop(defs)
+}
+
+let rec inlineTopSimpleCallsOnly = (
+  expr: WmcTCoreNorm.Expr,
+  defs: List<WmcExprInline.SimpleFnDef>,
+) => {
+  let kind = match (expr.kind) {
+    WmcTCoreNorm.NELit(_) => expr.kind,
+    WmcTCoreNorm.NEIdent(_) => expr.kind,
+    WmcTCoreNorm.NEUnknown(_) => expr.kind,
+    WmcTCoreNorm.NETuple(items) =>
+      WmcTCoreNorm.NETuple(List.map((item: WmcTCoreNorm.Expr) => inlineTopSimpleCallsOnly(item, defs), items)),
+    WmcTCoreNorm.NELambda(param, body) =>
+      WmcTCoreNorm.NELambda(param, inlineTopSimpleCallsOnly(body, defs)),
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      WmcTCoreNorm.NELet(
+        name,
+        inlineTopSimpleCallsOnly(valueExpr, defs),
+        inlineTopSimpleCallsOnly(bodyExpr, defs),
+      ),
+    WmcTCoreNorm.NEMatch(m) =>
+      WmcTCoreNorm.NEMatch({
+        ...m,
+        scrutinee: inlineTopSimpleCallsOnly(m.scrutinee, defs),
+        clauses: List.map((clause: WmcTCoreNorm.MatchClause) => {
+          {
+            ...clause,
+            guard: match (clause.guard) {
+              None => None,
+              Some(g) => Some(inlineTopSimpleCallsOnly(g, defs)),
+            },
+            body: inlineTopSimpleCallsOnly(clause.body, defs),
+          }: WmcTCoreNorm.MatchClause
+        }, m.clauses),
+      }),
+    WmcTCoreNorm.NEApply(callee, arg) => {
+      let callee2 = inlineTopSimpleCallsOnly(callee, defs)
+      let arg2 = inlineTopSimpleCallsOnly(arg, defs)
+      match (callee2.kind) {
+        WmcTCoreNorm.NEIdent(name) =>
+          match (findTopDef(defs, name)) {
+            Some(def) => WmcTCoreNorm.NELet(def.param, arg2, def.body),
+            None => WmcTCoreNorm.NEApply(callee2, arg2),
+          },
+        _ => WmcTCoreNorm.NEApply(callee2, arg2),
+      }
+    },
+  }
+  { node: expr.node, kind }: WmcTCoreNorm.Expr
+}
+
+let collectTopLiteralConsts = (
+  rawModule: WmcTCore.Module,
+  sourceText: Option<String>,
+) => {
+  let rec loop = (rest: List<WmcTCore.TopValueBinding>, accRev: List<String>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [binding, ...tail] =>
+        match (binding.binding.value.kind) {
+          WmcTCore.ELit(lit) =>
+            loop(
+              tail,
+              [
+                joinStrings(
+                  "\n",
+                  withNodeComment(
+                    binding.binding.value.node,
+                    "const " ++ sanitizeLocalBase(binding.name) ++ " = " ++ atomLiteralToZig(lit) ++ ";",
+                    sourceText,
+                  ),
+                ),
+                ...accRev,
+              ],
+            ),
+          _ => loop(tail, accRev),
+        },
+    }
+  loop(rawModule.values, [])
+}
+
+provide let emitProgramDirectNoOpt = (
+  rawModule: WmcTCore.Module,
+  mainExpr: WmcTCoreNorm.Expr,
+  mainResultType: String,
+  wmFunctionName: String="__wm_main",
+  zigMainName: String="main",
+  sourceText: Option<String>,
+) => {
+  let topConsts = collectTopLiteralConsts(rawModule, sourceText)
+  let defs = List.filter((def: WmcExprInline.SimpleFnDef) => def.name != "main",
+    WmcExprInline.collectSimpleTopFnDefs(rawModule))
+  let inlinedMainExpr = inlineTopSimpleCallsOnly(mainExpr, defs)
+  let safeDefs = List.filter((def: WmcExprInline.SimpleFnDef) =>
+    match (def.body.kind) {
+      WmcTCoreNorm.NELambda(_, _) => false,
+      _ => true,
+    }, defs)
+
+  let rec emitDefs = (
+    rest: List<WmcExprInline.SimpleFnDef>,
+    state: DirectState,
+    chunksRev: List<String>,
+    usesPrint: Bool,
+  ) =>
+    match (rest) {
+      [] => (List.reverse(chunksRev), state, usesPrint),
+      [def, ...tail] => {
+        let (paramTy, returnTy) = findTopFunctionType(rawModule, def.name)
+        let emitted = emitFunctionFromExpr(
+          def.name,
+          Some((def.param, paramTy)),
+          returnTy,
+          def.body,
+          state,
+          sourceText,
+          None,
+          false,
+        )
+        let defChunks = List.append(emitted.helperFns, [emitted.fnSource])
+        emitDefs(
+          tail,
+          emitted.state,
+          List.append(List.reverse(defChunks), chunksRev),
+          usesPrint || emitted.usesPrint,
+        )
+      },
+    }
+
+  let (defSources, st1, defUsesPrint) = emitDefs(safeDefs, emptyState, [], false)
+  let mainExecutableExpr = match (inlinedMainExpr.kind) {
+    WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName => body,
+    _ => inlinedMainExpr,
+  }
+  let emittedMain0 = emitFunctionFromExpr(
+    wmFunctionName,
+    None,
+    mainResultType,
+    mainExecutableExpr,
+    st1,
+    sourceText,
+    Some(mainExpr.node),
+    true,
+  )
+  let effectiveMainResultType = if (mainResultType == "comptime_int" && emittedMain0.usesPrint) {
+    "i64"
+  } else {
+    mainResultType
+  }
+  let emittedMain = if (effectiveMainResultType == mainResultType) {
+    emittedMain0
+  } else {
+    emitFunctionFromExpr(
+      wmFunctionName,
+      None,
+      effectiveMainResultType,
+      mainExecutableExpr,
+      st1,
+      sourceText,
+      Some(mainExpr.node),
+      true,
+    )
+  }
+  let prelude = if (defUsesPrint || emittedMain.usesPrint) {
+    "const std = @import(\"std\");\n"
+      ++ "fn __wm_print(value: anytype) void {\n"
+      ++ "  std.debug.print(\"{}\\n\", .{value});\n"
+      ++ "}\n\n"
+  } else {
+    ""
+  }
+  let mainReturnTy = if (effectiveMainResultType == "void") { "void" } else { "u8" }
+  let zigMainBody = if (effectiveMainResultType == "void") {
+    "  " ++ sanitizeLocalBase(wmFunctionName) ++ "();"
+  } else if (effectiveMainResultType == "bool") {
+    "  return @as(u8, @intFromBool(" ++ sanitizeLocalBase(wmFunctionName) ++ "()));"
+  } else {
+    "  return @as(u8, @intCast(" ++ sanitizeLocalBase(wmFunctionName) ++ "()));"
+  }
+  prelude
+    ++ joinStrings(
+      "\n\n",
+      List.append(
+        List.append(
+          topConsts,
+          List.append(defSources, List.append(emittedMain.helperFns, [emittedMain.fnSource])),
+        ),
+        [
+          "pub fn " ++ sanitizeLocalBase(zigMainName) ++ "() " ++ mainReturnTy ++ " {\n"
+            ++ zigMainBody
+            ++ "\n"
+            ++ "}",
+        ],
+      ),
+    )
+}

@@ -3,7 +3,9 @@ module WmcMirLower
 from "list" include List
 
 from "./mir.gr" include WmcMir
+from "./closure_conv.gr" include WmcClosureConv
 from "./tcore_norm.gr" include WmcTCoreNorm
+from "./tcore.gr" include WmcTCore
 from "../../core/core_ast.gr" include CoreAst
 
 record UnifiedLowerState {
@@ -17,6 +19,12 @@ let freshName = (hint: String, state: UnifiedLowerState) =>
     "__u_" ++ hint ++ "_" ++ toString(state.nextTmpId),
     { nextTmpId: state.nextTmpId + 1 }: UnifiedLowerState,
   )
+
+let sourceOfExpr = (expr: WmcTCoreNorm.Expr) =>
+  {
+    let node: WmcTCore.TypedNode = expr.node
+    Some({ nodeId: node.id, span: node.span }: WmcMir.MirSourceMark)
+  }
 
 type Env = List<(String, String)>
 type FnEnv = List<(String, (String, WmcTCoreNorm.Expr))>
@@ -48,14 +56,14 @@ let rec lowerUnifiedExpr = (
   match (expr.kind) {
     WmcTCoreNorm.NELit(lit) => {
       let (name, st1) = freshName("lit", st)
-      (Some(([WmcMir.UAssign(name, WmcMir.URLit(lit))], name)), st1)
+      (Some(([WmcMir.UAssign(name, WmcMir.URLit(lit), sourceOfExpr(expr))], name)), st1)
     },
     WmcTCoreNorm.NEIdent(name) =>
       match (lookupEnv(env, name)) {
         Some(local) => (Some(([], local)), st),
         None => {
           let (tmp, st1) = freshName("id", st)
-          (Some(([WmcMir.UAssign(tmp, WmcMir.URVar(name))], tmp)), st1)
+          (Some(([WmcMir.UAssign(tmp, WmcMir.URVar(name), sourceOfExpr(expr))], tmp)), st1)
         },
       },
     WmcTCoreNorm.NETuple(items) => {
@@ -84,7 +92,7 @@ let rec lowerUnifiedExpr = (
         Some((itemStmts, itemVars, st1)) => {
           let (name, st2) = freshName("tuple", st1)
           (
-            Some((List.append(itemStmts, [WmcMir.UAssign(name, WmcMir.URTuple(itemVars))]), name)),
+            Some((List.append(itemStmts, [WmcMir.UAssign(name, WmcMir.URTuple(itemVars), sourceOfExpr(expr))]), name)),
             st2,
           )
         },
@@ -101,7 +109,7 @@ let rec lowerUnifiedExpr = (
             (None, st1) => (None, st1),
             (Some((valueStmts, valueVar)), st1) => {
               let (bound, st2) = freshName(name, st1)
-              let bindStmt: WmcMir.UnifiedStmt = WmcMir.UAssign(bound, WmcMir.URVar(valueVar))
+              let bindStmt: WmcMir.UnifiedStmt = WmcMir.UAssign(bound, WmcMir.URVar(valueVar), sourceOfExpr(valueExpr))
               match (lowerUnifiedExpr(bodyExpr, [(name, bound), ...env], fenv, st2)) {
                 (None, st3) => (None, st3),
                 (Some((bodyStmts, bodyVar)), st3) =>
@@ -169,7 +177,7 @@ and lowerUnifiedApply = (
                           Some((
                             List.append(
                               List.append(leftStmts, rightStmts),
-                              [WmcMir.UAssign(out, WmcMir.URBinOp(opNorm, leftVar, rightVar))],
+                              [WmcMir.UAssign(out, WmcMir.URBinOp(opNorm, leftVar, rightVar), sourceOfExpr(callee))],
                             ),
                             out,
                           )),
@@ -206,7 +214,7 @@ and lowerUnifiedApply = (
                         Some((
                           List.append(
                             List.append(leftStmts, rightStmts),
-                            [WmcMir.UAssign(out, WmcMir.URBinOp(opNorm, leftVar, rightVar))],
+                            [WmcMir.UAssign(out, WmcMir.URBinOp(opNorm, leftVar, rightVar), sourceOfExpr(callee))],
                           ),
                           out,
                         )),
@@ -238,9 +246,26 @@ and lowerUnifiedCall = (
               List.append(
                 argStmts,
                 [
-                  WmcMir.UEffectCall("__wm_print", argVar),
-                  WmcMir.UAssign(out, WmcMir.URLit(CoreAst.Unit)),
+                  WmcMir.UEffectCall("__wm_print", argVar, sourceOfExpr(callee)),
+                  WmcMir.UAssign(out, WmcMir.URLit(CoreAst.Unit), sourceOfExpr(callee)),
                 ]
+              ),
+              out,
+            )),
+            st3,
+          )
+        },
+      },
+    WmcTCoreNorm.NEIdent(name) =>
+      match (lowerUnifiedExpr(arg, env, fenv, st)) {
+        (None, st2) => (None, st2),
+        (Some((argStmts, argVar)), st2) => {
+          let (out, st3) = freshName("call", st2)
+          (
+            Some((
+              List.append(
+                argStmts,
+                [WmcMir.UAssign(out, WmcMir.URCall(name, argVar), sourceOfExpr(callee))],
               ),
               out,
             )),
@@ -260,7 +285,7 @@ and lowerUnifiedCall = (
                 Some((
                   List.append(
                     List.append(calleeStmts, argStmts),
-                    [WmcMir.UAssign(out, WmcMir.URCall(calleeVar, argVar))],
+                    [WmcMir.UAssign(out, WmcMir.URCall(calleeVar, argVar), sourceOfExpr(callee))],
                   ),
                   out,
                 )),
@@ -299,8 +324,8 @@ and lowerUnifiedBoolMatch = (
                       (None, st3) => (None, st3),
                       (Some((elseStmts0, elseVar)), st3) => {
                         let (out, st4) = freshName("match", st3)
-                        let thenStmts = List.append(thenStmts0, [WmcMir.UAssign(out, WmcMir.URVar(thenVar))])
-                        let elseStmts = List.append(elseStmts0, [WmcMir.UAssign(out, WmcMir.URVar(elseVar))])
+                        let thenStmts = List.append(thenStmts0, [WmcMir.UAssign(out, WmcMir.URVar(thenVar), sourceOfExpr(c1.body))])
+                        let elseStmts = List.append(elseStmts0, [WmcMir.UAssign(out, WmcMir.URVar(elseVar), sourceOfExpr(c2.body))])
                         let branch = if (b1) {
                           WmcMir.UBranchBool(scrutVar, thenStmts, elseStmts)
                         } else {
@@ -350,23 +375,23 @@ let rec lowerUnifiedStmtSeqToCfg = (
     },
     [stmt, ...tail] =>
       match (stmt) {
-        WmcMir.UAssign(name, rhs) => {
+        WmcMir.UAssign(name, rhs, source) => {
           let (nextId, state1) = lowerUnifiedStmtSeqToCfg(tail, cont, state)
           let (id, state2) = freshUnifiedCfgId(state1)
           let block = mkUnifiedCfgBlock(
             id,
             [],
-            [{ name, rhs }: WmcMir.UnifiedAssign],
+            [{ name, rhs, source }: WmcMir.UnifiedAssign],
             WmcMir.UTGoto(nextId),
           )
           (id, pushUnifiedCfgBlock(state2, block))
         },
-        WmcMir.UEffectCall(callee, arg) => {
+        WmcMir.UEffectCall(callee, arg, source) => {
           let (nextId, state1) = lowerUnifiedStmtSeqToCfg(tail, cont, state)
           let (id, state2) = freshUnifiedCfgId(state1)
           let block = mkUnifiedCfgBlock(
             id,
-            [{ callee, arg }: WmcMir.UnifiedEffectCall],
+            [{ callee, arg, source }: WmcMir.UnifiedEffectCall],
             [],
             WmcMir.UTGoto(nextId),
           )
@@ -395,13 +420,25 @@ let rec lowerUnifiedStmtSeqToCfg = (
 
 let lowerUnifiedStmtsToCfg = (stmts: List<WmcMir.UnifiedStmt>) => {
   let (entry, state) = lowerUnifiedStmtSeqToCfg(stmts, WmcMir.UTFail, emptyUnifiedCfgBuildState)
-  { entry, blocks: List.reverse(state.blocksRev) }: WmcMir.UnifiedCfgFunction
+  { entry, blocks: List.reverse(state.blocksRev), closureEnvs: [] }: WmcMir.UnifiedCfgFunction
 }
 
 provide let lowerExprToCfgNoArg = (expr: WmcTCoreNorm.Expr) =>
   match (lowerUnifiedExpr(expr, [], [], emptyUnifiedLowerState)) {
     (None, _) => None,
-    (Some((stmts, out)), _) => Some(lowerUnifiedStmtsToCfg(List.append(stmts, [WmcMir.UReturn(out)]))),
+    (Some((stmts, out)), _) => {
+      let cfg = lowerUnifiedStmtsToCfg(List.append(stmts, [WmcMir.UReturn(out)]))
+      Some({ ...cfg, closureEnvs: WmcClosureConv.planClosureEnvsExpr(expr) }: WmcMir.UnifiedCfgFunction)
+    },
+  }
+
+provide let lowerExprToCfgUnaryArg = (paramName: String, expr: WmcTCoreNorm.Expr) =>
+  match (lowerUnifiedExpr(expr, [(paramName, paramName)], [], emptyUnifiedLowerState)) {
+    (None, _) => None,
+    (Some((stmts, out)), _) => {
+      let cfg = lowerUnifiedStmtsToCfg(List.append(stmts, [WmcMir.UReturn(out)]))
+      Some({ ...cfg, closureEnvs: WmcClosureConv.planClosureEnvsExpr(expr) }: WmcMir.UnifiedCfgFunction)
+    },
   }
 
 provide record UnifiedCfgFragment {
@@ -442,7 +479,7 @@ let remapAssignsForReturn = (
 ) =>
   match (term) {
     WmcMir.UTReturn(value) =>
-      List.append(assigns, [{ name: resultName, rhs: WmcMir.URVar(value) }: WmcMir.UnifiedAssign]),
+      List.append(assigns, [{ name: resultName, rhs: WmcMir.URVar(value), source: None }: WmcMir.UnifiedAssign]),
     _ => assigns,
   }
 

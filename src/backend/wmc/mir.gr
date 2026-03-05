@@ -3,10 +3,16 @@ module WmcMir
 from "list" include List
 
 from "../../core/core_ast.gr" include CoreAst
+from "../../core/source.gr" include Source
 
 provide type BlockId = Number
 
 // Unified expression MIR (single lowering/emission path for expression backend).
+provide record MirSourceMark {
+  nodeId: Number,
+  span: Source.Span,
+}
+
 provide enum UnifiedRValue {
   URLit(CoreAst.AtomLiteral),
   URVar(String),
@@ -16,8 +22,8 @@ provide enum UnifiedRValue {
 }
 
 provide enum rec UnifiedStmt {
-  UAssign(String, UnifiedRValue),
-  UEffectCall(String, String),
+  UAssign(String, UnifiedRValue, Option<MirSourceMark>),
+  UEffectCall(String, String, Option<MirSourceMark>),
   UBranchBool(String, List<UnifiedStmt>, List<UnifiedStmt>),
   UFail,
   UReturn(String),
@@ -26,11 +32,13 @@ provide enum rec UnifiedStmt {
 provide record UnifiedEffectCall {
   callee: String,
   arg: String,
+  source: Option<MirSourceMark>,
 }
 
 provide record UnifiedAssign {
   name: String,
   rhs: UnifiedRValue,
+  source: Option<MirSourceMark>,
 }
 
 provide enum UnifiedTerminator {
@@ -47,9 +55,17 @@ provide record UnifiedBlock {
   term: UnifiedTerminator,
 }
 
+provide record UnifiedClosureEnv {
+  lambdaNodeId: Number,
+  bindingName: Option<String>,
+  param: String,
+  captured: List<String>,
+}
+
 provide record UnifiedCfgFunction {
   entry: BlockId,
   blocks: List<UnifiedBlock>,
+  closureEnvs: List<UnifiedClosureEnv>,
 }
 
 provide let findUnifiedBlock = (mir: UnifiedCfgFunction, id: BlockId) => {

@@ -9,6 +9,7 @@ from "../module/module_system.gr" include ModuleSystem
 from "../backend/wmc/driver.gr" include WmcDriver
 from "../backend/wmc/mir_lower.gr" include WmcMirLower
 from "../backend/wmc/emit_zig.gr" include WmcEmitZig
+from "../backend/wmc/emit_zig_direct.gr" include WmcEmitZigDirect
 from "../backend/wmc/tcore.gr" include WmcTCore
 from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
 from "../backend/wmc/expr_inline.gr" include WmcExprInline
@@ -42,6 +43,8 @@ let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
 let findCompilableMainExpr = (
   rawModule: WmcTCore.Module,
   values: List<WmcTCoreNorm.TopValueBinding>,
+  optimize: Bool=false,
+  sourceText: Option<String>,
 ) => {
   let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
     match (rest) {
@@ -62,37 +65,60 @@ let findCompilableMainExpr = (
         Some(ty) => WmcEmitZig.zigTypeNameFromType(ty),
         None => "comptime_int",
       }
-      let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
-      let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
-      let executableExpr = match (simplified.kind) {
+      let preparedExpr = if (optimize) {
+        let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
+        WmcTCoreSimplify.simplifyExpr(inlined)
+      } else {
+        binding.value
+      }
+      let executableExpr = match (preparedExpr.kind) {
         WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
           body,
-        _ => simplified,
+        _ => preparedExpr,
       }
-      match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
-        None => None,
-        Some(cfg) =>
-          Some(
-            WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
-              cfg,
-              options={
-                wmFunctionName: "__wm_main",
-                zigMainName: "main",
-                includeSourceComments: true,
-                resultType: Some(resultTypeName),
-              },
-            )
-          ),
+      if (optimize) {
+        match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
+          None => None,
+          Some(cfg) =>
+            Some(
+              WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
+                cfg,
+                options={
+                  wmFunctionName: "__wm_main",
+                  zigMainName: "main",
+                  includeSourceComments: true,
+                  sourceText,
+                  resultType: Some(resultTypeName),
+                },
+              )
+            ),
+        }
+      } else {
+        Some(
+          WmcEmitZigDirect.emitProgramDirectNoOpt(
+            rawModule,
+            preparedExpr,
+            resultTypeName,
+            wmFunctionName="__wm_main",
+            zigMainName="main",
+            sourceText,
+          )
+        )
       }
     },
   }
 }
 
-provide let compileFile = (filePath: String, stdRoot: Option<String>) => {
+provide let compileFile = (filePath: String, stdRoot: Option<String>, optimize: Bool=false) => {
   let baseOptions = ModuleSystem.defaultOptions()
   let options = match (stdRoot) {
     Some(root) => { ...baseOptions, stdRoots: [root] },
     None => baseOptions,
+  }
+
+  let sourceText = match (Fs.Utf8.readFile(Path.fromString(filePath))) {
+    Ok(src) => Some(src),
+    Err(_) => None,
   }
 
   match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
@@ -101,7 +127,7 @@ provide let compileFile = (filePath: String, stdRoot: Option<String>) => {
       if (!WmcDriver.isBackendReadyEntry(proto)) {
         Err(fatalDiagnosticSummary(proto.entry.diagnostics))
       } else {
-        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values)) {
+        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values, optimize=optimize, sourceText=sourceText)) {
           None =>
             Err(
               "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"

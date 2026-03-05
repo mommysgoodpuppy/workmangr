@@ -18,7 +18,7 @@ const run = async (cmd: string, args: string[], cwd: string) => {
   };
 };
 
-const compileViaCli = async (source: string) => {
+const compileViaCliWithArgs = async (source: string, compileArgs: string[]) => {
   const cwd = Deno.realPathSync(new URL("../", import.meta.url));
   const wmPath = await Deno.makeTempFile({
     dir: cwd,
@@ -29,12 +29,14 @@ const compileViaCli = async (source: string) => {
   const zigPath = wmPath.replace(/\.wm$/, ".zig");
   try {
     await Deno.writeTextFile(wmPath, source);
-    return await run("wm", ["compile", wmRel], cwd);
+    return await run("wm", ["compile", ...compileArgs, wmRel], cwd);
   } finally {
     await Deno.remove(wmPath).catch(() => void 0);
     await Deno.remove(zigPath).catch(() => void 0);
   }
 };
+
+const compileViaCli = async (source: string) => compileViaCliWithArgs(source, []);
 
 const compileAndRunViaCli = async (source: string) => {
   const cwd = Deno.realPathSync(new URL(".", repoRoot));
@@ -268,5 +270,84 @@ Deno.test("wm compile supports wildcard let discard in sequencing", async () => 
   }
   if (!result.output.includes("7")) {
     throw new Error(`expected printed 7, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm compile supports captured local lambda", async () => {
+  const { output } = await compileAndRunViaCli(
+    `let main = => {
+  let x = 2;
+  let f = (y) => {
+    x + y
+  };
+  f(3)
+};`,
+  );
+  if (output !== "5") {
+    throw new Error(`expected "5", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports nested local lambdas without capture", async () => {
+  const { output } = await compileAndRunViaCli(
+    `let main = => {
+  let outer = (x) => {
+    let inner = (y) => {
+      y + 1
+    };
+    inner(x)
+  };
+  outer(2)
+};`,
+  );
+  if (output !== "3") {
+    throw new Error(`expected "3", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports lambda parameter shadowing outer local", async () => {
+  const { output } = await compileAndRunViaCli(
+    `let main = => {
+  let x = 100;
+  let add1 = (x) => {
+    x + 1
+  };
+  add1(4) + x
+};`,
+  );
+  if (output !== "105") {
+    throw new Error(`expected "105", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile allows lambda to reference top-level binding", async () => {
+  const { output } = await compileAndRunViaCli(
+    `let base = 2;
+let addBase = (y) => {
+  base + y
+};
+let main = => {
+  addBase(3)
+};`,
+  );
+  if (output !== "5") {
+    throw new Error(`expected "5", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports escaping closures", async () => {
+  const { output } = await compileAndRunViaCli(
+    `let makeAdder = (x) => {
+  (y) => {
+    x + y
+  }
+};
+let main = => {
+  let add2 = makeAdder(2);
+  add2(3)
+};`,
+  );
+  if (output !== "5") {
+    throw new Error(`expected "5", got ${JSON.stringify(output)}`);
   }
 });

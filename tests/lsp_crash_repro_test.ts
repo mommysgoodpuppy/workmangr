@@ -133,6 +133,133 @@ const waitFor = async (
 };
 
 Deno.test({
+  name: "LSP hover range should be token-sized for local lambda usage",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const cwd = Deno.cwd();
+    const source = "let main = => { let local = (n) => { n * 3 }; local(2) };";
+    const hoverChar = source.indexOf("local(2)");
+    if (hoverChar < 0) throw new Error("test setup failed to locate local call");
+
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    const client = new LspClient(proc);
+    const uri = `file://${cwd.replaceAll("\\", "/")}/tmp_lsp_hover_range_test.wm`;
+    try {
+      await client.request("initialize", {
+        processId: null,
+        rootUri: `file://${cwd.replaceAll("\\", "/")}`,
+        capabilities: {},
+      });
+      await client.notify("initialized", {});
+      await client.notify("textDocument/didOpen", {
+        textDocument: {
+          uri,
+          languageId: "wm",
+          version: 1,
+          text: source,
+        },
+      });
+
+      const hover = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: 0, character: hoverChar },
+      }) as any;
+
+      if (!hover || typeof hover !== "object") {
+        throw new Error(`expected hover object, got ${JSON.stringify(hover)}`);
+      }
+      const range = hover.range;
+      if (!range || typeof range !== "object") {
+        throw new Error(`expected hover range, got ${JSON.stringify(hover)}`);
+      }
+      const start = range.start;
+      const end = range.end;
+      if (!start || !end || start.line !== 0 || end.line !== 0) {
+        throw new Error(`expected single-line hover range, got ${JSON.stringify(range)}`);
+      }
+      const width = end.character - start.character;
+      if (width <= 0 || width > 5) {
+        throw new Error(`expected token-sized hover width, got ${width} in ${JSON.stringify(range)}`);
+      }
+    } finally {
+      await client.close();
+    }
+  },
+});
+
+Deno.test({
+  name: "LSP hover on let binding name should show bound value type",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const cwd = Deno.cwd();
+    const source = "let base = 10;";
+    const hoverChar = source.indexOf("base");
+    if (hoverChar < 0) throw new Error("test setup failed to locate base binding");
+
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    const client = new LspClient(proc);
+    const uri = `file://${cwd.replaceAll("\\", "/")}/tmp_lsp_hover_binding_name_test.wm`;
+    try {
+      await client.request("initialize", {
+        processId: null,
+        rootUri: `file://${cwd.replaceAll("\\", "/")}`,
+        capabilities: {},
+      });
+      await client.notify("initialized", {});
+      await client.notify("textDocument/didOpen", {
+        textDocument: {
+          uri,
+          languageId: "wm",
+          version: 1,
+          text: source,
+        },
+      });
+
+      const hover = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: 0, character: hoverChar },
+      }) as any;
+
+      const value = hover?.contents?.value;
+      if (typeof value !== "string") {
+        throw new Error(`expected hover contents.value string, got ${JSON.stringify(hover)}`);
+      }
+      if (!value.includes("Type: U8")) {
+        throw new Error(`expected hover to include Type: U8, got ${value}`);
+      }
+    } finally {
+      await client.close();
+    }
+  },
+});
+
+Deno.test({
   name: "LSP didOpen on aoc2016/1 should not crash runtime",
   sanitizeOps: false,
   sanitizeResources: false,

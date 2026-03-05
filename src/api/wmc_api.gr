@@ -11,6 +11,7 @@ from "../module/module_system.gr" include ModuleSystem
 from "../backend/wmc/driver.gr" include WmcDriver
 from "../backend/wmc/mir_lower.gr" include WmcMirLower
 from "../backend/wmc/emit_zig.gr" include WmcEmitZig
+from "../backend/wmc/emit_zig_direct.gr" include WmcEmitZigDirect
 from "../backend/wmc/tcore.gr" include WmcTCore
 from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
 from "../backend/wmc/expr_inline.gr" include WmcExprInline
@@ -44,6 +45,8 @@ let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
 let findCompilableMainExpr = (
   rawModule: WmcTCore.Module,
   values: List<WmcTCoreNorm.TopValueBinding>,
+  optimize: Bool=false,
+  sourceText: Option<String>,
 ) => {
   let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
     match (rest) {
@@ -63,27 +66,45 @@ let findCompilableMainExpr = (
         Some(ty) => WmcEmitZig.zigTypeNameFromType(ty),
         None => "comptime_int",
       }
-      let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
-      let simplified = WmcTCoreSimplify.simplifyExpr(inlined)
-      let executableExpr = match (simplified.kind) {
+      let preparedExpr = if (optimize) {
+        let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
+        WmcTCoreSimplify.simplifyExpr(inlined)
+      } else {
+        binding.value
+      }
+      let executableExpr = match (preparedExpr.kind) {
         WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
           body,
-        _ => simplified,
+        _ => preparedExpr,
       }
-      match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
-        None => None,
-        Some(cfg) =>
-          Some(
-            WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
-              cfg,
-              options={
-                wmFunctionName: "__wm_main",
-                zigMainName: "main",
-                includeSourceComments: true,
-                resultType: Some(resultTypeName),
-              },
-            )
-          ),
+      if (optimize) {
+        match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
+          None => None,
+          Some(cfg) =>
+            Some(
+              WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
+                cfg,
+                options={
+                  wmFunctionName: "__wm_main",
+                  zigMainName: "main",
+                  includeSourceComments: true,
+                  sourceText,
+                  resultType: Some(resultTypeName),
+                },
+              )
+            ),
+        }
+      } else {
+        Some(
+          WmcEmitZigDirect.emitProgramDirectNoOpt(
+            rawModule,
+            preparedExpr,
+            resultTypeName,
+            wmFunctionName="__wm_main",
+            zigMainName="main",
+            sourceText,
+          )
+        )
       }
     },
   }
@@ -95,15 +116,19 @@ let jsonSuccess = (zigSource: String) =>
 let jsonFailure = (message: String) =>
   "{\"success\":false,\"error\":\"" ++ escapeJson(message) ++ "\"}"
 
-provide let compileFileToJson = (filePath: String) => {
+provide let compileFileToJson = (filePath: String, optimize: Bool=false) => {
   let options = ModuleSystem.defaultOptions()
+  let sourceText = match (Fs.Utf8.readFile(Path.fromString(filePath))) {
+    Ok(src) => Some(src),
+    Err(_) => None,
+  }
   match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
     Err(msg) => jsonFailure(msg),
     Ok(proto) => {
       if (!WmcDriver.isBackendReadyEntry(proto)) {
         jsonFailure(fatalDiagnosticSummary(proto.entry.diagnostics))
       } else {
-        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values)) {
+        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values, optimize=optimize, sourceText=sourceText)) {
           None =>
             jsonFailure(
               "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"
@@ -123,10 +148,14 @@ let main = () => {
       if (argCount < 2) {
         print(jsonFailure("Usage: grain --include-dirs src src/api/wmc_api.gr -- <file.wm>"))
       } else {
-        let filePath = Array.get(1, args)
+        let (optimize, filePath) = if (argCount >= 3 && (Array.get(1, args) == "-O" || Array.get(1, args) == "--optimize")) {
+          (true, Array.get(2, args))
+        } else {
+          (false, Array.get(1, args))
+        }
         match (Fs.Utf8.readFile(Path.fromString(filePath))) {
           Err(_) => print(jsonFailure("Failed to read file: " ++ filePath)),
-          Ok(_source) => print(compileFileToJson(filePath)),
+          Ok(_source) => print(compileFileToJson(filePath, optimize=optimize)),
         }
       }
     },

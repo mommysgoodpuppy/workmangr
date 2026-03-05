@@ -5,12 +5,15 @@ from "string" include String
 from "char" include Char
 
 from "../../core/core_ast.gr" include CoreAst
+from "../../core/source.gr" include Source
 from "../../core/types.gr" include Types
 from "./mir.gr" include WmcMir
 
 provide record EmitOptions {
   functionName: String,
   includeSourceComments: Bool,
+  includeBuiltinPrelude: Bool,
+  sourceText: Option<String>,
   resultType: Option<String>,
 }
 
@@ -18,6 +21,7 @@ provide record ProgramEmitOptions {
   wmFunctionName: String,
   zigMainName: String,
   includeSourceComments: Bool,
+  sourceText: Option<String>,
   resultType: Option<String>,
 }
 
@@ -186,15 +190,93 @@ let fitsUnsignedBits = (n: Number, bits: Number) => {
   n >= 0 && n <= max
 }
 provide let defaultOptions = () =>
-  { functionName: "__wm_match", includeSourceComments: true, resultType: None }: EmitOptions
+  {
+    functionName: "__wm_match",
+    includeSourceComments: true,
+    includeBuiltinPrelude: true,
+    sourceText: None,
+    resultType: None,
+  }: EmitOptions
 
 provide let defaultProgramOptions = () =>
   {
     wmFunctionName: "__wm_main",
     zigMainName: "main",
     includeSourceComments: true,
+    sourceText: None,
     resultType: None,
   }: ProgramEmitOptions
+
+let lineTextAt = (source: String, targetLine: Number) => {
+  let len = String.length(source)
+  let rec loop = (idx: Number, line: Number, start: Number) => {
+    if (idx >= len) {
+      if (line == targetLine) {
+        Some(String.slice(start, end=len, source))
+      } else {
+        None
+      }
+    } else {
+      let ch = String.charAt(idx, source)
+      if (ch == '\n') {
+        if (line == targetLine) {
+          Some(String.slice(start, end=idx, source))
+        } else {
+          loop(idx + 1, line + 1, idx + 1)
+        }
+      } else {
+        loop(idx + 1, line, start)
+      }
+    }
+  }
+  loop(0, 1, 0)
+}
+
+let wmSourceComment = (source: WmcMir.MirSourceMark, sourceText: Option<String>) => {
+  let span: Source.Span = source.span
+  let base =
+    "// wm: node="
+      ++ toString(source.nodeId)
+      ++ " at "
+      ++ toString(span.line)
+      ++ ":"
+      ++ toString(span.col)
+      ++ " ["
+      ++ toString(span.start)
+      ++ ".."
+      ++ toString(span.end)
+      ++ "]"
+  match (sourceText) {
+    None => base,
+    Some(src) =>
+      match (lineTextAt(src, span.line)) {
+        None => base,
+        Some(line) => base ++ " | " ++ String.replaceAll("\r", "", line),
+      },
+  }
+}
+
+let sourceCommentLine = (
+  includeSourceComments: Bool,
+  source: Option<WmcMir.MirSourceMark>,
+  sourceText: Option<String>,
+  level: Number,
+) =>
+  if (!includeSourceComments) {
+    []
+  } else {
+    match (source) {
+    None => [],
+    Some(mark) =>
+      if (level == 3) {
+        [indent3(wmSourceComment(mark, sourceText))]
+      } else if (level == 2) {
+        [indent2(wmSourceComment(mark, sourceText))]
+      } else {
+        [indent(wmSourceComment(mark, sourceText))]
+      },
+  }
+  }
 
 let collectAssignedNamesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
   dedupeStrings(
@@ -333,6 +415,23 @@ let localTyName = (ty: UnifiedLocalTy, resultTy: String) =>
     LTUnknown => resultTy,
   }
 
+let inferUnaryArgTypeFromUnifiedCfg = (
+  blocks: List<WmcMir.UnifiedBlock>,
+  argName: String,
+  resultTy: String,
+) =>
+  if (
+    List.some((b: WmcMir.UnifiedBlock) =>
+      match (b.term) {
+        WmcMir.UTBranchBool(cond, _, _) => cond == argName,
+        _ => false,
+      }, blocks)
+  ) {
+    "bool"
+  } else {
+    resultTy
+  }
+
 let rec lookupNameMap = (mapping: List<(String, String)>, key: String) =>
   match (mapping) {
     [] => sanitizeLocalBase(key),
@@ -407,6 +506,30 @@ let emitBuiltinPrelude = (usesPrint: Bool) =>
     ) ++ "\n\n"
   } else {
     ""
+  }
+
+let emitClosurePlanComments = (plans: List<WmcMir.UnifiedClosureEnv>) =>
+  if (plans == []) {
+    []
+  } else {
+    List.append(
+      ["// WMC closure-env plan (experimental)"],
+      List.map((p: WmcMir.UnifiedClosureEnv) => {
+        let name = match (p.bindingName) {
+          None => "_",
+          Some(n) => n,
+        }
+        let captures = if (p.captured == []) { "[]" } else { "[" ++ joinStrings(", ", p.captured) ++ "]" }
+        "// wm-closure: node="
+          ++ toString(p.lambdaNodeId)
+          ++ " name="
+          ++ name
+          ++ " param="
+          ++ p.param
+          ++ " captures="
+          ++ captures
+      }, plans)
+    )
   }
 
 let collectUnifiedIntCandidatesCfg = (blocks: List<WmcMir.UnifiedBlock>) =>
@@ -523,15 +646,23 @@ let emitUnifiedCfgBlockLines = (
   block: WmcMir.UnifiedBlock,
   mapping: List<(String, String)>,
   resultTy: String,
+  includeSourceComments: Bool,
+  sourceText: Option<String>,
 ) => {
   let header = indent2(toString(block.id) ++ " => {")
-  let effectLines = List.map((fx: WmcMir.UnifiedEffectCall) =>
-    indent3(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");"), block.effects)
-  let assignLines = List.map((a: WmcMir.UnifiedAssign) => {
+  let effectLines = List.flatten(List.map((fx: WmcMir.UnifiedEffectCall) =>
+    List.append(
+      sourceCommentLine(includeSourceComments, fx.source, sourceText, 3),
+      [indent3(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");")],
+    ), block.effects))
+  let assignLines = List.flatten(List.map((a: WmcMir.UnifiedAssign) => {
     let zigName = lookupNameMap(mapping, a.name)
     let rhsText = emitUnifiedRValue(a.rhs, mapping)
-    indent3(zigName ++ " = " ++ rhsText ++ ";")
-  }, block.assigns)
+    List.append(
+      sourceCommentLine(includeSourceComments, a.source, sourceText, 3),
+      [indent3(zigName ++ " = " ++ rhsText ++ ";")],
+    )
+  }, block.assigns))
   let termLines = emitUnifiedTerminatorLines(block.term, mapping, resultTy)
   List.append(
     [header],
@@ -554,7 +685,11 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
     inferredResultTy
   }
   let localValueTy = if (resultTy == "void") { "u8" } else { resultTy }
-  let prelude = emitBuiltinPrelude(cfgUsesBuiltinPrint(cfg.blocks))
+  let prelude = if (options.includeBuiltinPrelude) {
+    emitBuiltinPrelude(cfgUsesBuiltinPrint(cfg.blocks))
+  } else {
+    ""
+  }
   match (tryCollectLinearTrace(cfg)) {
     Some(trace) => {
       let assigned = dedupeStrings(List.map((a: WmcMir.UnifiedAssign) => a.name, trace.assigns))
@@ -572,14 +707,20 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
         )
       )
       let blockLines = List.flatten(List.map((b: WmcMir.UnifiedBlock) => {
-        let effectLines = List.map((fx: WmcMir.UnifiedEffectCall) =>
-          indent(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");"), b.effects)
-        let constLines = List.map((a: WmcMir.UnifiedAssign) => {
+        let effectLines = List.flatten(List.map((fx: WmcMir.UnifiedEffectCall) =>
+          List.append(
+            sourceCommentLine(options.includeSourceComments, fx.source, options.sourceText, 1),
+            [indent(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");")],
+          ), b.effects))
+        let constLines = List.flatten(List.map((a: WmcMir.UnifiedAssign) => {
           let zigName = lookupNameMap(mapping, a.name)
           let tyName = localTyName(lookupLocalTy(localTypes, a.name), localValueTy)
           let rhsText = emitUnifiedRValue(a.rhs, mapping)
-          indent("const " ++ zigName ++ ": " ++ tyName ++ " = " ++ rhsText ++ ";")
-        }, b.assigns)
+          List.append(
+            sourceCommentLine(options.includeSourceComments, a.source, options.sourceText, 1),
+            [indent("const " ++ zigName ++ ": " ++ tyName ++ " = " ++ rhsText ++ ";")],
+          )
+        }, b.assigns))
         List.append(effectLines, constLines)
       }, trace.blocks))
       let discardLines = List.filterMap((a: WmcMir.UnifiedAssign) => {
@@ -600,10 +741,12 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
       joinStrings(
         "\n",
         List.append(
+          List.append(
           [
             "// WMC Zig emitter",
             "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
           ],
+          emitClosurePlanComments(cfg.closureEnvs)),
           List.append(List.append(blockLines, discardLines), [returnLine, "}"]),
         ),
       )
@@ -620,18 +763,166 @@ provide let emitUnifiedCfgNoArgSpecializedInt = (
             indent("var " ++ lookupNameMap(mapping, name) ++ ": " ++ tyName ++ " = " ++ initValue ++ ";")
           }, assigned)
       let blockLines = List.flatten(
-        List.map((b: WmcMir.UnifiedBlock) => emitUnifiedCfgBlockLines(b, mapping, resultTy), cfg.blocks)
+        List.map((b: WmcMir.UnifiedBlock) => emitUnifiedCfgBlockLines(
+          b,
+          mapping,
+          resultTy,
+          options.includeSourceComments,
+          options.sourceText,
+        ), cfg.blocks)
       )
       prelude
         ++
       joinStrings(
         "\n",
         List.append(
+          List.append(
           [
             "// WMC Zig emitter",
             "pub fn " ++ fnNameBase ++ "() " ++ resultTy ++ " {",
             indent("var __pc: i32 = " ++ toString(cfg.entry) ++ ";"),
           ],
+          emitClosurePlanComments(cfg.closureEnvs)),
+          List.append(
+            assignedDecls,
+            List.append(
+              [
+                indent("while (true) {"),
+                indent2("switch (__pc) {"),
+              ],
+              List.append(
+                blockLines,
+                [
+                  indent2("else => unreachable,"),
+                  indent2("}"),
+                  indent("}"),
+                  "}",
+                ],
+              ),
+            ),
+          ),
+        ),
+      )
+    },
+  }
+}
+
+provide let emitUnifiedCfgUnaryArgSpecializedInt = (
+  cfg: WmcMir.UnifiedCfgFunction,
+  argName: String,
+  options: EmitOptions=defaultOptions(),
+) => {
+  let fnNameBase = sanitizeLocalBase(options.functionName)
+  let argNameBase = sanitizeLocalBase(argName)
+  let inferredResultTy = match (options.resultType) {
+    Some(name) => name,
+    None => inferIntTypeNameFromUnifiedCfg(cfg.blocks),
+  }
+  let resultTy = if (inferredResultTy == "comptime_int" && cfgHasEffects(cfg.blocks)) {
+    inferIntTypeNameFromUnifiedCfg(cfg.blocks)
+  } else {
+    inferredResultTy
+  }
+  let localValueTy = if (resultTy == "void") { "u8" } else { resultTy }
+  let argTy = inferUnaryArgTypeFromUnifiedCfg(cfg.blocks, argName, localValueTy)
+  let prelude = if (options.includeBuiltinPrelude) {
+    emitBuiltinPrelude(cfgUsesBuiltinPrint(cfg.blocks))
+  } else {
+    ""
+  }
+  match (tryCollectLinearTrace(cfg)) {
+    Some(trace) => {
+      let assigned = dedupeStrings(List.map((a: WmcMir.UnifiedAssign) => a.name, trace.assigns))
+      let mapping = buildNameMap(assigned)
+      let localTypes = inferUnifiedLocalTypes(trace.blocks, assigned)
+      let usedNames = dedupeStrings(
+        List.append(
+          List.append(
+            List.flatten(List.map((a: WmcMir.UnifiedAssign) => referencedVarsInRValue(a.rhs), trace.assigns)),
+            List.flatten(
+              List.map((fx: WmcMir.UnifiedEffectCall) => referencedVarsInEffect(fx), trace.effects)
+            ),
+          ),
+          if (resultTy == "void") { [] } else { [trace.returnName] }
+        )
+      )
+      let blockLines = List.flatten(List.map((b: WmcMir.UnifiedBlock) => {
+        let effectLines = List.flatten(List.map((fx: WmcMir.UnifiedEffectCall) =>
+          List.append(
+            sourceCommentLine(options.includeSourceComments, fx.source, options.sourceText, 1),
+            [indent(fx.callee ++ "(" ++ lookupNameMap(mapping, fx.arg) ++ ");")],
+          ), b.effects))
+        let constLines = List.flatten(List.map((a: WmcMir.UnifiedAssign) => {
+          let zigName = lookupNameMap(mapping, a.name)
+          let tyName = localTyName(lookupLocalTy(localTypes, a.name), localValueTy)
+          let rhsText = emitUnifiedRValue(a.rhs, mapping)
+          List.append(
+            sourceCommentLine(options.includeSourceComments, a.source, options.sourceText, 1),
+            [indent("const " ++ zigName ++ ": " ++ tyName ++ " = " ++ rhsText ++ ";")],
+          )
+        }, b.assigns))
+        List.append(effectLines, constLines)
+      }, trace.blocks))
+      let discardLines = List.filterMap((a: WmcMir.UnifiedAssign) => {
+        if (containsString(usedNames, a.name)) {
+          None
+        } else {
+          let zigName = lookupNameMap(mapping, a.name)
+          Some(indent("_ = " ++ zigName ++ ";"))
+        }
+      }, trace.assigns)
+      let returnLine = if (resultTy == "void") {
+        indent("return;")
+      } else {
+        indent("return " ++ lookupNameMap(mapping, trace.returnName) ++ ";")
+      }
+      prelude
+        ++
+      joinStrings(
+        "\n",
+        List.append(
+          List.append(
+          [
+            "// WMC Zig emitter",
+            "fn " ++ fnNameBase ++ "(" ++ argNameBase ++ ": " ++ argTy ++ ") " ++ resultTy ++ " {",
+          ],
+          emitClosurePlanComments(cfg.closureEnvs)),
+          List.append(List.append(blockLines, discardLines), [returnLine, "}"]),
+        ),
+      )
+    },
+    None => {
+      let assigned = collectAssignedNamesCfg(cfg.blocks)
+      let mapping = buildNameMap(assigned)
+      let localTypes = inferUnifiedLocalTypes(cfg.blocks, assigned)
+      let assignedDecls =
+        List.map((name: String) =>
+          {
+            let tyName = localTyName(lookupLocalTy(localTypes, name), localValueTy)
+            let initValue = if (tyName == "bool") { "false" } else { "0" }
+            indent("var " ++ lookupNameMap(mapping, name) ++ ": " ++ tyName ++ " = " ++ initValue ++ ";")
+          }, assigned)
+      let blockLines = List.flatten(
+        List.map((b: WmcMir.UnifiedBlock) => emitUnifiedCfgBlockLines(
+          b,
+          mapping,
+          resultTy,
+          options.includeSourceComments,
+          options.sourceText,
+        ), cfg.blocks)
+      )
+      prelude
+        ++
+      joinStrings(
+        "\n",
+        List.append(
+          List.append(
+          [
+            "// WMC Zig emitter",
+            "fn " ++ fnNameBase ++ "(" ++ argNameBase ++ ": " ++ argTy ++ ") " ++ resultTy ++ " {",
+            indent("var __pc: i32 = " ++ toString(cfg.entry) ++ ";"),
+          ],
+          emitClosurePlanComments(cfg.closureEnvs)),
           List.append(
             assignedDecls,
             List.append(
@@ -672,6 +963,8 @@ provide let emitUnifiedCfgProgramNoArgSpecializedInt = (
       options={
         functionName: wmFnName,
         includeSourceComments: options.includeSourceComments,
+        includeBuiltinPrelude: true,
+        sourceText: options.sourceText,
         resultType: Some(resultTy),
       },
     )
