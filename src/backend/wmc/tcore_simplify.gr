@@ -47,6 +47,29 @@ let rec simplifyExprWithState = (expr: WmcTCoreNorm.Expr, state: SimplifyState) 
     WmcTCoreNorm.NELit(_) => (expr, state),
     WmcTCoreNorm.NEIdent(_) => (expr, state),
     WmcTCoreNorm.NEUnknown(_) => (expr, state),
+    WmcTCoreNorm.NERecordLit(items) => {
+      let rec mapItems = (
+        rest: List<WmcTCoreNorm.RecordItem>,
+        accRev: List<WmcTCoreNorm.RecordItem>,
+        st: SimplifyState,
+      ) =>
+        match (rest) {
+          [] => (List.reverse(accRev), st),
+          [item, ...tail] =>
+            match (item) {
+              WmcTCoreNorm.NRField(name, value) => {
+                let (value2, st1) = simplifyExprWithState(value, st)
+                mapItems(tail, [WmcTCoreNorm.NRField(name, value2), ...accRev], st1)
+              },
+              WmcTCoreNorm.NRSpread(value) => {
+                let (value2, st1) = simplifyExprWithState(value, st)
+                mapItems(tail, [WmcTCoreNorm.NRSpread(value2), ...accRev], st1)
+              },
+            },
+        }
+      let (items2, state1) = mapItems(items, [], state)
+      ({ node: expr.node, kind: WmcTCoreNorm.NERecordLit(items2) }: WmcTCoreNorm.Expr, state1)
+    },
     WmcTCoreNorm.NELambda(param, body) => {
       let (body2, state1) = simplifyExprWithState(body, state)
       ({ node: expr.node, kind: WmcTCoreNorm.NELambda(param, body2) }: WmcTCoreNorm.Expr, state1)

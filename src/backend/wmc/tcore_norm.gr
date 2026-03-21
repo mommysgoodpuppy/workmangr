@@ -4,6 +4,7 @@ from "list" include List
 
 from "../../core/core_ast.gr" include CoreAst
 from "../../core/error.gr" include Error
+from "../../core/infection_registry.gr" include InfectionRegistry
 from "./tcore.gr" include WmcTCore
 
 provide enum rec PatternKind {
@@ -28,12 +29,17 @@ and provide enum ExprKind {
   NELet(String, Expr, Expr),
   NELambda(String, Expr),
   NETuple(List<Expr>),
+  NERecordLit(List<RecordItem>),
   NEMatch(MatchExpr),
   NEUnknown(String),
 }
 and provide record Expr {
   node: WmcTCore.TypedNode,
   kind: ExprKind,
+}
+and provide enum RecordItem {
+  NRField(String, Expr),
+  NRSpread(Expr),
 }
 and provide record MatchClause {
   index: Number,
@@ -63,8 +69,10 @@ provide record TopValueBinding {
 provide record Module {
   moduleId: String,
   values: List<TopValueBinding>,
+  typeInfos: List<WmcTCore.TypeInfo>,
   typeDeclNames: List<String>,
   recordDeclNames: List<String>,
+  infectionRegistry: InfectionRegistry.Registry,
   diagnostics: List<Error.CompilerError>,
 }
 
@@ -220,14 +228,18 @@ let rec normalizeExpr = (expr: WmcTCore.Expr) => {
         NEMatch({ node, bundleNode, scrutinee: condN, clauses }: MatchExpr)
       },
       WmcTCore.EIf(_, _, None) => NEUnknown("if_missing_else"),
-      // Keep the normalization boundary explicit for unsupported backend-body forms.
-      WmcTCore.ERecordLit(_) => NEUnknown("record"),
+      WmcTCore.ERecordLit(items) => NERecordLit(List.map(normalizeRecordItem, items)),
       WmcTCore.EHole(_) => NEUnknown("hole"),
     },
     },
   }
   { node: expr.node, kind }: Expr
 }
+and normalizeRecordItem = (item: WmcTCore.RecordItem) =>
+  match (item) {
+    WmcTCore.RField(name, value) => NRField(name, normalizeExpr(value)),
+    WmcTCore.RSpread(value) => NRSpread(normalizeExpr(value)),
+  }
 and normalizeFnBundleClauses = (fnExpr: WmcTCore.FnExpr) => {
   let indexed = reverseWithIndex(fnExpr.items)
   let rec loop = (rest: List<(Number, WmcTCore.FnItem)>, accRev: List<MatchClause>) =>
@@ -320,8 +332,10 @@ provide let normalizeModule = (m: WmcTCore.Module) =>
   {
     moduleId: m.moduleId,
     values: List.map(normalizeTopValueBinding, m.values),
+    typeInfos: m.typeInfos,
     typeDeclNames: m.typeDeclNames,
     recordDeclNames: m.recordDeclNames,
+    infectionRegistry: m.infectionRegistry,
     diagnostics: m.diagnostics,
   }: Module
 
@@ -468,6 +482,7 @@ let rec backendNormalFormIssuesInExprAcc = (expr: Expr, accRev: List<Normalizati
     },
     NELambda(_, bodyExpr) => backendNormalFormIssuesInExprAcc(bodyExpr, withCurrent),
     NETuple(items) => backendNormalFormIssuesInExprListAcc(items, withCurrent),
+    NERecordLit(items) => backendNormalFormIssuesInRecordItemsAcc(items, withCurrent),
     NEMatch(m) => {
       let acc1 = backendNormalFormIssuesInExprAcc(m.scrutinee, withCurrent)
       backendNormalFormIssuesInClausesAcc(m.clauses, acc1)
@@ -479,6 +494,17 @@ and backendNormalFormIssuesInExprListAcc = (items: List<Expr>, accRev: List<Norm
     [] => accRev,
     [item, ...tail] =>
       backendNormalFormIssuesInExprListAcc(tail, backendNormalFormIssuesInExprAcc(item, accRev)),
+  }
+and backendNormalFormIssuesInRecordItemsAcc = (items: List<RecordItem>, accRev: List<NormalizationIssue>) =>
+  match (items) {
+    [] => accRev,
+    [item, ...tail] => {
+      let next = match (item) {
+        NRField(_, value) => backendNormalFormIssuesInExprAcc(value, accRev),
+        NRSpread(value) => backendNormalFormIssuesInExprAcc(value, accRev),
+      }
+      backendNormalFormIssuesInRecordItemsAcc(tail, next)
+    },
   }
 and backendNormalFormIssuesInClausesAcc = (
   clauses: List<MatchClause>,
@@ -562,6 +588,7 @@ let findMatchesInNormalizedExpr = (expr: Expr) => {
       },
       NELambda(_, bodyExpr) => walkNorm(bodyExpr, withCurrent),
       NETuple(items) => walkNormExprList(items, withCurrent),
+      NERecordLit(items) => walkNormRecordItems(items, withCurrent),
       NEMatch(m) => {
         let acc1 = walkNorm(m.scrutinee, withCurrent)
         walkNormClauses(m.clauses, acc1)
@@ -588,6 +615,18 @@ let findMatchesInNormalizedExpr = (expr: Expr) => {
     match (items) {
       [] => accRev,
       [item, ...tail] => walkNormExprList(tail, walkNorm(item, accRev)),
+    }
+
+  and walkNormRecordItems = (items: List<RecordItem>, accRev: List<MatchExpr>) =>
+    match (items) {
+      [] => accRev,
+      [item, ...tail] => {
+        let next = match (item) {
+          NRField(_, value) => walkNorm(value, accRev),
+          NRSpread(value) => walkNorm(value, accRev),
+        }
+        walkNormRecordItems(tail, next)
+      },
     }
 
   List.reverse(walkNorm(expr, []))

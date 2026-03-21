@@ -98,6 +98,7 @@ let rec lowerUnifiedExpr = (
         },
       }
     },
+    WmcTCoreNorm.NERecordLit(_) => (None, st),
     WmcTCoreNorm.NELambda(_, _) => (None, st),
     WmcTCoreNorm.NEUnknown(_) => (None, st),
     WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>

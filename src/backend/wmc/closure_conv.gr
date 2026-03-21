@@ -44,6 +44,14 @@ let rec freeVarsExpr = (
   match (expr.kind) {
     WmcTCoreNorm.NELit(_) => [],
     WmcTCoreNorm.NEUnknown(_) => [],
+    WmcTCoreNorm.NERecordLit(items) => dedupeStrings(List.flatten(List.map(
+      (item: WmcTCoreNorm.RecordItem) =>
+        match (item) {
+          WmcTCoreNorm.NRField(_, value) => freeVarsExpr(value, localBound, globals),
+          WmcTCoreNorm.NRSpread(value) => freeVarsExpr(value, localBound, globals),
+        },
+      items,
+    ))),
     WmcTCoreNorm.NETuple(items) => dedupeStrings(List.flatten(List.map(
       (item: WmcTCoreNorm.Expr) => freeVarsExpr(item, localBound, globals),
       items,
@@ -89,6 +97,16 @@ let rec collectClosurePlans = (
     WmcTCoreNorm.NELit(_) => accRev,
     WmcTCoreNorm.NEUnknown(_) => accRev,
     WmcTCoreNorm.NEIdent(_) => accRev,
+    WmcTCoreNorm.NERecordLit(items) =>
+      List.reduce(
+        (acc, item) =>
+          match (item) {
+            WmcTCoreNorm.NRField(_, value) => collectClosurePlans(value, globals, None, acc),
+            WmcTCoreNorm.NRSpread(value) => collectClosurePlans(value, globals, None, acc),
+          },
+        accRev,
+        items,
+      ),
     WmcTCoreNorm.NETuple(items) =>
       List.reduce(
         (acc, item) => collectClosurePlans(item, globals, None, acc),

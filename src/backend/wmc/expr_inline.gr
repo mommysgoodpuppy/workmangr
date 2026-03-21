@@ -67,6 +67,16 @@ provide let rec inlineSimpleTopCalls = (expr: WmcTCoreNorm.Expr, defs: List<Simp
       WmcTCoreNorm.NELit(_) => current.kind,
       WmcTCoreNorm.NEIdent(_) => current.kind,
       WmcTCoreNorm.NEUnknown(_) => current.kind,
+      WmcTCoreNorm.NERecordLit(items) =>
+        WmcTCoreNorm.NERecordLit(
+          List.map((item: WmcTCoreNorm.RecordItem) =>
+            match (item) {
+              WmcTCoreNorm.NRField(name, value) => WmcTCoreNorm.NRField(name, loop(value, localDefs)),
+              WmcTCoreNorm.NRSpread(value) => WmcTCoreNorm.NRSpread(loop(value, localDefs)),
+            },
+            items,
+          )
+        ),
       WmcTCoreNorm.NEApply(callee, arg) => {
         let callee2: WmcTCoreNorm.Expr = loop(callee, localDefs)
         let arg2: WmcTCoreNorm.Expr = loop(arg, localDefs)

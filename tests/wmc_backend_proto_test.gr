@@ -29,6 +29,20 @@ let findValue = (items: List<WmcTCore.TopValueBinding>, target: String) => {
   loop(items)
 }
 
+let findTypeInfo = (items: List<WmcTCore.TypeInfo>, target: String) => {
+  let rec loop = (rest: List<WmcTCore.TypeInfo>) =>
+    match (rest) {
+      [] => None,
+      [item, ...tail] =>
+        if (item.name == target) {
+          Some(item)
+        } else {
+          loop(tail)
+        },
+    }
+  loop(items)
+}
+
 test("wmc backend prototype builds typed entry projection", () => {
   let overrides = Map.make()
   Map.set(
@@ -107,5 +121,58 @@ test("wmc driver surfaces normalization issues", () => {
   all([
     assertTrue(hasIncludeIssue),
     assertTrue(String.contains("norm_issues=", summary)),
+  ])
+})
+
+test("wmc backend prototype carries type record and infection metadata", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "type infectious shortCircuit IResult<T, E> = IOk<T> | IErr<E>;\n"
+      ++ "type Option<T> = Some<T> | None;\n"
+      ++ "record Location = { x: Int, y: Int };\n"
+      ++ "let mk = Some(1);",
+    overrides
+  )
+
+  let proto = match (
+    WmcDriver.inferEntryPrototype(
+      "entry",
+      options={ ...ModuleSystem.defaultOptions(), sourceOverrides: overrides }
+    )
+  ) {
+    Ok(p) => p,
+    Err(msg) => fail(msg),
+  }
+
+  let optionInfo = match (findTypeInfo(proto.entry.typeInfos, "Option")) {
+    Some(info) => info,
+    None => fail("missing Option type info"),
+  }
+  let iresultInfo = match (findTypeInfo(proto.entry.typeInfos, "IResult")) {
+    Some(info) => info,
+    None => fail("missing IResult type info"),
+  }
+  let locationInfo = match (findTypeInfo(proto.entry.typeInfos, "Location")) {
+    Some(info) => info,
+    None => fail("missing Location type info"),
+  }
+
+  let optionCtorsOk = match (List.map((ctor: WmcTCore.ConstructorInfo) => ctor.name, optionInfo.constructors)) {
+    ["Some", "None"] => true,
+    _ => false,
+  }
+  let iresultInfectionOk = iresultInfo.infection == Some("shortCircuit")
+  let locationFieldsOk = match (locationInfo.recordFields) {
+    Some([("x", _), ("y", _)]) => true,
+    _ => false,
+  }
+  let normalizedKeepsTypes = List.length(proto.normalizedEntry.typeInfos) == List.length(proto.entry.typeInfos)
+  all([
+    assertTrue(optionCtorsOk),
+    assertTrue(iresultInfectionOk),
+    assertTrue(locationFieldsOk),
+    assertTrue(normalizedKeepsTypes),
+    assertTrue(true),
   ])
 })

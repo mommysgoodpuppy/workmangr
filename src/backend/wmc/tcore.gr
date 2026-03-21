@@ -7,7 +7,9 @@ from "../../core/source.gr" include Source
 from "../../core/core_ast.gr" include CoreAst
 from "../../core/types.gr" include Types
 from "../../core/infer.gr" include Infer
+from "../../core/env.gr" include Env
 from "../../core/error.gr" include Error
+from "../../core/infection_registry.gr" include InfectionRegistry
 from "../../core/module_infer.gr" include ModuleInfer
 from "../../core/layer1/expr.gr" include Layer1Expr
 
@@ -88,11 +90,28 @@ provide record TopValueBinding {
   binding: LetBinding,
 }
 
+provide record ConstructorInfo {
+  name: String,
+  payload: Option<CoreAst.TypeExpr>,
+  annotation: Option<CoreAst.Annotation>,
+  owner: String,
+}
+
+provide record TypeInfo {
+  name: String,
+  typeParams: List<String>,
+  constructors: List<ConstructorInfo>,
+  recordFields: Option<List<(String, CoreAst.TypeExpr)>>,
+  infection: Option<String>,
+}
+
 provide record Module {
   moduleId: String,
   values: List<TopValueBinding>,
+  typeInfos: List<TypeInfo>,
   typeDeclNames: List<String>,
   recordDeclNames: List<String>,
+  infectionRegistry: InfectionRegistry.Registry,
   diagnostics: List<Error.CompilerError>,
 }
 
@@ -112,6 +131,27 @@ let typedNode = (ctx: ProjectCtx, node: CoreAst.Node) => {
   }
   { id: node.id, span: node.span, ty }: TypedNode
 }
+
+let projectConstructorInfo = (owner: String, ctor: Env.ConstructorInfo) =>
+  {
+    name: ctor.name,
+    payload: ctor.payload,
+    annotation: ctor.annotation,
+    owner,
+  }: ConstructorInfo
+
+let projectTypeInfo = (info: Env.TypeInfo) =>
+  {
+    name: info.name,
+    typeParams: info.typeParams,
+    constructors: List.map((ctor: Env.ConstructorInfo) => projectConstructorInfo(info.name, ctor), info.constructors),
+    recordFields: mapOption(
+      info.recordFields,
+      (fields: List<(CoreAst.Name, CoreAst.TypeExpr)>) =>
+        List.map(((fieldName, fieldTy): (CoreAst.Name, CoreAst.TypeExpr)) => (fieldName.text, fieldTy), fields),
+    ),
+    infection: info.infection,
+  }: TypeInfo
 
 let rec projectPattern = (ctx: ProjectCtx, pattern: CoreAst.Pattern) => {
   let kind = match (pattern.kind) {
@@ -317,11 +357,17 @@ let collectRecordDeclNames = (program: CoreAst.Program) => {
 
 provide let fromModuleSummary = (summary: ModuleInfer.ModuleSummary) => {
   let ctx: ProjectCtx = { infer: summary.infer }
+  let typeInfos = List.map(
+    ((_name, info): (String, Env.TypeInfo)) => projectTypeInfo(info),
+    Map.toList(Env.snapshotTypes(summary.infer.env)),
+  )
   {
     moduleId: summary.moduleId,
     values: collectTopValueBindings(ctx, summary.program),
+    typeInfos,
     typeDeclNames: collectTypeDeclNames(summary.program),
     recordDeclNames: collectRecordDeclNames(summary.program),
+    infectionRegistry: summary.infer.infectionRegistry,
     diagnostics: summary.diagnostics,
   }: Module
 }

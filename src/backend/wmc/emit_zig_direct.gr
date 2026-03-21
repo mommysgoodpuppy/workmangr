@@ -28,6 +28,7 @@ record ExprEmit {
   exprText: String,
   helperFns: List<String>,
   usesPrint: Bool,
+  usesPrintString: Bool,
   state: DirectState,
 }
 
@@ -35,6 +36,7 @@ record FunctionEmit {
   helperFns: List<String>,
   fnSource: String,
   usesPrint: Bool,
+  usesPrintString: Bool,
   state: DirectState,
 }
 
@@ -234,21 +236,39 @@ let atomLiteralToZig = (lit: CoreAst.AtomLiteral) =>
     CoreAst.Bool(false) => "false",
     CoreAst.Unit => "0",
     CoreAst.Byte(n) => toString(n),
-    CoreAst.Char(_ch) => "0",
-    CoreAst.Str(_s) => "0",
+    CoreAst.Char(ch) => toString(Char.code(ch)),
+    CoreAst.Str(s) =>
+      "\""
+        ++ String.replaceAll(
+          "\"",
+          "\\\"",
+          String.replaceAll(
+            "\\",
+            "\\\\",
+            String.replaceAll(
+              "\n",
+              "\\n",
+              String.replaceAll("\r", "\\r", String.replaceAll("\t", "\\t", s)),
+            ),
+          ),
+        )
+        ++ "\"",
   }
 
-let wrapBlockExpr = (lines: List<String>, exprText: String) =>
+let wrapBlockExprNamed = (label: String, lines: List<String>, exprText: String) =>
   if (lines == []) {
     exprText
   } else {
-    "blk: {\n"
+    label
+      ++ ": {\n"
       ++ joinStrings("\n", List.map(indent, lines))
       ++ "\n"
-      ++ indent("break :blk " ++ exprText ++ ";")
+      ++ indent("break :" ++ label ++ " " ++ exprText ++ ";")
       ++ "\n"
       ++ "}"
   }
+
+let wrapBlockExpr = (lines: List<String>, exprText: String) => wrapBlockExprNamed("blk", lines, exprText)
 
 let appendExprEmit = (left: ExprEmit, right: ExprEmit, exprText: String) =>
   {
@@ -256,8 +276,114 @@ let appendExprEmit = (left: ExprEmit, right: ExprEmit, exprText: String) =>
     exprText,
     helperFns: List.append(left.helperFns, right.helperFns),
     usesPrint: left.usesPrint || right.usesPrint,
+    usesPrintString: left.usesPrintString || right.usesPrintString,
     state: right.state,
   }: ExprEmit
+
+let appendExprEmits = (
+  left: ExprEmit,
+  right: ExprEmit,
+) =>
+  {
+    lines: List.append(left.lines, right.lines),
+    exprText: right.exprText,
+    helperFns: List.append(left.helperFns, right.helperFns),
+    usesPrint: left.usesPrint || right.usesPrint,
+    usesPrintString: left.usesPrintString || right.usesPrintString,
+    state: right.state,
+  }: ExprEmit
+
+let emptyExprEmit = (state: DirectState) =>
+  {
+    lines: [],
+    exprText: "",
+    helperFns: [],
+    usesPrint: false,
+    usesPrintString: false,
+    state,
+  }: ExprEmit
+
+let isStringTy = (tyOpt: Option<Types.Type>) =>
+  match (tyOpt) {
+    Some(Types.TString) => true,
+    Some(Types.TNominal("String", _)) => true,
+    _ => false,
+  }
+
+let tupleFieldText = (base: String, idx: Number) => base ++ ".@\"" ++ toString(idx) ++ "\""
+
+record MatchPrep {
+  checks: List<String>,
+  bindings: List<(String, String)>,
+}
+
+let mergeMatchPrep = (left: MatchPrep, right: MatchPrep) =>
+  {
+    checks: List.append(left.checks, right.checks),
+    bindings: List.append(left.bindings, right.bindings),
+  }: MatchPrep
+
+let emptyMatchPrep = { checks: [], bindings: [] }: MatchPrep
+
+let constructorExists = (m: WmcTCore.Module, target: String) => {
+  let rec typeLoop = (types: List<WmcTCore.TypeInfo>) =>
+    match (types) {
+      [] => false,
+      [typeInfo, ...tail] =>
+        if (ctorLoop(typeInfo.constructors)) { true } else { typeLoop(tail) },
+    }
+  and ctorLoop = (ctors: List<WmcTCore.ConstructorInfo>) =>
+    match (ctors) {
+      [] => false,
+      [ctor, ...tail] => if (ctor.name == target) { true } else { ctorLoop(tail) },
+    }
+  typeLoop(m.typeInfos)
+}
+
+let rec preparePatternMatch = (
+  rawModule: WmcTCore.Module,
+  pattern: WmcTCoreNorm.Pattern,
+  valueText: String,
+) =>
+  match (pattern.kind) {
+    WmcTCoreNorm.NPHole(_) => Some(emptyMatchPrep),
+    WmcTCoreNorm.NPWildcard => Some(emptyMatchPrep),
+    WmcTCoreNorm.NPAllErrors => Some(emptyMatchPrep),
+    WmcTCoreNorm.NPVar(name) => Some({ checks: [], bindings: [(name, valueText)] }: MatchPrep),
+    WmcTCoreNorm.NPPin(name) => Some({ checks: [valueText ++ " == " ++ sanitizeLocalBase(name)], bindings: [] }: MatchPrep),
+    WmcTCoreNorm.NPLit(lit) => Some({ checks: [valueText ++ " == " ++ atomLiteralToZig(lit)], bindings: [] }: MatchPrep),
+    WmcTCoreNorm.NPTuple(items) => {
+      let rec loop = (rest: List<WmcTCoreNorm.Pattern>, idx: Number, acc: MatchPrep) =>
+        match (rest) {
+          [] => Some(acc),
+          [item, ...tail] =>
+            match (preparePatternMatch(rawModule, item, tupleFieldText(valueText, idx))) {
+              None => None,
+              Some(prep) => loop(tail, idx + 1, mergeMatchPrep(acc, prep)),
+            },
+        }
+      loop(items, 0, emptyMatchPrep)
+    },
+    WmcTCoreNorm.NPConstructor(name, args) =>
+      if (!constructorExists(rawModule, name)) {
+        None
+      } else {
+        let base = { checks: ["@import(\"std\").mem.eql(u8, " ++ valueText ++ ".tag, \"" ++ name ++ "\")"], bindings: [] }: MatchPrep
+        let rec loop = (rest: List<WmcTCoreNorm.Pattern>, idx: Number, acc: MatchPrep) =>
+          match (rest) {
+              [] => Some(acc),
+              [item, ...tail] => {
+                let fieldText = if (List.length(args) == 1) { valueText ++ ".payload" } else { tupleFieldText(valueText ++ ".payload", idx) }
+                match (preparePatternMatch(rawModule, item, fieldText)) {
+                  None => None,
+                  Some(prep) => loop(tail, idx + 1, mergeMatchPrep(acc, prep)),
+                }
+              },
+            }
+          loop(args, 0, base)
+      },
+    WmcTCoreNorm.NPList(_, _) => None,
+  }
 
 let withNodeComment = (node: WmcTCore.TypedNode, line: String, sourceText: Option<String>) =>
   [wmSourceComment(node, sourceText), line]
@@ -292,12 +418,52 @@ let isIntrinsicName = (name: String) =>
     || name == "intMul"
     || name == WmcTCoreNorm.zeroArgThunkParamName
 
+let startsWithUpper = (name: String) =>
+  if (String.length(name) == 0) {
+    false
+  } else {
+    let ch = String.charAt(0, name)
+    let code = Char.code(ch)
+    code >= Char.code('A') && code <= Char.code('Z')
+  }
+
+let hasConstructorName = (m: WmcTCore.Module, target: String) => {
+  let rec typeLoop = (types: List<WmcTCore.TypeInfo>) =>
+    match (types) {
+      [] => false,
+      [typeInfo, ...tail] =>
+        if (ctorLoop(typeInfo.constructors)) { true } else { typeLoop(tail) },
+    }
+  and ctorLoop = (ctors: List<WmcTCore.ConstructorInfo>) =>
+    match (ctors) {
+      [] => false,
+      [ctor, ...tail] => if (ctor.name == target) { true } else { ctorLoop(tail) },
+    }
+  typeLoop(m.typeInfos)
+}
+
+let hasRecordTypeName = (m: WmcTCore.Module, target: String) => {
+  let rec loop = (types: List<WmcTCore.TypeInfo>) =>
+    match (types) {
+      [] => false,
+      [typeInfo, ...tail] =>
+        if (typeInfo.name == target && typeInfo.recordFields != None) { true } else { loop(tail) },
+    }
+  loop(m.typeInfos)
+}
+
 let rec freeNamesExpr = (expr: WmcTCoreNorm.Expr, bound: List<String>) =>
   match (expr.kind) {
     WmcTCoreNorm.NELit(_) => [],
     WmcTCoreNorm.NEUnknown(_) => [],
     WmcTCoreNorm.NEIdent(name) =>
       if (containsString(bound, name) || isIntrinsicName(name)) { [] } else { [name] },
+    WmcTCoreNorm.NERecordLit(items) =>
+      dedupeStrings(List.flatten(List.map((item: WmcTCoreNorm.RecordItem) =>
+        match (item) {
+          WmcTCoreNorm.NRField(_, value) => freeNamesExpr(value, bound),
+          WmcTCoreNorm.NRSpread(value) => freeNamesExpr(value, bound),
+        }, items))),
     WmcTCoreNorm.NETuple(items) =>
       dedupeStrings(List.flatten(List.map((item: WmcTCoreNorm.Expr) => freeNamesExpr(item, bound), items))),
     WmcTCoreNorm.NELambda(param, body) => freeNamesExpr(body, [param, ...bound]),
@@ -333,7 +499,138 @@ let rec decomposeLetLambdaValue = (expr: WmcTCoreNorm.Expr) =>
     _ => None,
   }
 
-let rec emitExpr = (
+let rec emitMatchChain:
+  (
+    WmcTCore.Module,
+    String,
+    List<WmcTCoreNorm.MatchClause>,
+    List<(String, String)>,
+    List<(String, LocalFnBinding)>,
+    DirectState,
+    Option<String>,
+  ) => ExprEmit = (
+  rawModule: WmcTCore.Module,
+  scrutText: String,
+  clauses: List<WmcTCoreNorm.MatchClause>,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) => {
+  let rec loop = (remaining: List<WmcTCoreNorm.MatchClause>, st: DirectState) =>
+    match (remaining) {
+      [] =>
+        {
+          lines: [],
+          exprText: "0",
+          helperFns: [],
+          usesPrint: false,
+          usesPrintString: false,
+          state: st,
+        }: ExprEmit,
+      [clause, ...tail] =>
+        match (preparePatternMatch(rawModule, clause.param, scrutText)) {
+          None => loop(tail, st),
+          Some(prep) => {
+            let rec allocateBindings = (
+              rest: List<(String, String)>,
+              accEnv: List<(String, String)>,
+              accLines: List<String>,
+              accState: DirectState,
+            ) =>
+              match (rest) {
+                [] => (List.reverse(accEnv), List.reverse(accLines), accState),
+                [(name, valueText), ...tail] => {
+                  let (zigName, st1) = nextTmp(name, accState)
+                  allocateBindings(
+                    tail,
+                    [(name, zigName), ...accEnv],
+                    ["const " ++ zigName ++ " = " ++ valueText ++ ";", ...accLines],
+                    st1,
+                  )
+                },
+              }
+            let (bindingsEnv, bindingLines, bindingState) = allocateBindings(prep.bindings, [], [], st)
+            let nextOut = loop(tail, bindingState)
+            let clauseEnv = List.append(bindingsEnv, env)
+            let guardOut = match (clause.guard) {
+              None => None,
+              Some(g) => Some(emitExpr(rawModule, g, clauseEnv, fnEnv, nextOut.state, sourceText)),
+            }
+            let bodyState = match (guardOut) {
+              None => nextOut.state,
+              Some(out) => out.state,
+            }
+            let bodyOut = emitExpr(rawModule, clause.body, clauseEnv, fnEnv, bodyState, sourceText)
+            let condText = match (prep.checks) {
+              [] => "true",
+              [first, ...restChecks] => List.reduce((acc, item) => acc ++ " and " ++ item, first, restChecks),
+            }
+            let nextExprText = nextOut.exprText
+            let (thenExprText, finalState) = match (guardOut) {
+              None => (wrapBlockExpr(List.append(bindingLines, bodyOut.lines), bodyOut.exprText), bodyOut.state),
+              Some(gout) => {
+                let (guardLabel, st1) = nextTmp("guard_blk", bodyOut.state)
+                (
+                  wrapBlockExprNamed(
+                    guardLabel,
+                    List.append(bindingLines, gout.lines),
+                    "if ("
+                      ++ gout.exprText
+                      ++ ") "
+                      ++ wrapBlockExpr(bodyOut.lines, bodyOut.exprText)
+                      ++ " else "
+                      ++ nextExprText,
+                  ),
+                  st1,
+                )
+              },
+            }
+            {
+              lines: [],
+              exprText: "if (" ++ condText ++ ") " ++ thenExprText ++ " else " ++ nextExprText,
+              helperFns: List.append(
+                nextOut.helperFns,
+                List.append(
+                  match (guardOut) {
+                    None => [],
+                    Some(gout) => gout.helperFns,
+                  },
+                  bodyOut.helperFns,
+                ),
+              ),
+              usesPrint:
+                nextOut.usesPrint
+                  || bodyOut.usesPrint
+                  || match (guardOut) {
+                    None => false,
+                    Some(gout) => gout.usesPrint,
+                  },
+              usesPrintString:
+                nextOut.usesPrintString
+                  || bodyOut.usesPrintString
+                  || match (guardOut) {
+                    None => false,
+                    Some(gout) => gout.usesPrintString,
+                  },
+              state: finalState,
+            }: ExprEmit
+          },
+        },
+    }
+  loop(clauses, state)
+}
+
+and emitExpr:
+  (
+    WmcTCore.Module,
+    WmcTCoreNorm.Expr,
+    List<(String, String)>,
+    List<(String, LocalFnBinding)>,
+    DirectState,
+    Option<String>,
+  ) => ExprEmit = (
+  rawModule: WmcTCore.Module,
   expr: WmcTCoreNorm.Expr,
   env: List<(String, String)>,
   fnEnv: List<(String, LocalFnBinding)>,
@@ -347,38 +644,103 @@ let rec emitExpr = (
         exprText: atomLiteralToZig(lit),
         helperFns: [],
         usesPrint: false,
+        usesPrintString: false,
         state,
       }: ExprEmit,
     WmcTCoreNorm.NEIdent(name) =>
-      {
-        lines: [],
-        exprText: lookupEnv(env, name),
-        helperFns: [],
-        usesPrint: false,
-        state,
-      }: ExprEmit,
+      match (lookupEnvOpt(env, name)) {
+        Some(localName) =>
+          {
+            lines: [],
+            exprText: localName,
+            helperFns: [],
+            usesPrint: false,
+            usesPrintString: false,
+            state,
+          }: ExprEmit,
+        None =>
+          if (hasConstructorName(rawModule, name)) {
+            {
+              lines: [],
+              exprText: ".{ .tag = \"" ++ name ++ "\", .payload = 0 }",
+              helperFns: [],
+              usesPrint: false,
+              usesPrintString: false,
+              state,
+            }: ExprEmit
+          } else {
+            {
+              lines: [],
+              exprText: lookupEnv(env, name),
+              helperFns: [],
+              usesPrint: false,
+              usesPrintString: false,
+              state,
+            }: ExprEmit
+          },
+      },
     WmcTCoreNorm.NEUnknown(_) =>
       {
         lines: [],
         exprText: "0",
         helperFns: [],
         usesPrint: false,
+        usesPrintString: false,
         state,
       }: ExprEmit,
+    WmcTCoreNorm.NERecordLit(items) => {
+      let rec loop = (rest: List<WmcTCoreNorm.RecordItem>, acc: ExprEmit, fieldTextsRev: List<String>) =>
+        match (rest) {
+          [] =>
+            {
+              ...acc,
+              exprText: ".{ " ++ joinStrings(", ", List.reverse(fieldTextsRev)) ++ " }",
+            }: ExprEmit,
+          [item, ...tail] =>
+            match (item) {
+              WmcTCoreNorm.NRField(name, value) => {
+                let valueOut = emitExpr(rawModule, value, env, fnEnv, acc.state, sourceText)
+                loop(
+                  tail,
+                  appendExprEmits(acc, valueOut),
+                  ["." ++ name ++ " = " ++ valueOut.exprText, ...fieldTextsRev],
+                )
+              },
+              WmcTCoreNorm.NRSpread(value) => {
+                let valueOut = emitExpr(rawModule, value, env, fnEnv, acc.state, sourceText)
+                loop(
+                  tail,
+                  appendExprEmits(acc, valueOut),
+                  [valueOut.exprText, ...fieldTextsRev],
+                )
+              },
+            },
+        }
+      loop(items, emptyExprEmit(state), [])
+    },
     WmcTCoreNorm.NETuple(_items) =>
       {
-        lines: [],
-        exprText: "0",
-        helperFns: [],
-        usesPrint: false,
-        state,
-      }: ExprEmit,
+        let rec loop = (rest: List<WmcTCoreNorm.Expr>, acc: ExprEmit, itemTextsRev: List<String>) =>
+          match (rest) {
+            [] =>
+              {
+                ...acc,
+                exprText: ".{ " ++ joinStrings(", ", List.reverse(itemTextsRev)) ++ " }",
+              }: ExprEmit,
+            [item, ...tail] => {
+              let itemOut = emitExpr(rawModule, item, env, fnEnv, acc.state, sourceText)
+              loop(tail, appendExprEmits(acc, itemOut), [itemOut.exprText, ...itemTextsRev])
+            },
+          }
+        loop(_items, emptyExprEmit(state), [])
+      },
     WmcTCoreNorm.NELambda(_param, _body) =>
       {
         lines: [],
         exprText: "0",
         helperFns: [],
         usesPrint: false,
+        usesPrintString: false,
         state,
       }: ExprEmit,
     WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
@@ -411,6 +773,7 @@ let rec emitExpr = (
             ),
           )
           let fnBodyOut = emitExpr(
+            rawModule,
             fnBody,
             List.append(
               List.map(
@@ -460,6 +823,7 @@ let rec emitExpr = (
           let capturesNeeded = capturedNames != []
           let nextFnEnv = if (capturesNeeded) { [(name, localFnBinding), ...fnEnv] } else { fnEnv }
           let bodyOut = emitExpr(
+            rawModule,
             bodyExpr,
             [(name, zigName), ...env],
             nextFnEnv,
@@ -475,6 +839,7 @@ let rec emitExpr = (
                 List.append(fnBodyOut.helperFns, bodyOut.helperFns),
               ),
               usesPrint: fnBodyOut.usesPrint || bodyOut.usesPrint,
+              usesPrintString: fnBodyOut.usesPrintString || bodyOut.usesPrintString,
               state: bodyOut.state,
             }: ExprEmit
           } else {
@@ -489,6 +854,7 @@ let rec emitExpr = (
                 List.append(fnBodyOut.helperFns, bodyOut.helperFns),
               ),
               usesPrint: fnBodyOut.usesPrint || bodyOut.usesPrint,
+              usesPrintString: fnBodyOut.usesPrintString || bodyOut.usesPrintString,
               state: bodyOut.state,
             }: ExprEmit
           }
@@ -514,7 +880,7 @@ let rec emitExpr = (
                       usesPrintX,
                     ),
                   [(capName, capExpr, capNode), ...tail] => {
-                    let capOut = emitExpr(capExpr, envX, fnEnv, stX, sourceText)
+                    let capOut = emitExpr(rawModule, capExpr, envX, fnEnv, stX, sourceText)
                     let (capZig, stY) = nextTmp(capName, capOut.state)
                     let nextLinesRev = List.append(
                       List.reverse(
@@ -569,6 +935,7 @@ let rec emitExpr = (
                 ),
               )
               let fnBodyOut = emitExpr(
+                rawModule,
                 fnBody,
                 List.append(
                   List.map(
@@ -616,6 +983,7 @@ let rec emitExpr = (
                 ),
               }
               let bodyOut = emitExpr(
+                rawModule,
                 bodyExpr,
                 [(name, sanitizeLocalBase(name)), ...env],
                 [(name, localFnBinding), ...fnEnv],
@@ -633,14 +1001,15 @@ let rec emitExpr = (
                   ),
                 ),
                 usesPrint: captureUsesPrint || fnBodyOut.usesPrint || bodyOut.usesPrint,
+                usesPrintString: fnBodyOut.usesPrintString || bodyOut.usesPrintString,
                 state: bodyOut.state,
               }: ExprEmit
             },
             None =>
               {
-                let valueOut = emitExpr(valueExpr, env, fnEnv, state, sourceText)
+                let valueOut = emitExpr(rawModule, valueExpr, env, fnEnv, state, sourceText)
                 if (name == "_") {
-                  let bodyOut = emitExpr(bodyExpr, env, fnEnv, valueOut.state, sourceText)
+                  let bodyOut = emitExpr(rawModule, bodyExpr, env, fnEnv, valueOut.state, sourceText)
                   {
                     lines: List.append(
                       valueOut.lines,
@@ -652,11 +1021,12 @@ let rec emitExpr = (
                     exprText: bodyOut.exprText,
                     helperFns: List.append(valueOut.helperFns, bodyOut.helperFns),
                     usesPrint: valueOut.usesPrint || bodyOut.usesPrint,
+                    usesPrintString: valueOut.usesPrintString || bodyOut.usesPrintString,
                     state: bodyOut.state,
                   }: ExprEmit
                 } else {
                   let zigName = sanitizeLocalBase(name)
-                  let bodyOut = emitExpr(bodyExpr, [(name, zigName), ...env], fnEnv, valueOut.state, sourceText)
+                  let bodyOut = emitExpr(rawModule, bodyExpr, [(name, zigName), ...env], fnEnv, valueOut.state, sourceText)
                   {
                     lines: List.append(
                       valueOut.lines,
@@ -668,6 +1038,7 @@ let rec emitExpr = (
                     exprText: bodyOut.exprText,
                     helperFns: List.append(valueOut.helperFns, bodyOut.helperFns),
                     usesPrint: valueOut.usesPrint || bodyOut.usesPrint,
+                    usesPrintString: valueOut.usesPrintString || bodyOut.usesPrintString,
                     state: bodyOut.state,
                   }: ExprEmit
                 }
@@ -676,77 +1047,105 @@ let rec emitExpr = (
         },
       },
     WmcTCoreNorm.NEMatch(m) =>
-      match (boolClauseBodies(m.clauses)) {
-        None =>
-          {
-            lines: [],
-            exprText: "0",
-            helperFns: [],
-            usesPrint: false,
-            state,
-          }: ExprEmit,
-        Some((thenExpr, elseExpr)) => {
-          let condOut = emitExpr(m.scrutinee, env, fnEnv, state, sourceText)
-          let thenOut = emitExpr(thenExpr, env, fnEnv, condOut.state, sourceText)
-          let elseOut = emitExpr(elseExpr, env, fnEnv, thenOut.state, sourceText)
-          appendExprEmit(
-            condOut,
-            {
-              lines: [],
-              exprText:
-                "if ("
-                  ++ condOut.exprText
-                  ++ ") "
-                  ++ wrapBlockExpr(thenOut.lines, thenOut.exprText)
-                  ++ " else "
-                  ++ wrapBlockExpr(elseOut.lines, elseOut.exprText),
-              helperFns: List.append(thenOut.helperFns, elseOut.helperFns),
-              usesPrint: thenOut.usesPrint || elseOut.usesPrint,
-              state: elseOut.state,
-            }: ExprEmit,
-            "if ("
-              ++ condOut.exprText
-              ++ ") "
-              ++ wrapBlockExpr(thenOut.lines, thenOut.exprText)
-              ++ " else "
-              ++ wrapBlockExpr(elseOut.lines, elseOut.exprText),
-          )
-        },
+      {
+        let scrutOut = emitExpr(rawModule, m.scrutinee, env, fnEnv, state, sourceText)
+        let (scrutVar, st1) = nextTmp("match_scrut", scrutOut.state)
+        let chainOut = emitMatchChain(
+          rawModule,
+          scrutVar,
+          m.clauses,
+          env,
+          fnEnv,
+          st1,
+          sourceText,
+        )
+        {
+          lines: List.append(
+            scrutOut.lines,
+            List.append(
+              withNodeComment(m.scrutinee.node, "const " ++ scrutVar ++ " = " ++ scrutOut.exprText ++ ";", sourceText),
+              chainOut.lines,
+            ),
+          ),
+          exprText: chainOut.exprText,
+          helperFns: List.append(scrutOut.helperFns, chainOut.helperFns),
+          usesPrint: scrutOut.usesPrint || chainOut.usesPrint,
+          usesPrintString: scrutOut.usesPrintString || chainOut.usesPrintString,
+          state: chainOut.state,
+        }: ExprEmit
       },
     WmcTCoreNorm.NEApply(callee, arg) =>
       match (callee.kind) {
         WmcTCoreNorm.NEApply(callee2, left) =>
           match (callee2.kind) {
             WmcTCoreNorm.NEIdent(op) =>
-              if (op == "+" || op == "-" || op == "*") {
-                let leftOut = emitExpr(left, env, fnEnv, state, sourceText)
-                let rightOut = emitExpr(arg, env, fnEnv, leftOut.state, sourceText)
+              if (op == "project") {
+                let targetOut = emitExpr(rawModule, left, env, fnEnv, state, sourceText)
+                match (arg.kind) {
+                  WmcTCoreNorm.NELit(CoreAst.Str(fieldName)) =>
+                    {
+                      lines: targetOut.lines,
+                      exprText: targetOut.exprText ++ "." ++ sanitizeLocalBase(fieldName),
+                      helperFns: targetOut.helperFns,
+                      usesPrint: targetOut.usesPrint,
+                      usesPrintString: targetOut.usesPrintString,
+                      state: targetOut.state,
+                    }: ExprEmit,
+                  _ => {
+                    let rightOut = emitExpr(rawModule, arg, env, fnEnv, targetOut.state, sourceText)
+                    appendExprEmit(targetOut, rightOut, "0")
+                  },
+                }
+              } else if (op == "+" || op == "-" || op == "*") {
+                let leftOut = emitExpr(rawModule, left, env, fnEnv, state, sourceText)
+                let rightOut = emitExpr(rawModule, arg, env, fnEnv, leftOut.state, sourceText)
                 appendExprEmit(
                   leftOut,
                   rightOut,
                   "(" ++ leftOut.exprText ++ " " ++ op ++ " " ++ rightOut.exprText ++ ")",
                 )
+              } else if (hasConstructorName(rawModule, op)) {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                {
+                  lines: argOut.lines,
+                  exprText: ".{ .tag = \"" ++ op ++ "\", .payload = " ++ argOut.exprText ++ " }",
+                  helperFns: argOut.helperFns,
+                  usesPrint: argOut.usesPrint,
+                  usesPrintString: argOut.usesPrintString,
+                  state: argOut.state,
+                }: ExprEmit
+              } else if (hasRecordTypeName(rawModule, op)) {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                {
+                  lines: argOut.lines,
+                  exprText: argOut.exprText,
+                  helperFns: argOut.helperFns,
+                  usesPrint: argOut.usesPrint,
+                  usesPrintString: argOut.usesPrintString,
+                  state: argOut.state,
+                }: ExprEmit
               } else {
-                let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
-                let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+                let calleeOut = emitExpr(rawModule, callee, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, calleeOut.state, sourceText)
                 appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
               },
             _ => {
-              let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
-              let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+              let calleeOut = emitExpr(rawModule, callee, env, fnEnv, state, sourceText)
+              let argOut = emitExpr(rawModule, arg, env, fnEnv, calleeOut.state, sourceText)
               appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
             },
           },
         WmcTCoreNorm.NEIdent(op) =>
           match (lookupLocalFn(fnEnv, op)) {
             Some(localFn) => {
-              let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+              let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
               let callArgs = joinStrings(", ", List.append(localFn.capturedArgs, [argOut.exprText]))
               {
                 lines: argOut.lines,
                 exprText: localFn.fnName ++ "(" ++ callArgs ++ ")",
                 helperFns: argOut.helperFns,
                 usesPrint: argOut.usesPrint,
+                usesPrintString: argOut.usesPrintString,
                 state: argOut.state,
               }: ExprEmit
             },
@@ -754,72 +1153,126 @@ let rec emitExpr = (
           match (arg.kind) {
             WmcTCoreNorm.NETuple([left, right]) =>
               if (op == "+" || op == "-" || op == "*") {
-                let leftOut = emitExpr(left, env, fnEnv, state, sourceText)
-                let rightOut = emitExpr(right, env, fnEnv, leftOut.state, sourceText)
+                let leftOut = emitExpr(rawModule, left, env, fnEnv, state, sourceText)
+                let rightOut = emitExpr(rawModule, right, env, fnEnv, leftOut.state, sourceText)
                 appendExprEmit(
                   leftOut,
                   rightOut,
                   "(" ++ leftOut.exprText ++ " " ++ op ++ " " ++ rightOut.exprText ++ ")",
                 )
+              } else if (hasConstructorName(rawModule, op)) {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                let payloadText = match (arg.kind) {
+                  WmcTCoreNorm.NERecordLit(_) when match (arg.node.ty) {
+                    Some(Types.TNominal(typeName, _)) => typeName == op,
+                    _ => false,
+                  } => argOut.exprText,
+                  _ => ".{ .tag = \"" ++ op ++ "\", .payload = " ++ argOut.exprText ++ " }",
+                }
+                {
+                  lines: argOut.lines,
+                  exprText: payloadText,
+                  helperFns: argOut.helperFns,
+                  usesPrint: argOut.usesPrint,
+                  usesPrintString: argOut.usesPrintString,
+                  state: argOut.state,
+                }: ExprEmit
+              } else if (hasRecordTypeName(rawModule, op)) {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                {
+                  lines: argOut.lines,
+                  exprText: argOut.exprText,
+                  helperFns: argOut.helperFns,
+                  usesPrint: argOut.usesPrint,
+                  usesPrintString: argOut.usesPrintString,
+                  state: argOut.state,
+                }: ExprEmit
               } else if (op == "print") {
-                let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                let printFn = if (isStringTy(arg.node.ty)) { "__wm_print_string" } else { "__wm_print" }
                 {
                   lines: List.append(
                     argOut.lines,
-                    withNodeComment(callee.node, "__wm_print(" ++ argOut.exprText ++ ");", sourceText),
+                    withNodeComment(callee.node, printFn ++ "(" ++ argOut.exprText ++ ");", sourceText),
                   ),
                   exprText: "0",
                   helperFns: argOut.helperFns,
                   usesPrint: true || argOut.usesPrint,
+                  usesPrintString: isStringTy(arg.node.ty) || argOut.usesPrintString,
                   state: argOut.state,
                 }: ExprEmit
               } else {
-                let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
-                let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+                let calleeOut = emitExpr(rawModule, callee, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, calleeOut.state, sourceText)
                 appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
               },
             _ =>
-              if (op == "print") {
-                let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+              if (hasConstructorName(rawModule, op)) {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                {
+                  lines: argOut.lines,
+                  exprText: ".{ .tag = \"" ++ op ++ "\", .payload = " ++ argOut.exprText ++ " }",
+                  helperFns: argOut.helperFns,
+                  usesPrint: argOut.usesPrint,
+                  usesPrintString: argOut.usesPrintString,
+                  state: argOut.state,
+                }: ExprEmit
+              } else if (hasRecordTypeName(rawModule, op)) {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                {
+                  lines: argOut.lines,
+                  exprText: argOut.exprText,
+                  helperFns: argOut.helperFns,
+                  usesPrint: argOut.usesPrint,
+                  usesPrintString: argOut.usesPrintString,
+                  state: argOut.state,
+                }: ExprEmit
+              } else if (op == "print") {
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+                let printFn = if (isStringTy(arg.node.ty)) { "__wm_print_string" } else { "__wm_print" }
                 {
                   lines: List.append(
                     argOut.lines,
-                    withNodeComment(callee.node, "__wm_print(" ++ argOut.exprText ++ ");", sourceText),
+                    withNodeComment(callee.node, printFn ++ "(" ++ argOut.exprText ++ ");", sourceText),
                   ),
                   exprText: "0",
                   helperFns: argOut.helperFns,
                   usesPrint: true || argOut.usesPrint,
+                  usesPrintString: isStringTy(arg.node.ty) || argOut.usesPrintString,
                   state: argOut.state,
                 }: ExprEmit
               } else {
-                let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
-                let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+                let calleeOut = emitExpr(rawModule, callee, env, fnEnv, state, sourceText)
+                let argOut = emitExpr(rawModule, arg, env, fnEnv, calleeOut.state, sourceText)
                 appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
               },
           },
           },
         WmcTCoreNorm.NEIdent(name) when name == "print" => {
-          let argOut = emitExpr(arg, env, fnEnv, state, sourceText)
+          let argOut = emitExpr(rawModule, arg, env, fnEnv, state, sourceText)
+          let printFn = if (isStringTy(arg.node.ty)) { "__wm_print_string" } else { "__wm_print" }
           {
             lines: List.append(
               argOut.lines,
-              withNodeComment(callee.node, "__wm_print(" ++ argOut.exprText ++ ");", sourceText),
+              withNodeComment(callee.node, printFn ++ "(" ++ argOut.exprText ++ ");", sourceText),
             ),
             exprText: "0",
             helperFns: argOut.helperFns,
             usesPrint: true || argOut.usesPrint,
+            usesPrintString: isStringTy(arg.node.ty) || argOut.usesPrintString,
             state: argOut.state,
           }: ExprEmit
         },
         _ => {
-          let calleeOut = emitExpr(callee, env, fnEnv, state, sourceText)
-          let argOut = emitExpr(arg, env, fnEnv, calleeOut.state, sourceText)
+          let calleeOut = emitExpr(rawModule, callee, env, fnEnv, state, sourceText)
+          let argOut = emitExpr(rawModule, arg, env, fnEnv, calleeOut.state, sourceText)
           appendExprEmit(calleeOut, argOut, calleeOut.exprText ++ "(" ++ argOut.exprText ++ ")")
         },
       },
   }
 
 let emitFunctionFromExpr = (
+  rawModule: WmcTCore.Module,
   fnName: String,
   paramOpt: Option<(String, String)>,
   resultTy: String,
@@ -837,7 +1290,7 @@ let emitFunctionFromExpr = (
       ([(paramName, paramZig)], paramZig ++ ": " ++ paramTy)
     },
   }
-let out = emitExpr(expr, env, [], state, sourceText)
+let out = emitExpr(rawModule, expr, env, [], state, sourceText)
   let headerSourceNode = match (headerNode) {
     Some(node) => node,
     None => expr.node,
@@ -864,6 +1317,7 @@ let out = emitExpr(expr, env, [], state, sourceText)
       ),
     ),
     usesPrint: out.usesPrint,
+    usesPrintString: out.usesPrintString,
     state: out.state,
   }: FunctionEmit
 }
@@ -903,6 +1357,16 @@ let rec inlineTopSimpleCallsOnly = (
     WmcTCoreNorm.NELit(_) => expr.kind,
     WmcTCoreNorm.NEIdent(_) => expr.kind,
     WmcTCoreNorm.NEUnknown(_) => expr.kind,
+    WmcTCoreNorm.NERecordLit(items) =>
+      WmcTCoreNorm.NERecordLit(
+        List.map((item: WmcTCoreNorm.RecordItem) =>
+          match (item) {
+            WmcTCoreNorm.NRField(name, value) => WmcTCoreNorm.NRField(name, inlineTopSimpleCallsOnly(value, defs)),
+            WmcTCoreNorm.NRSpread(value) => WmcTCoreNorm.NRSpread(inlineTopSimpleCallsOnly(value, defs)),
+          },
+          items,
+        )
+      ),
     WmcTCoreNorm.NETuple(items) =>
       WmcTCoreNorm.NETuple(List.map((item: WmcTCoreNorm.Expr) => inlineTopSimpleCallsOnly(item, defs), items)),
     WmcTCoreNorm.NELambda(param, body) =>
@@ -1003,6 +1467,7 @@ provide let emitProgramDirectNoOpt = (
       [def, ...tail] => {
         let (paramTy, returnTy) = findTopFunctionType(rawModule, def.name)
         let emitted = emitFunctionFromExpr(
+          rawModule,
           def.name,
           Some((def.param, paramTy)),
           returnTy,
@@ -1028,6 +1493,7 @@ provide let emitProgramDirectNoOpt = (
     _ => inlinedMainExpr,
   }
   let emittedMain0 = emitFunctionFromExpr(
+    rawModule,
     wmFunctionName,
     None,
     mainResultType,
@@ -1046,6 +1512,7 @@ provide let emitProgramDirectNoOpt = (
     emittedMain0
   } else {
     emitFunctionFromExpr(
+      rawModule,
       wmFunctionName,
       None,
       effectiveMainResultType,
@@ -1060,6 +1527,9 @@ provide let emitProgramDirectNoOpt = (
     "const std = @import(\"std\");\n"
       ++ "fn __wm_print(value: anytype) void {\n"
       ++ "  std.debug.print(\"{}\\n\", .{value});\n"
+      ++ "}\n\n"
+      ++ "fn __wm_print_string(value: []const u8) void {\n"
+      ++ "  std.debug.print(\"{s}\\n\", .{value});\n"
       ++ "}\n\n"
   } else {
     ""

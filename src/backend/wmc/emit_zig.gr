@@ -454,15 +454,16 @@ let rec emitUnifiedRValue = (rhs: WmcMir.UnifiedRValue, mapping: List<(String, S
     WmcMir.URLit(CoreAst.Bool(true)) => "true",
     WmcMir.URLit(CoreAst.Bool(false)) => "false",
     WmcMir.URLit(CoreAst.Unit) => "0",
-    WmcMir.URLit(CoreAst.Char(_)) => "0",
-    WmcMir.URLit(CoreAst.Str(_)) => "0",
-    WmcMir.URLit(CoreAst.Byte(_)) => "0",
+    WmcMir.URLit(CoreAst.Char(ch)) => toString(Char.code(ch)),
+    WmcMir.URLit(CoreAst.Str(s)) => "\"" ++ String.replaceAll("\"", "\\\"", String.replaceAll("\\", "\\\\", String.replaceAll("\n", "\\n", String.replaceAll("\r", "\\r", String.replaceAll("\t", "\\t", s))))) ++ "\"",
+    WmcMir.URLit(CoreAst.Byte(n)) => toString(n),
     WmcMir.URVar(name) => lookupNameMap(mapping, name),
     WmcMir.URCall(callee, arg) =>
       lookupNameMap(mapping, callee) ++ "(" ++ lookupNameMap(mapping, arg) ++ ")",
     WmcMir.URBinOp(op, left, right) =>
       "(" ++ lookupNameMap(mapping, left) ++ " " ++ op ++ " " ++ lookupNameMap(mapping, right) ++ ")",
-    WmcMir.URTuple(_) => "0",
+    WmcMir.URTuple(items) =>
+      ".{ " ++ joinStrings(", ", List.map((item: String) => lookupNameMap(mapping, item), items)) ++ " }",
   }
 
 let referencedVarsInRValue = (rhs: WmcMir.UnifiedRValue) =>
@@ -577,11 +578,14 @@ let inferIntTypeNameFromUnifiedCfg = (blocks: List<WmcMir.UnifiedBlock>) => {
   }
 }
 
-provide let zigTypeNameFromType = (ty: Types.Type) =>
+provide let rec zigTypeNameFromType = (ty: Types.Type) =>
   match (ty) {
     Types.TBool => "bool",
     Types.TNumber => "comptime_int",
+    Types.TString => "[]const u8",
     Types.TByte => "u8",
+    Types.TChar => "u8",
+    Types.TTuple(items) => "struct { " ++ joinStrings(", ", List.map(zigTypeNameFromType, items)) ++ " }",
     Types.TNominal(name, []) =>
       if (name == "U8" || name == "u8") {
         "u8"
@@ -607,12 +611,17 @@ provide let zigTypeNameFromType = (ty: Types.Type) =>
         "comptime_int"
       } else if (name == "Bool" || name == "bool") {
         "bool"
+      } else if (name == "String" || name == "string") {
+        "[]const u8"
+      } else if (name == "Byte" || name == "byte") {
+        "u8"
       } else if (name == "Void" || name == "void") {
         "void"
       } else {
         "comptime_int"
       },
     Types.TNominal("Bool", _args) => "bool",
+    Types.TNominal("String", _args) => "[]const u8",
     Types.TNominal("Void", _args) => "void",
     Types.TVoid => "void",
     _ => "comptime_int",

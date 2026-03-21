@@ -351,3 +351,159 @@ let main = => {
     throw new Error(`expected "5", got ${JSON.stringify(output)}`);
   }
 });
+
+Deno.test("wm run supports printing tuple literals", async () => {
+  const result = await runViaCliRun(
+    `let main = => { print((1, 2)) };`,
+  );
+  if (result.code !== 0) {
+    throw new Error(`expected exit code 0, got ${result.code}`);
+  }
+  if (!result.output.includes("1") || !result.output.includes("2")) {
+    throw new Error(`expected tuple output, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm run supports tuple values through local bindings", async () => {
+  const result = await runViaCliRun(
+    `let main = => {
+  let pair = (true, 7);
+  print(pair)
+};`,
+  );
+  if (result.code !== 0) {
+    throw new Error(`expected exit code 0, got ${result.code}`);
+  }
+  if (!result.output.includes("true") || !result.output.includes("7")) {
+    throw new Error(`expected tuple binding output, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm run supports string literal printing", async () => {
+  const result = await runViaCliRun(
+    `let main = => { print("hello") };`,
+  );
+  if (result.code !== 0) {
+    throw new Error(`expected exit code 0, got ${result.code}`);
+  }
+  if (!result.output.includes("hello")) {
+    throw new Error(`expected string output, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm run supports nominal record literal values", async () => {
+  const result = await runViaCliRun(
+    `record Location = { x: Int, y: Int };
+let main = => {
+  let loc: Location = .{ x = 1, y = 2 };
+  print(loc)
+};`,
+  );
+  if (result.code !== 0) {
+    throw new Error(`expected exit code 0, got ${result.code}`);
+  }
+  if (!result.output.includes("x") || !result.output.includes("1") || !result.output.includes("2")) {
+    throw new Error(`expected record output, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm run supports nominal constructor values", async () => {
+  const result = await runViaCliRun(
+    `type Option<T> = Some<T> | None;
+let main = => {
+  print(Some(1));
+  print(None)
+};`,
+  );
+  if (result.code !== 0) {
+    throw new Error(`expected exit code 0, got ${result.code}`);
+  }
+  if (!result.output.includes("payload = 1") || !result.output.includes("tag")) {
+    throw new Error(`expected constructor output, got ${JSON.stringify(result.output)}`);
+  }
+});
+
+Deno.test("wm compile supports nominal record projection", async () => {
+  const { output } = await compileAndRunViaCli(
+    `record Location = { x: Int, y: Int };
+let main = => {
+  let loc: Location = .{ x = 1, y = 2 };
+  loc.x
+};`,
+  );
+  if (output !== "1") {
+    throw new Error(`expected "1", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports constructor-style nominal record construction", async () => {
+  const { output } = await compileAndRunViaCli(
+    `record Operation = { direction: Int, distance: Int };
+let main = => {
+  let op = Operation{ direction = 1, distance = 2 };
+  op.distance
+};`,
+  );
+  if (output !== "2") {
+    throw new Error(`expected "2", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports ADT match payload binding", async () => {
+  const { output } = await compileAndRunViaCli(
+    `type Option<T> = Some<T> | None;
+let main = => {
+  match(Some(7)) {
+    Some(v) => { v }
+    None => { 0 }
+  }
+};`,
+  );
+  if (output !== "7") {
+    throw new Error(`expected "7", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports ADT match fallback arm", async () => {
+  const { output } = await compileAndRunViaCli(
+    `type Option<T> = Some<T> | None;
+let main = => {
+  match(None) {
+    Some(v) => { v }
+    None => { 11 }
+  }
+};`,
+  );
+  if (output !== "11") {
+    throw new Error(`expected "11", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports tuple pattern matching", async () => {
+  const { output } = await compileAndRunViaCli(
+    `let main = => {
+  match((3, 4)) {
+    (Var(x), Var(y)) => { x + y }
+  }
+};`,
+  );
+  if (output !== "7") {
+    throw new Error(`expected "7", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile supports guarded ADT matches", async () => {
+  const { output } = await compileAndRunViaCli(
+    `type Option<T> = Some<T> | None;
+let main = => {
+  match(Some(8)) {
+    Some(v) when true => { v }
+    Some(v) => { v + 100 }
+    None => { 0 }
+  }
+};`,
+  );
+  if (output !== "8") {
+    throw new Error(`expected "8", got ${JSON.stringify(output)}`);
+  }
+});
