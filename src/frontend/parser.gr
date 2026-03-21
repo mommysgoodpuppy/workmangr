@@ -2846,11 +2846,11 @@ and parseOpDeclTopItem = (state: ParseState) => {
   let (entries, state4) = parseRuleBlock(state3)
   let span = spanFromTokens(opTok.span, currentToken(state4).span)
   let (declId, state5) = freshId(state4)
-  let opDecl: SurfaceAst.OpDecl = {
+  let opDecl = {
     node: { id: declId, span },
     name: name,
     entries: entries,
-  }
+  }: SurfaceAst.OpDecl
   let decl: SurfaceAst.Decl = SurfaceAst.OpDecl(
     opDecl,
   )

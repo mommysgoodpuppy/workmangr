@@ -1,10 +1,8 @@
 module Cli
 
 from "array" include Array
-from "fs" include Fs
 from "map" include Map
 from "number" include Number
-from "path" include Path
 from "string" include String
 from "wasi/process" include Process
 
@@ -219,8 +217,7 @@ let main = () => {
           && cmd != "compile"
           && cmd != "inlay" => exitWith(1, usage),
         (_, Some(filePath)) => {
-          let path = Path.fromString(filePath)
-          match (Fs.Utf8.readFile(path)) {
+          match (ModuleSystem.readTextFile(filePath, ".", None)) {
             Err(fsErr) =>
               exitWith(
                 1,

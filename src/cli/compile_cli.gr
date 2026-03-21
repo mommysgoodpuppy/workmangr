@@ -116,7 +116,7 @@ provide let compileFile = (filePath: String, stdRoot: Option<String>, optimize: 
     None => baseOptions,
   }
 
-  let sourceText = match (Fs.Utf8.readFile(Path.fromString(filePath))) {
+  let sourceText = match (ModuleSystem.readTextFile(filePath, ".", None)) {
     Ok(src) => Some(src),
     Err(_) => None,
   }
@@ -134,7 +134,8 @@ provide let compileFile = (filePath: String, stdRoot: Option<String>, optimize: 
             ),
           Some(zigSource) => {
             let outPath = compileOutputPath(filePath)
-            match (Fs.Utf8.writeFile(Path.fromString(outPath), zigSource)) {
+            // Wasmtime on Windows rejects Grain's default sync file IO flags.
+            match (Fs.Utf8.writeFile(sync=false, Path.fromString(outPath), zigSource)) {
               Ok(_) => Ok(outPath),
               Err(fsErr) =>
                 Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),

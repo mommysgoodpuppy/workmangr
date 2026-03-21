@@ -213,6 +213,110 @@ let mkError = (message: String) => {
   )
 }
 
+let ensureFsPrimed = () => {
+  if (!fsPrimed) {
+    // Wasmtime on Windows rejects Grain's default sync reads (`Rsync`) for regular files.
+    let _ = Fs.Utf8.readFile(sync=false, Path.fromString("."))
+    fsPrimed = true
+  } else {
+    void
+  }
+}
+
+let wasiPath = (candidate: String) =>
+  if (
+    isAbsolutePath(candidate)
+    || String.startsWith("./", candidate)
+    || String.startsWith("../", candidate)
+  ) {
+    candidate
+  } else {
+    "./" ++ candidate
+  }
+
+let isWindowsDrivePath = (path: String) =>
+  String.length(path) > 1 && String.charAt(1, path) == ':'
+
+let pathVariants = (candidate: String) => {
+  if (!isWindowsDrivePath(candidate)) {
+    [candidate]
+  } else {
+    let slash = String.replaceAll("\\", "/", candidate)
+    let back = String.replaceAll("/", "\\", candidate)
+    if (candidate == slash && candidate == back) {
+      [candidate]
+    } else if (candidate == slash) {
+      [candidate, back]
+    } else if (candidate == back) {
+      [candidate, slash]
+    } else if (slash == back) {
+      [candidate, slash]
+    } else {
+      [candidate, slash, back]
+    }
+  }
+}
+
+let tryReadCandidate = (candidate: String) => {
+  let rec loop = (variants: List<String>) => {
+    match (variants) {
+      [] => Err(Fs.NoSuchFileOrDirectory),
+      [variant] => {
+        let path = wasiPath(variant)
+        ensureFsPrimed()
+        Fs.Utf8.readFile(sync=false, Path.fromString(path))
+      },
+      [variant, ...rest] => {
+        let path = wasiPath(variant)
+        ensureFsPrimed()
+        match (Fs.Utf8.readFile(sync=false, Path.fromString(path))) {
+          Ok(source) => Ok(source),
+          Err(_) => loop(rest),
+        }
+      },
+    }
+  }
+  loop(pathVariants(candidate))
+}
+
+provide let readTextFile = (
+  filePath: String,
+  rootDir: String,
+  debugLog: Option<String => Void>,
+) => {
+  let absPath = absolutePathFor(filePath, rootDir)
+  let relPath = relativeToRoot(absPath, rootDir)
+  let candidates = if (isAbsolutePath(filePath)) {
+    [relPath, absPath, filePath]
+  } else {
+    [filePath, relPath, absPath]
+  }
+  let rec loop = (remaining: List<String>) => {
+    match (remaining) {
+      [] => {
+        ensureFsPrimed()
+        Fs.Utf8.readFile(sync=false, Path.fromString("__workman_missing_module__.wm"))
+      },
+      [candidate] => {
+        tryReadCandidate(candidate)
+      },
+      [candidate, ...rest] => {
+        match (tryReadCandidate(candidate)) {
+          Ok(source) => Ok(source),
+          Err(_) => loop(rest),
+        }
+      },
+    }
+  }
+  let result = loop(candidates)
+  match ((result, debugLog)) {
+    (Err(err), Some(logFn)) =>
+      logFn("[MS graph] readTextFile missing path=" ++ filePath ++ " err=" ++ toString(err)),
+    _ => void,
+  }
+  result
+}
+
 let getModuleDiagnostics = (
   moduleId: String,
   diagnosticsById: Map.Map<String, List<Error.CompilerError>>,
@@ -270,105 +374,10 @@ let resolveSpecifier = (
 }
 
 let readSource = (moduleId: String, options: BuildOptions) => {
-  let ensureFsPrimed = () => {
-    if (!fsPrimed) {
-      let _ = Fs.Utf8.readFile(Path.fromString("."))
-      fsPrimed = true
-    } else {
-      void
-    }
-  }
-  let wasiPath = (candidate: String) =>
-    if (
-      isAbsolutePath(candidate)
-      || String.startsWith("./", candidate)
-      || String.startsWith("../", candidate)
-    ) {
-      candidate
-    } else {
-      "./" ++ candidate
-    }
-  let isWindowsDrivePath = (path: String) =>
-    String.length(path) > 1 && String.charAt(1, path) == ':'
-  let pathVariants = (candidate: String) => {
-    if (!isWindowsDrivePath(candidate)) {
-      [candidate]
-    } else {
-      let slash = String.replaceAll("\\", "/", candidate)
-      let back = String.replaceAll("/", "\\", candidate)
-      if (candidate == slash && candidate == back) {
-        [candidate]
-      } else if (candidate == slash) {
-        [candidate, back]
-      } else if (candidate == back) {
-        [candidate, slash]
-      } else if (slash == back) {
-        [candidate, slash]
-      } else {
-        [candidate, slash, back]
-      }
-    }
-  }
-  let tryReadCandidate = (candidate: String) => {
-    let rec loop = (variants: List<String>) => {
-      match (variants) {
-        [] => Err(Fs.NoSuchFileOrDirectory),
-        [variant] => {
-          let path = wasiPath(variant)
-          ensureFsPrimed()
-          Fs.Utf8.readFile(Path.fromString(path))
-        },
-        [variant, ...rest] => {
-          let path = wasiPath(variant)
-          ensureFsPrimed()
-          match (Fs.Utf8.readFile(Path.fromString(path))) {
-            Ok(source) => Ok(source),
-            Err(_) => loop(rest),
-          }
-        },
-      }
-    }
-    loop(pathVariants(candidate))
-  }
-  let tryRead = (candidates: List<String>) => {
-    let rec loop = (remaining: List<String>) => {
-      match (remaining) {
-        [] => {
-          ensureFsPrimed()
-          Fs.Utf8.readFile(Path.fromString("__workman_missing_module__.wm"))
-        },
-        [candidate] => {
-          tryReadCandidate(candidate)
-        },
-        [candidate, ...rest] => {
-          match (tryReadCandidate(candidate)) {
-            Ok(source) => Ok(source),
-            Err(_) => loop(rest),
-          }
-        },
-      }
-    }
-    loop(candidates)
-  }
   match (Map.get(moduleId, options.sourceOverrides)) {
     Some(text) => Ok(text),
     None => {
-      let absPath = absolutePathFor(moduleId, options.rootDir)
-      let relPath = relativeToRoot(absPath, options.rootDir)
-      let result = if (isAbsolutePath(moduleId)) {
-        tryRead([relPath, absPath, moduleId])
-      } else {
-        tryRead([moduleId, relPath, absPath])
-      }
-      match (result) {
-        Ok(_) => void,
-        Err(err) =>
-          log(
-            options,
-            "readSource missing module=" ++ moduleId ++ " err=" ++ toString(err)
-          ),
-      }
-      result
+      readTextFile(moduleId, rootDir=options.rootDir, debugLog=options.debugLog)
     },
   }
 }
