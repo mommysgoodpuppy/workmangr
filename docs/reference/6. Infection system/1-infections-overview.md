@@ -46,3 +46,6 @@ Each domain defines:
 The formal domain model is specified in:
 - `plans/workmancanonical/6. Infection system/2-infection-types-and-composition.md`
 
+The flow/versioning layer that determines where infection may propagate is
+specified in:
+- `plans/workmancanonical/6. Infection system/4-flow-versioning-and-capture.md`

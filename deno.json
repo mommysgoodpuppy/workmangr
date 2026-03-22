@@ -5,6 +5,7 @@
     "test:wmc-conformance": "deno run --allow-run scripts/test_wmc_conformance.ts",
     "test:unix": "grain compile lib/runner.gr -o runner.wasm && wasmtime --dir . runner.wasm -- --shell ./tests | sh",
     "test:discover": "wasmtime --dir . runner.wasm -- ./tests",
-    "clean": "deno run -A scripts/clean_grain_cache.ts"
+    "clean": "deno run -A scripts/clean_grain_cache.ts",
+    "docs:reference": "deno run --allow-read --allow-write docs/reference/combine_md.ts"
   }
 }

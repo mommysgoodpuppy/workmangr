@@ -152,12 +152,57 @@ Deno.test("wm compile runs immediate lambda call arithmetic", async () => {
 });
 
 Deno.test("wm compile runs top-level simple function call via inlining", async () => {
-  const { output } = await compileAndRunViaCli(
+  const { emitted, output } = await compileAndRunViaCli(
     `let inc = (x) => { x + 1 };
 let main = => { inc(1) };`,
   );
+  if (!emitted.includes("inc(1)")) {
+    throw new Error(`expected emitted direct call, got:\n${emitted}`);
+  }
+  if (emitted.includes("const x = 1;")) {
+    throw new Error(`expected direct backend to avoid inlining top-level call, got:\n${emitted}`);
+  }
   if (output !== "2") {
     throw new Error(`expected "2", got ${JSON.stringify(output)}`);
+  }
+});
+
+Deno.test("wm compile preserves top-level calls in complex printed program", async () => {
+  const { emitted, output } = await compileAndRunViaCli(
+    `let inc = (x) => {
+  x + 1
+};
+
+let mul2 = (x) => {
+  x * 2
+};
+
+let main = => {
+  let base = 10;
+  let a = inc(base);
+  let local = (n) => {
+    n * 3
+  };
+  let b = local(a) + mul2(a);
+  let c = if (true) {
+    b + 5
+  } else {
+    b - 5
+  };
+  print(c)
+};`,
+  );
+  if (!emitted.includes("const a = inc(base);")) {
+    throw new Error(`expected top-level call to stay as a call, got:\n${emitted}`);
+  }
+  if (!emitted.includes("const b = (local(a) + mul2(a));")) {
+    throw new Error(`expected nested top-level call to stay as a call, got:\n${emitted}`);
+  }
+  if (emitted.includes("const x = base;") || emitted.includes("const x = a;")) {
+    throw new Error(`expected no inlined parameter temporaries, got:\n${emitted}`);
+  }
+  if (output !== "60") {
+    throw new Error(`expected "60", got ${JSON.stringify(output)}`);
   }
 });
 
