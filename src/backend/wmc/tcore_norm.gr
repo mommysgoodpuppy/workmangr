@@ -69,6 +69,8 @@ provide record TopValueBinding {
 provide record Module {
   moduleId: String,
   values: List<TopValueBinding>,
+  bindingInfos: List<WmcTCore.BindingInfo>,
+  functionInfos: List<WmcTCore.FunctionInfo>,
   typeInfos: List<WmcTCore.TypeInfo>,
   typeDeclNames: List<String>,
   recordDeclNames: List<String>,
@@ -332,6 +334,8 @@ provide let normalizeModule = (m: WmcTCore.Module) =>
   {
     moduleId: m.moduleId,
     values: List.map(normalizeTopValueBinding, m.values),
+    bindingInfos: m.bindingInfos,
+    functionInfos: m.functionInfos,
     typeInfos: m.typeInfos,
     typeDeclNames: m.typeDeclNames,
     recordDeclNames: m.recordDeclNames,

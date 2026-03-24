@@ -234,7 +234,7 @@ let atomLiteralToZig = (lit: CoreAst.AtomLiteral) =>
     CoreAst.Int(n) => toString(n),
     CoreAst.Bool(true) => "true",
     CoreAst.Bool(false) => "false",
-    CoreAst.Unit => "0",
+    CoreAst.Unit => "{}",
     CoreAst.Byte(n) => toString(n),
     CoreAst.Char(ch) => toString(Char.code(ch)),
     CoreAst.Str(s) =>
@@ -452,40 +452,26 @@ let hasRecordTypeName = (m: WmcTCore.Module, target: String) => {
   loop(m.typeInfos)
 }
 
-let rec freeNamesExpr = (expr: WmcTCoreNorm.Expr, bound: List<String>) =>
-  match (expr.kind) {
-    WmcTCoreNorm.NELit(_) => [],
-    WmcTCoreNorm.NEUnknown(_) => [],
-    WmcTCoreNorm.NEIdent(name) =>
-      if (containsString(bound, name) || isIntrinsicName(name)) { [] } else { [name] },
-    WmcTCoreNorm.NERecordLit(items) =>
-      dedupeStrings(List.flatten(List.map((item: WmcTCoreNorm.RecordItem) =>
-        match (item) {
-          WmcTCoreNorm.NRField(_, value) => freeNamesExpr(value, bound),
-          WmcTCoreNorm.NRSpread(value) => freeNamesExpr(value, bound),
-        }, items))),
-    WmcTCoreNorm.NETuple(items) =>
-      dedupeStrings(List.flatten(List.map((item: WmcTCoreNorm.Expr) => freeNamesExpr(item, bound), items))),
-    WmcTCoreNorm.NELambda(param, body) => freeNamesExpr(body, [param, ...bound]),
-    WmcTCoreNorm.NEApply(callee, arg) =>
-      dedupeStrings(List.append(freeNamesExpr(callee, bound), freeNamesExpr(arg, bound))),
-    WmcTCoreNorm.NEMatch(m) => {
-      let scrut = freeNamesExpr(m.scrutinee, bound)
-      let clauseVars = List.flatten(List.map((clause: WmcTCoreNorm.MatchClause) => {
-        let guardVars = match (clause.guard) {
-          None => [],
-          Some(g) => freeNamesExpr(g, bound),
-        }
-        dedupeStrings(List.append(guardVars, freeNamesExpr(clause.body, bound)))
-      }, m.clauses))
-      dedupeStrings(List.append(scrut, clauseVars))
-    },
-    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
-      dedupeStrings(List.append(
-        freeNamesExpr(valueExpr, bound),
-        freeNamesExpr(bodyExpr, [name, ...bound]),
-      )),
+let functionInfoForNode = (rawModule: WmcTCore.Module, nodeId: Number) => {
+  let rec loop = (rest: List<WmcTCore.FunctionInfo>) =>
+    match (rest) {
+      [] => None,
+      [info, ...tail] => if (info.nodeId == nodeId) { Some(info) } else { loop(tail) },
+    }
+  loop(rawModule.functionInfos)
+}
+
+let capturedNamesForLambda = (
+  rawModule: WmcTCore.Module,
+  lambdaNodeId: Number,
+) =>
+  match (functionInfoForNode(rawModule, lambdaNodeId)) {
+    Some(info) => info.capturedNames,
+    None => [],
   }
+
+let thunkParamZigName = (param: String) =>
+  if (param == WmcTCoreNorm.zeroArgThunkParamName) { "_" } else { sanitizeLocalBase(param) }
 
 let rec decomposeLetLambdaValue = (expr: WmcTCoreNorm.Expr) =>
   match (expr.kind) {
@@ -753,14 +739,14 @@ and emitExpr:
               None => None,
               Some(capturedZigName) => Some((captureName, capturedZigName)),
             },
-            freeNamesExpr(fnBody, [param]),
+            capturedNamesForLambda(rawModule, valueExpr.node.id),
           )
           let (paramTy, returnTy) = match (valueExpr.node.ty) {
             Some(Types.TFun(paramTy, returnTy)) =>
               (WmcEmitZig.zigTypeNameFromType(paramTy), WmcEmitZig.zigTypeNameFromType(returnTy)),
             _ => ("comptime_int", "comptime_int"),
           }
-          let paramZig = sanitizeLocalBase(param)
+          let paramZig = thunkParamZigName(param)
           let fnParamSig = joinStrings(
             ", ",
             List.append(
@@ -915,14 +901,14 @@ and emitExpr:
                   None => None,
                   Some(capturedZigName) => Some((captureName, capturedZigName)),
                 },
-                freeNamesExpr(fnBody, [param]),
+                capturedNamesForLambda(rawModule, lambdaNode.id),
               )
               let (paramTy, returnTy) = match (valueExpr.node.ty) {
                 Some(Types.TFun(paramTy, returnTy)) =>
                   (WmcEmitZig.zigTypeNameFromType(paramTy), WmcEmitZig.zigTypeNameFromType(returnTy)),
                 _ => ("comptime_int", "comptime_int"),
               }
-              let paramZig = sanitizeLocalBase(param)
+              let paramZig = thunkParamZigName(param)
               let fnParamSig = joinStrings(
                 ", ",
                 List.append(
@@ -1286,7 +1272,7 @@ let emitFunctionFromExpr = (
   let (env, paramSig) = match (paramOpt) {
     None => ([], ""),
     Some((paramName, paramTy)) => {
-      let paramZig = sanitizeLocalBase(paramName)
+      let paramZig = thunkParamZigName(paramName)
       ([(paramName, paramZig)], paramZig ++ ": " ++ paramTy)
     },
   }
@@ -1340,74 +1326,6 @@ let findTopFunctionType = (rawModule: WmcTCore.Module, name: String) => {
   loop(rawModule.values)
 }
 
-let findTopDef = (defs: List<WmcExprInline.SimpleFnDef>, target: String) => {
-  let rec loop = (rest: List<WmcExprInline.SimpleFnDef>) =>
-    match (rest) {
-      [] => None,
-      [item, ...tail] => if (item.name == target) { Some(item) } else { loop(tail) },
-    }
-  loop(defs)
-}
-
-let rec inlineTopSimpleCallsOnly = (
-  expr: WmcTCoreNorm.Expr,
-  defs: List<WmcExprInline.SimpleFnDef>,
-) => {
-  let kind = match (expr.kind) {
-    WmcTCoreNorm.NELit(_) => expr.kind,
-    WmcTCoreNorm.NEIdent(_) => expr.kind,
-    WmcTCoreNorm.NEUnknown(_) => expr.kind,
-    WmcTCoreNorm.NERecordLit(items) =>
-      WmcTCoreNorm.NERecordLit(
-        List.map((item: WmcTCoreNorm.RecordItem) =>
-          match (item) {
-            WmcTCoreNorm.NRField(name, value) => WmcTCoreNorm.NRField(name, inlineTopSimpleCallsOnly(value, defs)),
-            WmcTCoreNorm.NRSpread(value) => WmcTCoreNorm.NRSpread(inlineTopSimpleCallsOnly(value, defs)),
-          },
-          items,
-        )
-      ),
-    WmcTCoreNorm.NETuple(items) =>
-      WmcTCoreNorm.NETuple(List.map((item: WmcTCoreNorm.Expr) => inlineTopSimpleCallsOnly(item, defs), items)),
-    WmcTCoreNorm.NELambda(param, body) =>
-      WmcTCoreNorm.NELambda(param, inlineTopSimpleCallsOnly(body, defs)),
-    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
-      WmcTCoreNorm.NELet(
-        name,
-        inlineTopSimpleCallsOnly(valueExpr, defs),
-        inlineTopSimpleCallsOnly(bodyExpr, defs),
-      ),
-    WmcTCoreNorm.NEMatch(m) =>
-      WmcTCoreNorm.NEMatch({
-        ...m,
-        scrutinee: inlineTopSimpleCallsOnly(m.scrutinee, defs),
-        clauses: List.map((clause: WmcTCoreNorm.MatchClause) => {
-          {
-            ...clause,
-            guard: match (clause.guard) {
-              None => None,
-              Some(g) => Some(inlineTopSimpleCallsOnly(g, defs)),
-            },
-            body: inlineTopSimpleCallsOnly(clause.body, defs),
-          }: WmcTCoreNorm.MatchClause
-        }, m.clauses),
-      }),
-    WmcTCoreNorm.NEApply(callee, arg) => {
-      let callee2 = inlineTopSimpleCallsOnly(callee, defs)
-      let arg2 = inlineTopSimpleCallsOnly(arg, defs)
-      match (callee2.kind) {
-        WmcTCoreNorm.NEIdent(name) =>
-          match (findTopDef(defs, name)) {
-            Some(def) => WmcTCoreNorm.NELet(def.param, arg2, def.body),
-            None => WmcTCoreNorm.NEApply(callee2, arg2),
-          },
-        _ => WmcTCoreNorm.NEApply(callee2, arg2),
-      }
-    },
-  }
-  { node: expr.node, kind }: WmcTCoreNorm.Expr
-}
-
 let collectTopLiteralConsts = (
   rawModule: WmcTCore.Module,
   sourceText: Option<String>,
@@ -1449,7 +1367,6 @@ provide let emitProgramDirectNoOpt = (
   let topConsts = collectTopLiteralConsts(rawModule, sourceText)
   let defs = List.filter((def: WmcExprInline.SimpleFnDef) => def.name != "main",
     WmcExprInline.collectSimpleTopFnDefs(rawModule))
-  let inlinedMainExpr = inlineTopSimpleCallsOnly(mainExpr, defs)
   let safeDefs = List.filter((def: WmcExprInline.SimpleFnDef) =>
     match (def.body.kind) {
       WmcTCoreNorm.NELambda(_, _) => false,
@@ -1488,9 +1405,9 @@ provide let emitProgramDirectNoOpt = (
     }
 
   let (defSources, st1, defUsesPrint) = emitDefs(safeDefs, emptyState, [], false)
-  let mainExecutableExpr = match (inlinedMainExpr.kind) {
+  let mainExecutableExpr = match (mainExpr.kind) {
     WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName => body,
-    _ => inlinedMainExpr,
+    _ => mainExpr,
   }
   let emittedMain0 = emitFunctionFromExpr(
     rawModule,

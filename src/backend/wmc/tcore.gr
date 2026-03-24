@@ -5,13 +5,14 @@ from "map" include Map
 
 from "../../core/source.gr" include Source
 from "../../core/core_ast.gr" include CoreAst
-from "../../core/types.gr" include Types
-from "../../core/infer.gr" include Infer
 from "../../core/env.gr" include Env
 from "../../core/error.gr" include Error
+from "../../core/flow.gr" include Flow
+from "../../core/infer.gr" include Infer
 from "../../core/infection_registry.gr" include InfectionRegistry
 from "../../core/module_infer.gr" include ModuleInfer
 from "../../core/layer1/expr.gr" include Layer1Expr
+from "../../core/types.gr" include Types
 
 provide record TypedNode {
   id: Number,
@@ -105,9 +106,28 @@ provide record TypeInfo {
   infection: Option<String>,
 }
 
+provide record BindingInfo {
+  bindingId: Number,
+  name: String,
+  scopeId: Number,
+  bindingKind: String,
+}
+
+provide record FunctionInfo {
+  fnId: Number,
+  nodeId: Number,
+  scopeId: Number,
+  paramBindingId: Option<Number>,
+  capturedBindings: List<Number>,
+  capturedNames: List<String>,
+  callMode: String,
+}
+
 provide record Module {
   moduleId: String,
   values: List<TopValueBinding>,
+  bindingInfos: List<BindingInfo>,
+  functionInfos: List<FunctionInfo>,
   typeInfos: List<TypeInfo>,
   typeDeclNames: List<String>,
   recordDeclNames: List<String>,
@@ -152,6 +172,49 @@ let projectTypeInfo = (info: Env.TypeInfo) =>
     ),
     infection: info.infection,
   }: TypeInfo
+
+let bindingKindLabel = (kind: Flow.BindingKind) =>
+  match (kind) {
+    Flow.BuiltinBinding => "builtin",
+    Flow.LetBinding => "let",
+    Flow.ParamBinding => "param",
+    Flow.PatternBinding => "pattern",
+    Flow.RecBinding => "rec",
+  }
+
+let callModeLabel = (mode: Flow.CallMode) =>
+  match (mode) {
+    Flow.UnitThunk => "unit_thunk",
+    Flow.UnaryValue => "unary_value",
+  }
+
+let bindingNameById = (ctx: ProjectCtx, bindingId: Number) =>
+  match (Map.get(bindingId, ctx.infer.flow.bindingInfos)) {
+    Some(info) => Some(info.name),
+    None => None,
+  }
+
+let projectBindingInfo = (info: Flow.BindingInfo) =>
+  {
+    bindingId: info.bindingId,
+    name: info.name,
+    scopeId: info.scopeId,
+    bindingKind: bindingKindLabel(info.bindingKind),
+  }: BindingInfo
+
+let projectFunctionInfo = (ctx: ProjectCtx, info: Flow.FunctionInfo) =>
+  {
+    fnId: info.fnId,
+    nodeId: info.nodeId,
+    scopeId: info.scopeId,
+    paramBindingId: info.paramBindingId,
+    capturedBindings: List.reverse(info.capturedBindings),
+    capturedNames: List.filterMap(
+      (bindingId: Number) => bindingNameById(ctx, bindingId),
+      List.reverse(info.capturedBindings)
+    ),
+    callMode: callModeLabel(info.callMode),
+  }: FunctionInfo
 
 let rec projectPattern = (ctx: ProjectCtx, pattern: CoreAst.Pattern) => {
   let kind = match (pattern.kind) {
@@ -357,6 +420,14 @@ let collectRecordDeclNames = (program: CoreAst.Program) => {
 
 provide let fromModuleSummary = (summary: ModuleInfer.ModuleSummary) => {
   let ctx: ProjectCtx = { infer: summary.infer }
+  let bindingInfos = List.map(
+    ((_id, info): (Number, Flow.BindingInfo)) => projectBindingInfo(info),
+    Map.toList(summary.infer.flow.bindingInfos),
+  )
+  let functionInfos = List.map(
+    ((_id, info): (Number, Flow.FunctionInfo)) => projectFunctionInfo(ctx, info),
+    Map.toList(summary.infer.flow.functions),
+  )
   let typeInfos = List.map(
     ((_name, info): (String, Env.TypeInfo)) => projectTypeInfo(info),
     Map.toList(Env.snapshotTypes(summary.infer.env)),
@@ -364,6 +435,8 @@ provide let fromModuleSummary = (summary: ModuleInfer.ModuleSummary) => {
   {
     moduleId: summary.moduleId,
     values: collectTopValueBindings(ctx, summary.program),
+    bindingInfos,
+    functionInfos,
     typeInfos,
     typeDeclNames: collectTypeDeclNames(summary.program),
     recordDeclNames: collectRecordDeclNames(summary.program),

@@ -1,0 +1,293 @@
+module Flow
+
+from "list" include List
+from "map" include Map
+
+from "./types.gr" include Types
+
+provide type DomainIdentities = Map.Map<String, List<Number>>
+
+provide record IdentityUse {
+  nodeId: Number,
+  scopeId: Number,
+  bindingId: Number,
+}
+
+provide enum BindingKind {
+  BuiltinBinding,
+  LetBinding,
+  ParamBinding,
+  PatternBinding,
+  RecBinding,
+}
+
+provide record BindingInfo {
+  bindingId: Number,
+  name: String,
+  scopeId: Number,
+  bindingKind: BindingKind,
+}
+
+provide enum CallMode {
+  UnitThunk,
+  UnaryValue,
+}
+
+provide record FunctionFrame {
+  fnId: Number,
+}
+
+provide record FunctionInfo {
+  fnId: Number,
+  nodeId: Number,
+  scopeId: Number,
+  paramBindingId: Option<Number>,
+  capturedBindings: List<Number>,
+  callMode: CallMode,
+}
+
+provide record ValueEntry {
+  scheme: Types.Scheme,
+  bindingId: Number,
+  scopeId: Number,
+  identities: DomainIdentities,
+  bindingKind: BindingKind,
+}
+
+provide record FlowState {
+  nextBindingId: Number,
+  nextScopeId: Number,
+  nextFunctionId: Number,
+  currentScopeId: Number,
+  exprIdentities: Map.Map<Number, DomainIdentities>,
+  identityUsage: Map.Map<Number, Map.Map<String, List<IdentityUse>>>,
+  bindingInfos: Map.Map<Number, BindingInfo>,
+  functions: Map.Map<Number, FunctionInfo>,
+  functionByNode: Map.Map<Number, Number>,
+  functionStack: List<FunctionFrame>,
+}
+
+provide let emptyDomainIdentities = () => {
+  let identities: DomainIdentities = Map.make()
+  identities
+}
+
+provide let cloneDomainIdentities = (identities: DomainIdentities) => {
+  let out: DomainIdentities = Map.make()
+  List.forEach(((domain, ids): (String, List<Number>)) => {
+    Map.set(domain, ids, out)
+    void
+  }, Map.toList(identities))
+  out
+}
+
+provide let emptyState = () =>
+  {
+    nextBindingId: 1,
+    nextScopeId: 1,
+    nextFunctionId: 1,
+    currentScopeId: 0,
+    exprIdentities: Map.make(),
+    identityUsage: Map.make(),
+    bindingInfos: Map.make(),
+    functions: Map.make(),
+    functionByNode: Map.make(),
+    functionStack: [],
+  }: FlowState
+
+provide let freshBindingId = (flow: FlowState) => {
+  let bindingId = flow.nextBindingId
+  (bindingId, { ...flow, nextBindingId: bindingId + 1 })
+}
+
+provide let freshScopeId = (flow: FlowState) => {
+  let scopeId = flow.nextScopeId
+  (scopeId, { ...flow, nextScopeId: scopeId + 1 })
+}
+
+provide let freshFunctionId = (flow: FlowState) => {
+  let fnId = flow.nextFunctionId
+  (fnId, { ...flow, nextFunctionId: fnId + 1 })
+}
+
+provide let setCurrentScope = (flow: FlowState, scopeId: Number) =>
+  { ...flow, currentScopeId: scopeId }
+
+provide let builtinValueEntry = (scheme: Types.Scheme) =>
+  {
+    scheme,
+    bindingId: 0,
+    scopeId: 0,
+    identities: emptyDomainIdentities(),
+    bindingKind: BuiltinBinding,
+  }: ValueEntry
+
+provide let valueEntry = (
+  scheme: Types.Scheme,
+  bindingId: Number,
+  scopeId: Number,
+  identities: DomainIdentities,
+  bindingKind: BindingKind,
+) =>
+  {
+    scheme,
+    bindingId,
+    scopeId,
+    identities: cloneDomainIdentities(identities),
+    bindingKind,
+  }: ValueEntry
+
+provide let bindScheme = (
+  flow: FlowState,
+  scheme: Types.Scheme,
+  bindingKind: BindingKind,
+  identities: DomainIdentities=emptyDomainIdentities(),
+) => {
+  let (bindingId, flow1) = freshBindingId(flow)
+  (
+    valueEntry(
+      scheme,
+      bindingId,
+      flow1.currentScopeId,
+      identities,
+      bindingKind
+    ),
+    flow1,
+  )
+}
+
+provide let recordExprIdentities = (
+  flow: FlowState,
+  nodeId: Number,
+  identities: DomainIdentities,
+) => {
+  Map.set(nodeId, cloneDomainIdentities(identities), flow.exprIdentities)
+  { ...flow, exprIdentities: flow.exprIdentities }
+}
+
+provide let recordIdentityUsage = (
+  flow: FlowState,
+  domain: String,
+  identityId: Number,
+  nodeId: Number,
+  bindingId: Number,
+) => {
+  let domainMap = match (Map.get(identityId, flow.identityUsage)) {
+    Some(existing) => existing,
+    None => Map.make(),
+  }
+  let uses = match (Map.get(domain, domainMap)) {
+    Some(existing) => existing,
+    None => [],
+  }
+  let usage: IdentityUse = {
+    nodeId,
+    scopeId: flow.currentScopeId,
+    bindingId,
+  }
+  Map.set(domain, [usage, ...uses], domainMap)
+  Map.set(identityId, domainMap, flow.identityUsage)
+  { ...flow, identityUsage: flow.identityUsage }
+}
+
+provide let registerFunction = (flow: FlowState, info: FunctionInfo) => {
+  Map.set(info.fnId, info, flow.functions)
+  Map.set(info.nodeId, info.fnId, flow.functionByNode)
+  { ...flow, functions: flow.functions, functionByNode: flow.functionByNode }
+}
+
+provide let registerBindingInfo = (
+  flow: FlowState,
+  bindingId: Number,
+  name: String,
+  scopeId: Number,
+  bindingKind: BindingKind,
+) => {
+  let info: BindingInfo = {
+    bindingId,
+    name,
+    scopeId,
+    bindingKind,
+  }
+  Map.set(bindingId, info, flow.bindingInfos)
+  { ...flow, bindingInfos: flow.bindingInfos }
+}
+
+let containsBinding = (bindings: List<Number>, target: Number) =>
+  List.some((bindingId: Number) => bindingId == target, bindings)
+
+provide let currentFunctionId = (flow: FlowState) =>
+  match (flow.functionStack) {
+    [frame, ..._] => Some(frame.fnId),
+    [] => None,
+  }
+
+provide let beginFunction = (
+  flow: FlowState,
+  nodeId: Number,
+  scopeId: Number,
+  callMode: CallMode,
+) => {
+  let (fnId, flow1) = freshFunctionId(flow)
+  let info: FunctionInfo = {
+    fnId,
+    nodeId,
+    scopeId,
+    paramBindingId: None,
+    capturedBindings: [],
+    callMode,
+  }
+  let flow2 = registerFunction(flow1, info)
+  let frame: FunctionFrame = { fnId: fnId }
+  (fnId, { ...flow2, functionStack: [frame, ...flow2.functionStack] })
+}
+
+provide let endFunction = (flow: FlowState) =>
+  match (flow.functionStack) {
+    [] => flow,
+    [_frame, ...rest] => { ...flow, functionStack: rest },
+  }
+
+provide let noteFunctionParamBinding = (
+  flow: FlowState,
+  bindingId: Number,
+) =>
+  match (currentFunctionId(flow)) {
+    None => flow,
+    Some(fnId) =>
+      match (Map.get(fnId, flow.functions)) {
+        None => flow,
+        Some(info) => {
+          let nextInfo = match (info.paramBindingId) {
+            Some(_) => info,
+            None => { ...info, paramBindingId: Some(bindingId) },
+          }
+          Map.set(fnId, nextInfo, flow.functions)
+          { ...flow, functions: flow.functions }
+        },
+      },
+  }
+
+provide let noteCapture = (flow: FlowState, bindingId: Number) =>
+  if (bindingId < 0) {
+    flow
+  } else {
+    match (currentFunctionId(flow)) {
+      None => flow,
+      Some(fnId) =>
+        match (Map.get(fnId, flow.functions)) {
+          None => flow,
+          Some(info) =>
+            if (containsBinding(info.capturedBindings, bindingId)) {
+              flow
+            } else {
+              let nextInfo = {
+                ...info,
+                capturedBindings: [bindingId, ...info.capturedBindings],
+              }: FunctionInfo
+              Map.set(fnId, nextInfo, flow.functions)
+              { ...flow, functions: flow.functions }
+            },
+        },
+    }
+  }

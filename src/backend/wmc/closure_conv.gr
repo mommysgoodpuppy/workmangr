@@ -6,90 +6,21 @@ from "./mir.gr" include WmcMir
 from "./tcore.gr" include WmcTCore
 from "./tcore_norm.gr" include WmcTCoreNorm
 
-let rec containsString = (items: List<String>, target: String) =>
-  match (items) {
-    [] => false,
-    [head, ...tail] => if (head == target) { true } else { containsString(tail, target) },
-  }
-
-let dedupeStrings = (items: List<String>) => {
-  let rec loop = (rest: List<String>, accRev: List<String>) =>
+let functionInfoForNode = (
+  m: WmcTCoreNorm.Module,
+  nodeId: Number,
+) => {
+  let rec loop = (rest: List<WmcTCore.FunctionInfo>) =>
     match (rest) {
-      [] => List.reverse(accRev),
-      [item, ...tail] =>
-        if (containsString(accRev, item)) {
-          loop(tail, accRev)
-        } else {
-          loop(tail, [item, ...accRev])
-        },
+      [] => None,
+      [info, ...tail] => if (info.nodeId == nodeId) { Some(info) } else { loop(tail) },
     }
-  loop(items, [])
+  loop(m.functionInfos)
 }
 
-let isIntrinsicName = (name: String) =>
-  name == "+"
-    || name == "-"
-    || name == "*"
-    || name == "print"
-    || name == "intAdd"
-    || name == "intSub"
-    || name == "intMul"
-    || name == WmcTCoreNorm.zeroArgThunkParamName
-
-let rec freeVarsExpr = (
-  expr: WmcTCoreNorm.Expr,
-  localBound: List<String>,
-  globals: List<String>,
-) =>
-  match (expr.kind) {
-    WmcTCoreNorm.NELit(_) => [],
-    WmcTCoreNorm.NEUnknown(_) => [],
-    WmcTCoreNorm.NERecordLit(items) => dedupeStrings(List.flatten(List.map(
-      (item: WmcTCoreNorm.RecordItem) =>
-        match (item) {
-          WmcTCoreNorm.NRField(_, value) => freeVarsExpr(value, localBound, globals),
-          WmcTCoreNorm.NRSpread(value) => freeVarsExpr(value, localBound, globals),
-        },
-      items,
-    ))),
-    WmcTCoreNorm.NETuple(items) => dedupeStrings(List.flatten(List.map(
-      (item: WmcTCoreNorm.Expr) => freeVarsExpr(item, localBound, globals),
-      items,
-    ))),
-    WmcTCoreNorm.NEIdent(name) =>
-      if (containsString(localBound, name) || containsString(globals, name) || isIntrinsicName(name)) {
-        []
-      } else {
-        [name]
-      },
-    WmcTCoreNorm.NELambda(param, body) =>
-      freeVarsExpr(body, [param], globals),
-    WmcTCoreNorm.NEApply(callee, arg) =>
-      dedupeStrings(List.append(
-        freeVarsExpr(callee, localBound, globals),
-        freeVarsExpr(arg, localBound, globals),
-      )),
-    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
-      dedupeStrings(List.append(
-        freeVarsExpr(valueExpr, localBound, globals),
-        freeVarsExpr(bodyExpr, [name, ...localBound], globals),
-      )),
-    WmcTCoreNorm.NEMatch(m) => {
-      let scrutineeVars = freeVarsExpr(m.scrutinee, localBound, globals)
-      let clauseVars = List.flatten(List.map((clause: WmcTCoreNorm.MatchClause) => {
-        let guardVars = match (clause.guard) {
-          None => [],
-          Some(g) => freeVarsExpr(g, localBound, globals),
-        }
-        dedupeStrings(List.append(guardVars, freeVarsExpr(clause.body, localBound, globals)))
-      }, m.clauses))
-      dedupeStrings(List.append(scrutineeVars, clauseVars))
-    },
-  }
-
 let rec collectClosurePlans = (
+  m: WmcTCoreNorm.Module,
   expr: WmcTCoreNorm.Expr,
-  globals: List<String>,
   bindingHint: Option<String>,
   accRev: List<WmcMir.UnifiedClosureEnv>,
 ) =>
@@ -101,76 +32,74 @@ let rec collectClosurePlans = (
       List.reduce(
         (acc, item) =>
           match (item) {
-            WmcTCoreNorm.NRField(_, value) => collectClosurePlans(value, globals, None, acc),
-            WmcTCoreNorm.NRSpread(value) => collectClosurePlans(value, globals, None, acc),
+            WmcTCoreNorm.NRField(_, value) => collectClosurePlans(m, value, None, acc),
+            WmcTCoreNorm.NRSpread(value) => collectClosurePlans(m, value, None, acc),
           },
         accRev,
         items,
       ),
     WmcTCoreNorm.NETuple(items) =>
       List.reduce(
-        (acc, item) => collectClosurePlans(item, globals, None, acc),
+        (acc, item) => collectClosurePlans(m, item, None, acc),
         accRev,
         items,
       ),
     WmcTCoreNorm.NEApply(callee, arg) =>
       collectClosurePlans(
+        m,
         arg,
-        globals,
         None,
-        collectClosurePlans(callee, globals, None, accRev),
+        collectClosurePlans(m, callee, None, accRev),
       ),
-    WmcTCoreNorm.NEMatch(m) => {
-      let withScrutinee = collectClosurePlans(m.scrutinee, globals, None, accRev)
+    WmcTCoreNorm.NEMatch(matchExpr) => {
+      let withScrutinee = collectClosurePlans(m, matchExpr.scrutinee, None, accRev)
       List.reduce((acc: List<WmcMir.UnifiedClosureEnv>, clause: WmcTCoreNorm.MatchClause) =>
         match (clause.guard) {
-          None => collectClosurePlans(clause.body, globals, None, acc),
-          Some(g) =>
+          None => collectClosurePlans(m, clause.body, None, acc),
+          Some(guardExpr) =>
             collectClosurePlans(
+              m,
               clause.body,
-              globals,
               None,
-              collectClosurePlans(g, globals, None, acc),
+              collectClosurePlans(m, guardExpr, None, acc),
             ),
-        }, withScrutinee, m.clauses)
+        }, withScrutinee, matchExpr.clauses)
     },
     WmcTCoreNorm.NELambda(param, body) => {
-      let captured = dedupeStrings(freeVarsExpr(body, [param], globals))
       let node: WmcTCore.TypedNode = expr.node
+      let captured = match (functionInfoForNode(m, node.id)) {
+        Some(info) => info.capturedNames,
+        None => [],
+      }
       let plan: WmcMir.UnifiedClosureEnv = {
         lambdaNodeId: node.id,
         bindingName: bindingHint,
         param,
         captured,
       }
-      collectClosurePlans(body, globals, None, [plan, ...accRev])
+      collectClosurePlans(m, body, None, [plan, ...accRev])
     },
     WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
       match (valueExpr.kind) {
         WmcTCoreNorm.NELambda(_, _) =>
           collectClosurePlans(
+            m,
             bodyExpr,
-            globals,
             None,
-            collectClosurePlans(valueExpr, globals, Some(name), accRev),
+            collectClosurePlans(m, valueExpr, Some(name), accRev),
           ),
         _ =>
           collectClosurePlans(
+            m,
             bodyExpr,
-            globals,
             None,
-            collectClosurePlans(valueExpr, globals, None, accRev),
+            collectClosurePlans(m, valueExpr, None, accRev),
           ),
       },
   }
 
-let planClosureEnvsExprWithGlobals = (
+provide let planClosureEnvsExpr = (
+  m: WmcTCoreNorm.Module,
   expr: WmcTCoreNorm.Expr,
-  globals: List<String>,
 ) =>
-  List.reverse(collectClosurePlans(expr, globals, None, []))
-
-provide let planClosureEnvsExpr = (expr: WmcTCoreNorm.Expr) =>
-  planClosureEnvsExprWithGlobals(expr, [])
-
-provide let planClosureEnvsExprWithGlobals = planClosureEnvsExprWithGlobals
+  List.reverse(collectClosurePlans(m, expr, None, []))

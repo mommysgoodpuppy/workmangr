@@ -44,7 +44,7 @@ let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
 
 let findCompilableMainExpr = (
   rawModule: WmcTCore.Module,
-  values: List<WmcTCoreNorm.TopValueBinding>,
+  normalizedModule: WmcTCoreNorm.Module,
   optimize: Bool=false,
   sourceText: Option<String>,
 ) => {
@@ -58,7 +58,7 @@ let findCompilableMainExpr = (
       },
     }
 
-  match (findMain(values)) {
+  match (findMain(normalizedModule.values)) {
     None => None,
     Some(binding) => {
       let resultTypeName = match (binding.value.node.ty) {
@@ -78,7 +78,7 @@ let findCompilableMainExpr = (
         _ => preparedExpr,
       }
       if (optimize) {
-        match (WmcMirLower.lowerExprToCfgNoArg(executableExpr)) {
+        match (WmcMirLower.lowerModuleExprToCfgNoArg(normalizedModule, executableExpr)) {
           None => None,
           Some(cfg) =>
             Some(
@@ -128,7 +128,7 @@ provide let compileFileToJson = (filePath: String, optimize: Bool=false) => {
       if (!WmcDriver.isBackendReadyEntry(proto)) {
         jsonFailure(fatalDiagnosticSummary(proto.entry.diagnostics))
       } else {
-        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry.values, optimize=optimize, sourceText=sourceText)) {
+        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry, optimize=optimize, sourceText=sourceText)) {
           None =>
             jsonFailure(
               "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"

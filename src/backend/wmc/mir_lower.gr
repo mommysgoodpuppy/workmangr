@@ -7,6 +7,7 @@ from "./closure_conv.gr" include WmcClosureConv
 from "./tcore_norm.gr" include WmcTCoreNorm
 from "./tcore.gr" include WmcTCore
 from "../../core/core_ast.gr" include CoreAst
+from "../../core/infection_registry.gr" include InfectionRegistry
 
 record UnifiedLowerState {
   nextTmpId: Number,
@@ -424,23 +425,46 @@ let lowerUnifiedStmtsToCfg = (stmts: List<WmcMir.UnifiedStmt>) => {
   { entry, blocks: List.reverse(state.blocksRev), closureEnvs: [] }: WmcMir.UnifiedCfgFunction
 }
 
-provide let lowerExprToCfgNoArg = (expr: WmcTCoreNorm.Expr) =>
+let emptyNormModule = () =>
+  {
+    moduleId: "",
+    values: [],
+    bindingInfos: [],
+    functionInfos: [],
+    typeInfos: [],
+    typeDeclNames: [],
+    recordDeclNames: [],
+    infectionRegistry: InfectionRegistry.empty(),
+    diagnostics: [],
+  }: WmcTCoreNorm.Module
+
+provide let lowerModuleExprToCfgNoArg = (m: WmcTCoreNorm.Module, expr: WmcTCoreNorm.Expr) =>
   match (lowerUnifiedExpr(expr, [], [], emptyUnifiedLowerState)) {
     (None, _) => None,
     (Some((stmts, out)), _) => {
       let cfg = lowerUnifiedStmtsToCfg(List.append(stmts, [WmcMir.UReturn(out)]))
-      Some({ ...cfg, closureEnvs: WmcClosureConv.planClosureEnvsExpr(expr) }: WmcMir.UnifiedCfgFunction)
+      Some({ ...cfg, closureEnvs: WmcClosureConv.planClosureEnvsExpr(m, expr) }: WmcMir.UnifiedCfgFunction)
     },
   }
 
-provide let lowerExprToCfgUnaryArg = (paramName: String, expr: WmcTCoreNorm.Expr) =>
+provide let lowerExprToCfgNoArg = (expr: WmcTCoreNorm.Expr) =>
+  lowerModuleExprToCfgNoArg(emptyNormModule(), expr)
+
+provide let lowerModuleExprToCfgUnaryArg = (
+  m: WmcTCoreNorm.Module,
+  paramName: String,
+  expr: WmcTCoreNorm.Expr,
+) =>
   match (lowerUnifiedExpr(expr, [(paramName, paramName)], [], emptyUnifiedLowerState)) {
     (None, _) => None,
     (Some((stmts, out)), _) => {
       let cfg = lowerUnifiedStmtsToCfg(List.append(stmts, [WmcMir.UReturn(out)]))
-      Some({ ...cfg, closureEnvs: WmcClosureConv.planClosureEnvsExpr(expr) }: WmcMir.UnifiedCfgFunction)
+      Some({ ...cfg, closureEnvs: WmcClosureConv.planClosureEnvsExpr(m, expr) }: WmcMir.UnifiedCfgFunction)
     },
   }
+
+provide let lowerExprToCfgUnaryArg = (paramName: String, expr: WmcTCoreNorm.Expr) =>
+  lowerModuleExprToCfgUnaryArg(emptyNormModule(), paramName, expr)
 
 provide record UnifiedCfgFragment {
   entry: Number,
