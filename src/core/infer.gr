@@ -58,6 +58,7 @@ record LookupResult {
   bindingId: Number,
   scopeId: Number,
   identities: Flow.DomainIdentities,
+  functionNodeId: Option<Number>,
 }
 
 provide record InferState {
@@ -1567,6 +1568,7 @@ let lookupEnv = (name: CoreAst.Name, state: InferState) => {
           bindingId: entry.bindingId,
           scopeId: entry.scopeId,
           identities: entry.identities,
+          functionNodeId: entry.functionNodeId,
         }: LookupResult,
         { ...state, nextVar, flow: flow2 },
       )
@@ -1586,6 +1588,7 @@ let lookupEnv = (name: CoreAst.Name, state: InferState) => {
           bindingId: -1,
           scopeId: state.flow.currentScopeId,
           identities: Flow.emptyDomainIdentities(),
+          functionNodeId: None,
         }: LookupResult,
         marked,
       )
@@ -1607,6 +1610,7 @@ let lookupQualifiedProjection = (
           bindingId: entry.bindingId,
           scopeId: entry.scopeId,
           identities: entry.identities,
+          functionNodeId: entry.functionNodeId,
         }: LookupResult,
         { ...state, nextVar }
       ))
@@ -1631,11 +1635,15 @@ let exprIdentitiesForNode = (state: InferState, nodeId: Number) =>
     None => Flow.emptyDomainIdentities(),
   }
 
+let exprBindingRefForNode = (state: InferState, nodeId: Number) =>
+  Map.get(nodeId, state.flow.exprBindingRefs)
+
 let withBinding = (
   name: String,
   scheme: Types.Scheme,
   bindingKind: Flow.BindingKind,
   identities: Flow.DomainIdentities,
+  functionNodeId: Option<Number>,
   state: InferState,
   fn: InferState => (Types.Type, InferState),
 ) => {
@@ -1644,7 +1652,8 @@ let withBinding = (
     state.flow,
     scheme,
     bindingKind,
-    identities=identities
+    identities=identities,
+    functionNodeId=functionNodeId
   )
   let flow2 = Flow.registerBindingInfo(
     flow1,
@@ -1662,6 +1671,25 @@ let withBinding = (
   }
   (resultType, { ...stateAfter, env: restoredEnv })
 }
+
+let rec functionNodeIdForExpr = (expr: CoreAst.Expr) =>
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => functionNodeIdForExpr(inner),
+    CoreAst.Fn(fnExpr) => Some(fnExpr.node.id),
+    _ => None,
+  }
+
+let rec functionNodeIdForCallee = (callee: CoreAst.Expr, state: InferState) =>
+  match (callee.kind) {
+    CoreAst.Mark(_, inner) => functionNodeIdForCallee(inner, state),
+    CoreAst.Fn(fnExpr) => Some(fnExpr.node.id),
+    CoreAst.Ident(name) =>
+      match (Env.lookupValue(state.env, name.text)) {
+        Some(entry) => entry.functionNodeId,
+        None => None,
+      },
+    _ => None,
+  }
 
 let withFreshScope = (
   state: InferState,
@@ -1695,6 +1723,7 @@ let rec withPatternBindingsKind = (
         monoScheme,
         bindingKind,
         Flow.emptyDomainIdentities(),
+        None,
         state,
         st => {
           let st1 = if (bindingKind == Flow.ParamBinding) {
@@ -1997,7 +2026,8 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
     CoreAst.Ident(name) => {
       let (lookup, state1) = lookupEnv(name, state)
       let flow1 = Flow.recordExprIdentities(state1.flow, expr.node.id, lookup.identities)
-      let state2 = { ...state1, flow: flow1 }
+      let flow2 = Flow.recordExprBindingRef(flow1, expr.node.id, lookup.bindingId)
+      let state2 = { ...state1, flow: flow2 }
       let tRecorded = recordNodeType(expr.node.id, lookup.ty, state2)
       (tRecorded, state2)
     },
@@ -2081,12 +2111,23 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                     None => st1,
                   }
                   let (bodyType, st3) = inferExpr(clause.body, st2)
+                    let st3a = match (exprBindingRefForNode(st3, clause.body.node.id)) {
+                      Some(bindingId) => { ...st3, flow: Flow.noteFunctionResultBinding(st3.flow, bindingId) },
+                      None => st3,
+                    }
+                    let st3b = {
+                      ...st3a,
+                      flow: Flow.noteFunctionResultIdentities(
+                        st3a.flow,
+                        exprIdentitiesForNode(st3a, clause.body.node.id)
+                      ),
+                    }
                     let st4 = unifyForNode(
                       clause.node.id,
                       "function clause result",
                       bodyType,
                       resultType,
-                      st3
+                      st3b
                     )
                     let nextState = inferClauses(rest, st4)
                     (apply(nextState, resultType), nextState)
@@ -2508,6 +2549,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
             seedScheme,
             Flow.RecBinding,
             Flow.emptyDomainIdentities(),
+            functionNodeIdForExpr(binding.value),
             stateSeed,
             st => inferExpr(binding.value, st)
           )
@@ -2546,6 +2588,7 @@ let rec inferExpr = (expr: CoreAst.Expr, state: InferState) => {
             scheme,
             Flow.LetBinding,
             valueIdentities,
+            functionNodeIdForExpr(binding.value),
             state3,
             st => inferExpr(body, st)
           )
@@ -2664,6 +2707,7 @@ and inferFunctionApplication = (
     }
   let (tCallee, state1) = inferExpr(callee, state)
   let (tArg, state2) = inferExpr(arg, state1)
+  let argIdentities = exprIdentitiesForNode(state2, arg.node.id)
   let (normalizedArgType, wraps) = normalizeArgForCallee(tCallee, tArg, state2)
   let (selectedWrapOpt, state2a) =
     if (calleeIsFnLiteral(callee)) {
@@ -2704,12 +2748,53 @@ and inferFunctionApplication = (
       ),
     _ => state6a,
   }
-  let tAppliedBase = apply(state6b, tRes)
+  let state6c = match (functionNodeIdForCallee(callee, state6b)) {
+    Some(functionNodeId) =>
+      match (Flow.functionInfoForNode(state6b.flow, functionNodeId)) {
+        Some(info) =>
+          match (info.paramBindingId) {
+            Some(paramBindingId) =>
+              {
+                ...state6b,
+                flow: Flow.recordArgToParamFlow(
+                  state6b.flow,
+                  exprNodeId,
+                  arg.node.id,
+                  paramBindingId,
+                  argIdentities
+                ),
+              },
+            None => state6b,
+          },
+        None => state6b,
+      },
+    None => state6b,
+  }
+  let resultIdentities = match (functionNodeIdForCallee(callee, state6c)) {
+    Some(functionNodeId) =>
+      match (Flow.functionInfoForNode(state6c.flow, functionNodeId)) {
+        Some(info) => {
+          let dynamicParamIdentities = match (info.paramBindingId) {
+            Some(paramBindingId) =>
+              if (List.some((bindingId: Number) => bindingId == paramBindingId, info.resultBindingIds)) {
+                argIdentities
+              } else {
+                Flow.emptyDomainIdentities()
+              },
+            None => Flow.emptyDomainIdentities(),
+          }
+          Flow.mergeDomainIdentities(info.resultIdentities, dynamicParamIdentities)
+        },
+        None => Flow.emptyDomainIdentities(),
+      },
+    None => Flow.emptyDomainIdentities(),
+  }
+  let tAppliedBase = apply(state6c, tRes)
   let (tApplied, state7) = match (selectedWrapOpt) {
     Some(wrap) => (
-      wrapResultWithCarrier(tAppliedBase, wrap, state6b),
+      wrapResultWithCarrier(tAppliedBase, wrap, state6c),
       noteEffectEvent(
-        state6b,
+        state6c,
         exprNodeId,
         "propagation",
         "charged by "
@@ -2719,10 +2804,12 @@ and inferFunctionApplication = (
           ++ ") via argument propagation"
       ),
     ),
-    None => (tAppliedBase, state6b),
+    None => (tAppliedBase, state6c),
   }
-  let tRecorded = recordNodeType(exprNodeId, tApplied, state7)
-  (tRecorded, state7)
+  let flow7 = Flow.recordExprIdentities(state7.flow, exprNodeId, resultIdentities)
+  let state8 = { ...state7, flow: flow7 }
+  let tRecorded = recordNodeType(exprNodeId, tApplied, state8)
+  (tRecorded, state8)
 }
 and inferExprList = (exprs: List<CoreAst.Expr>, state: InferState) => {
   match (exprs) {
@@ -2858,7 +2945,8 @@ let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
           state1.flow,
           scheme,
           Flow.LetBinding,
-          identities=identities
+          identities=identities,
+          functionNodeId=functionNodeIdForExpr(binding.value)
         )
         let flow2 = Flow.registerBindingInfo(
           flow1,
@@ -2944,12 +3032,16 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
   let state1 = List.reduce(
     (stAcc: InferState, pair: (String, Types.Type)) => {
       let (name, placeholderType) = pair
-      let (entry, flow1) = Flow.bindScheme(
-        stAcc.flow,
-        { quantifiers: [], ty: placeholderType }: Types.Scheme,
-        Flow.RecBinding,
-        identities=Flow.emptyDomainIdentities()
-      )
+        let (entry, flow1) = Flow.bindScheme(
+          stAcc.flow,
+          { quantifiers: [], ty: placeholderType }: Types.Scheme,
+          Flow.RecBinding,
+          identities=Flow.emptyDomainIdentities(),
+          functionNodeId=match (findBindingByName(name, allowedBindings)) {
+            Some(binding) => functionNodeIdForExpr(binding.value),
+            None => None,
+          }
+        )
       let flow2 = Flow.registerBindingInfo(
         flow1,
         entry.bindingId,
@@ -3012,7 +3104,11 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
           st.flow,
           scheme,
           Flow.RecBinding,
-          identities=identities
+          identities=identities,
+          functionNodeId=match (findBindingByName(name, allowedBindings)) {
+            Some(binding) => functionNodeIdForExpr(binding.value),
+            None => None,
+          }
         )
         let flow2 = Flow.registerBindingInfo(
           flow1,

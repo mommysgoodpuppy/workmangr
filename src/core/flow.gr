@@ -13,6 +13,13 @@ provide record IdentityUse {
   bindingId: Number,
 }
 
+provide record ArgParamFlow {
+  callNodeId: Number,
+  argNodeId: Number,
+  paramBindingId: Number,
+  identities: DomainIdentities,
+}
+
 provide enum BindingKind {
   BuiltinBinding,
   LetBinding,
@@ -43,6 +50,8 @@ provide record FunctionInfo {
   scopeId: Number,
   paramBindingId: Option<Number>,
   capturedBindings: List<Number>,
+  resultBindingIds: List<Number>,
+  resultIdentities: DomainIdentities,
   callMode: CallMode,
 }
 
@@ -52,15 +61,20 @@ provide record ValueEntry {
   scopeId: Number,
   identities: DomainIdentities,
   bindingKind: BindingKind,
+  functionNodeId: Option<Number>,
 }
 
 provide record FlowState {
   nextBindingId: Number,
   nextScopeId: Number,
   nextFunctionId: Number,
+  nextIdentityId: Number,
   currentScopeId: Number,
   exprIdentities: Map.Map<Number, DomainIdentities>,
+  exprBindingRefs: Map.Map<Number, Number>,
   identityUsage: Map.Map<Number, Map.Map<String, List<IdentityUse>>>,
+  identityCreationScope: Map.Map<Number, Number>,
+  argParamFlows: List<ArgParamFlow>,
   bindingInfos: Map.Map<Number, BindingInfo>,
   functions: Map.Map<Number, FunctionInfo>,
   functionByNode: Map.Map<Number, Number>,
@@ -81,14 +95,43 @@ provide let cloneDomainIdentities = (identities: DomainIdentities) => {
   out
 }
 
+let containsIdentity = (ids: List<Number>, target: Number) =>
+  List.some((identityId: Number) => identityId == target, ids)
+
+provide let mergeDomainIdentities = (
+  left: DomainIdentities,
+  right: DomainIdentities,
+) => {
+  let merged = cloneDomainIdentities(left)
+  List.forEach(((domain, ids): (String, List<Number>)) => {
+    let existing = match (Map.get(domain, merged)) {
+      Some(current) => current,
+      None => [],
+    }
+    let combined = List.reduce(
+      (acc: List<Number>, identityId: Number) =>
+        if (containsIdentity(acc, identityId)) { acc } else { [identityId, ...acc] },
+      existing,
+      ids
+    )
+    Map.set(domain, combined, merged)
+    void
+  }, Map.toList(right))
+  merged
+}
+
 provide let emptyState = () =>
   {
     nextBindingId: 1,
     nextScopeId: 1,
     nextFunctionId: 1,
+    nextIdentityId: 1,
     currentScopeId: 0,
     exprIdentities: Map.make(),
+    exprBindingRefs: Map.make(),
     identityUsage: Map.make(),
+    identityCreationScope: Map.make(),
+    argParamFlows: [],
     bindingInfos: Map.make(),
     functions: Map.make(),
     functionByNode: Map.make(),
@@ -110,6 +153,13 @@ provide let freshFunctionId = (flow: FlowState) => {
   (fnId, { ...flow, nextFunctionId: fnId + 1 })
 }
 
+provide let freshIdentityId = (flow: FlowState) => {
+  let identityId = flow.nextIdentityId
+  let nextFlow = { ...flow, nextIdentityId: identityId + 1 }
+  Map.set(identityId, flow.currentScopeId, nextFlow.identityCreationScope)
+  (identityId, { ...nextFlow, identityCreationScope: nextFlow.identityCreationScope })
+}
+
 provide let setCurrentScope = (flow: FlowState, scopeId: Number) =>
   { ...flow, currentScopeId: scopeId }
 
@@ -120,6 +170,7 @@ provide let builtinValueEntry = (scheme: Types.Scheme) =>
     scopeId: 0,
     identities: emptyDomainIdentities(),
     bindingKind: BuiltinBinding,
+    functionNodeId: None,
   }: ValueEntry
 
 provide let valueEntry = (
@@ -128,6 +179,7 @@ provide let valueEntry = (
   scopeId: Number,
   identities: DomainIdentities,
   bindingKind: BindingKind,
+  functionNodeId: Option<Number> = None,
 ) =>
   {
     scheme,
@@ -135,13 +187,15 @@ provide let valueEntry = (
     scopeId,
     identities: cloneDomainIdentities(identities),
     bindingKind,
+    functionNodeId,
   }: ValueEntry
 
 provide let bindScheme = (
   flow: FlowState,
   scheme: Types.Scheme,
   bindingKind: BindingKind,
-  identities: DomainIdentities=emptyDomainIdentities(),
+  identities: DomainIdentities = emptyDomainIdentities(),
+  functionNodeId: Option<Number> = None,
 ) => {
   let (bindingId, flow1) = freshBindingId(flow)
   (
@@ -150,10 +204,17 @@ provide let bindScheme = (
       bindingId,
       flow1.currentScopeId,
       identities,
-      bindingKind
+      bindingKind,
+      functionNodeId=functionNodeId
     ),
     flow1,
   )
+}
+
+provide let singletonDomainIdentities = (domain: String, identityId: Number) => {
+  let identities = emptyDomainIdentities()
+  Map.set(domain, [identityId], identities)
+  identities
 }
 
 provide let recordExprIdentities = (
@@ -163,6 +224,15 @@ provide let recordExprIdentities = (
 ) => {
   Map.set(nodeId, cloneDomainIdentities(identities), flow.exprIdentities)
   { ...flow, exprIdentities: flow.exprIdentities }
+}
+
+provide let recordExprBindingRef = (
+  flow: FlowState,
+  nodeId: Number,
+  bindingId: Number,
+) => {
+  Map.set(nodeId, bindingId, flow.exprBindingRefs)
+  { ...flow, exprBindingRefs: flow.exprBindingRefs }
 }
 
 provide let recordIdentityUsage = (
@@ -190,11 +260,37 @@ provide let recordIdentityUsage = (
   { ...flow, identityUsage: flow.identityUsage }
 }
 
+provide let recordArgToParamFlow = (
+  flow: FlowState,
+  callNodeId: Number,
+  argNodeId: Number,
+  paramBindingId: Number,
+  identities: DomainIdentities,
+) =>
+  {
+    ...flow,
+    argParamFlows: [
+      {
+        callNodeId,
+        argNodeId,
+        paramBindingId,
+        identities: cloneDomainIdentities(identities),
+      }: ArgParamFlow,
+      ...flow.argParamFlows,
+    ],
+  }
+
 provide let registerFunction = (flow: FlowState, info: FunctionInfo) => {
   Map.set(info.fnId, info, flow.functions)
   Map.set(info.nodeId, info.fnId, flow.functionByNode)
   { ...flow, functions: flow.functions, functionByNode: flow.functionByNode }
 }
+
+provide let functionInfoForNode = (flow: FlowState, nodeId: Number) =>
+  match (Map.get(nodeId, flow.functionByNode)) {
+    Some(fnId) => Map.get(fnId, flow.functions),
+    None => None,
+  }
 
 provide let registerBindingInfo = (
   flow: FlowState,
@@ -235,6 +331,8 @@ provide let beginFunction = (
     scopeId,
     paramBindingId: None,
     capturedBindings: [],
+    resultBindingIds: [],
+    resultIdentities: emptyDomainIdentities(),
     callMode,
   }
   let flow2 = registerFunction(flow1, info)
@@ -290,4 +388,48 @@ provide let noteCapture = (flow: FlowState, bindingId: Number) =>
             },
         },
     }
+  }
+
+provide let noteFunctionResultBinding = (flow: FlowState, bindingId: Number) =>
+  if (bindingId < 0) {
+    flow
+  } else {
+    match (currentFunctionId(flow)) {
+      None => flow,
+      Some(fnId) =>
+        match (Map.get(fnId, flow.functions)) {
+          None => flow,
+          Some(info) =>
+            if (containsBinding(info.resultBindingIds, bindingId)) {
+              flow
+            } else {
+              let nextInfo = {
+                ...info,
+                resultBindingIds: [bindingId, ...info.resultBindingIds],
+              }: FunctionInfo
+              Map.set(fnId, nextInfo, flow.functions)
+              { ...flow, functions: flow.functions }
+            },
+        },
+    }
+  }
+
+provide let noteFunctionResultIdentities = (
+  flow: FlowState,
+  identities: DomainIdentities,
+) =>
+  match (currentFunctionId(flow)) {
+    None => flow,
+    Some(fnId) =>
+      match (Map.get(fnId, flow.functions)) {
+        None => flow,
+        Some(info) => {
+          let nextInfo = {
+            ...info,
+            resultIdentities: mergeDomainIdentities(info.resultIdentities, identities),
+          }: FunctionInfo
+          Map.set(fnId, nextInfo, flow.functions)
+          { ...flow, functions: flow.functions }
+        },
+      },
   }
