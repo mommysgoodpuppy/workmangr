@@ -40,7 +40,7 @@ let rec extendDigits = (chars, step, count) => {
         match(Char.toDigit(code)) {
           None() => step,
           Some(digit) => {
-            const combined = makeStep(
+            let combined = makeStep(
               step.value * 10 + digit,
               step.next + 1,
             );
