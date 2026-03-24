@@ -44,7 +44,7 @@ let rec extendDigits = (chars, step, count) => {
               step.value * 10 + digit,
               step.next + 1,
             );
-            return extendDigits(chars, combined, count + 1);
+            extendDigits(chars, combined, count + 1)
           }
         }
       }
