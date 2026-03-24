@@ -1,4 +1,4 @@
-from "std/char" import {toDigit}; 
+from "std/char" import * as Char; 
 from "std/list" import * as List; 
 
 type ParseResult =
@@ -13,20 +13,15 @@ let makeStep = (v, n) => {
   .{ value= v, next= n }
 };
 
-let charComma = ",";
-let charCloseParen = ")";
-let mulLiteral = [..List.fromString("mul(")];
+let charComma = ','; //char
+let charCloseParen = ')';
+let mulLiteral = [..List.fromString("mul(")]; //spread n stff
 let mulLiteralLength = List.length(mulLiteral);
-
-let xample = match(in) => {
-  Some(x) => x,
-  None => Panic("panic") 
-}
 
 let readRequiredDigit = (chars, i) => {
   match(List.at(chars, i)) {
     Ok(c) => {
-      match(charToDigit(c)) {
+      match(Char.toDigit(c)) {
         Some(digit) => makeStep(Ok(digit), i + 1),
         None() => makeStep(Err(ExpectedDigit), i + 1)
       }
@@ -42,7 +37,7 @@ let rec extendDigits = (chars, step, count) => {
     match(List.at(chars, step.next)) {
       Err(_) => step,
       Ok(code) => {
-        match(charToDigit(code)) {
+        match(Char.toDigit(code)) {
           None() => step,
           Some(digit) => {
             const combined = makeStep(
@@ -108,6 +103,6 @@ let rec scan = (chars, i, acc) => {
 let corruptedMemory = "xmul(2,4)%&mul[3,7]!@^do_not_mul(5,5)+mul(32,64]then(mul(11,8)mul(8,5))";
 
 let main = () => {
-  let chars = [..corruptedMemory];
+  let chars = [..List.fromString(corruptedMemory)];
   print(scan(chars, 0, 0))
 };
