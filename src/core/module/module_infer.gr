@@ -6,16 +6,17 @@ from "array" include Array
 from "char" include Char
 from "string" include String
 
-from "./analysis.gr" include Analysis
-from "./core_ast.gr" include CoreAst
-from "./env.gr" include Env
-from "./error.gr" include Error
-from "./infer.gr" include Infer
-from "./source.gr" include Source
-from "./types.gr" include Types
-from "../frontend/lower.gr" include Lower
+from "../analysis.gr" include Analysis
+from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../error.gr" include Error
+from "../infer.gr" include Infer
+from "../infection_registry.gr" include InfectionRegistry
+from "../source.gr" include Source
+from "../types.gr" include Types
+from "../../frontend/lower.gr" include Lower
 from "../module/module_system.gr" include ModuleSystem
-from "./layer1/expr.gr" include Layer1Expr
+from "../layer1/expr.gr" include Layer1Expr
 
 provide record TypeAtOffset {
   nodeId: Number,
@@ -140,6 +141,7 @@ let collectImportedEnv = (
     }
   let env = Map.make()
   let importedTypes: Map.Map<String, Env.TypeInfo> = Map.make()
+  let importedRegistry = InfectionRegistry.empty()
   let providerValues = (summary: ModuleSummary) => {
     let explicit = Map.toList(summary.valueExports)
     if (List.length(explicit) > 0) {
@@ -153,6 +155,20 @@ let collectImportedEnv = (
     List.forEach(((typeName, info): (String, Env.TypeInfo)) => {
       Map.set(typeName, info, importedTypes)
     }, Map.toList(providerTypes(summary)))
+  let mergeProviderRegistry = (summary: ModuleSummary) => {
+    List.forEach(((domainName, def): (String, InfectionRegistry.DomainRuleDefinition)) => {
+      Map.set(domainName, def, importedRegistry.domains)
+    }, Map.toList(summary.infer.infectionRegistry.domains))
+    List.forEach(((opName, def): (String, InfectionRegistry.OpRuleDefinition)) => {
+      Map.set(opName, def, importedRegistry.opRules)
+    }, Map.toList(summary.infer.infectionRegistry.opRules))
+    List.forEach(((policyName, def): (String, InfectionRegistry.PolicyDefinition)) => {
+      Map.set(policyName, def, importedRegistry.policies)
+    }, Map.toList(summary.infer.infectionRegistry.policies))
+    List.forEach(((target, def): (String, InfectionRegistry.AnnotationDefinition)) => {
+      Map.set(target, def, importedRegistry.annotations)
+    }, Map.toList(summary.infer.infectionRegistry.annotations))
+  }
   let importDecls = List.filterMap((item: CoreAst.TopItem) =>
     match (item) {
       CoreAst.Import(importDecl) => Some(importDecl),
@@ -162,6 +178,7 @@ let collectImportedEnv = (
     match (Map.get(providerPath, summaries)) {
       Some(summary) => {
         mergeProviderTypes(summary)
+        mergeProviderRegistry(summary)
         let values = providerValues(summary)
         List.forEach(((name, scheme)) => {
           Map.set(name, scheme, env)
@@ -191,6 +208,7 @@ let collectImportedEnv = (
         match (Map.get(providerPath, summaries)) {
           Some(summary) => {
             mergeProviderTypes(summary)
+            mergeProviderRegistry(summary)
             let values = providerValues(summary)
             if (importDecl.names != []) {
               List.forEach((item: CoreAst.ImportName) => {
@@ -234,7 +252,7 @@ let collectImportedEnv = (
     }
   }
   loop(importDecls, node.imports)
-  (env, importedTypes)
+  (env, importedTypes, importedRegistry)
 }
 
 let collectExplicitExports = (program: CoreAst.Program) => {
@@ -428,15 +446,16 @@ provide let inferGraphWithCache = (
             let lowered = Lower.lowerProgram(node.program)
             let loweringDiagnostics = Error.getErrors()
             Error.clearErrors()
-            let (importedValues, importedTypes) = collectImportedEnv(
+            let (importedValues, importedTypes, importedRegistry) = collectImportedEnv(
               node,
               lowered,
               summaries
             )
-            let infer = Infer.inferProgramWithTypingEnv(
+            let infer = Infer.inferProgramWithTypingEnvAndRegistry(
               lowered,
               importedValues,
-              importedTypes
+              importedTypes,
+              importedRegistry
             )
             let typeEntries = buildTypeEntries(lowered, infer)
             let typeDiagnostics = typeDiagnosticsForProgram(lowered, infer)

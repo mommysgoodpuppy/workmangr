@@ -93,6 +93,12 @@ let rec unify = (
   let r = Types.applySubstType(subst, right)
   match ((l, r)) {
     (Types.TNumber, Types.TNumber) => Ok(subst),
+    (Types.TNumber, Types.TChar) => Ok(subst),
+    (Types.TChar, Types.TNumber) => Ok(subst),
+    (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => Ok(subst),
+    (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => Ok(subst),
+    (Types.TChar, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => Ok(subst),
+    (Types.TNominal(name, []), Types.TChar) when Types.isNumericNominalName(name) => Ok(subst),
     (Types.TBool, Types.TBool) => Ok(subst),
     (Types.TString, Types.TString) => Ok(subst),
     (Types.TByte, Types.TByte) => Ok(subst),

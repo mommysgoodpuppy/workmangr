@@ -1,0 +1,458 @@
+module WmcEmitAnalysis
+
+from "list" include List
+from "string" include String
+
+from "../../core/types.gr" include Types
+from "./driver.gr" include WmcDriver
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+
+record GlobalRef {
+  moduleId: String,
+  name: String,
+}
+
+provide record ConcreteNominalInstance {
+  typeName: String,
+  key: String,
+  argKeys: List<String>,
+}
+
+provide record SpecializedGlobalUse {
+  moduleId: String,
+  name: String,
+  argKey: String,
+  resultKey: String,
+}
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let rec backendTypeHasOpenVars = (ty: Types.Type) =>
+  match (ty) {
+    Types.THole(_) => true,
+    Types.TVar(_) => true,
+    Types.TTuple(items) => List.some(backendTypeHasOpenVars, items),
+    Types.TFun(arg, result) => backendTypeHasOpenVars(arg) || backendTypeHasOpenVars(result),
+    Types.TNominal(_, args) => List.some(backendTypeHasOpenVars, args),
+    _ => false,
+  }
+
+provide let rec backendTypeKeyFromType = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNumber => "Number",
+    Types.TString => "String",
+    Types.TChar => "u8",
+    Types.TByte => "u8",
+    Types.TBool => "Bool",
+    Types.TVoid => "Void",
+    Types.TTuple(items) =>
+      "Tuple<" ++ joinStrings(", ", List.map(backendTypeKeyFromType, items)) ++ ">",
+    Types.TFun(arg, result) =>
+      "Fn<" ++ backendTypeKeyFromType(arg) ++ " -> " ++ backendTypeKeyFromType(result) ++ ">",
+    Types.TNominal(name, args) =>
+      if (name == "U8") {
+        "u8"
+      } else if (args == []) {
+        name
+      } else {
+        name ++ "<" ++ joinStrings(", ", List.map(backendTypeKeyFromType, args)) ++ ">"
+      },
+    Types.THole(_) => "_",
+    Types.TVar(_) => "_",
+  }
+
+let insertBackendTypeKey = (key: String, accRev: List<String>) =>
+  if (List.some((item: String) => item == key, accRev)) { accRev } else { [key, ...accRev] }
+
+let rec collectConcreteTypeKeysFromType = (ty: Types.Type, accRev: List<String>) =>
+  if (backendTypeHasOpenVars(ty)) {
+    accRev
+  } else {
+    let accWithChildren = match (ty) {
+      Types.TFun(arg, result) =>
+        collectConcreteTypeKeysFromType(result, collectConcreteTypeKeysFromType(arg, accRev)),
+      Types.TTuple(items) =>
+        List.reduce(
+          (accX: List<String>, item: Types.Type) => collectConcreteTypeKeysFromType(item, accX),
+          accRev,
+          items,
+        ),
+      Types.TNominal(_, args) =>
+        List.reduce(
+          (accX: List<String>, item: Types.Type) => collectConcreteTypeKeysFromType(item, accX),
+          accRev,
+          args,
+        ),
+      _ => accRev,
+    }
+    insertBackendTypeKey(backendTypeKeyFromType(ty), accWithChildren)
+  }
+
+let rec collectConcreteTypeKeysFromExpr = (expr: WmcTCoreNorm.Expr, accRev: List<String>) =>
+  {
+    let accWithNode = match (expr.node.ty) {
+      Some(ty) => collectConcreteTypeKeysFromType(ty, accRev),
+      None => accRev,
+    }
+    match (expr.kind) {
+      WmcTCoreNorm.NELit(_) => accWithNode,
+      WmcTCoreNorm.NEIdent(_) => accWithNode,
+      WmcTCoreNorm.NEUnknown(_) => accWithNode,
+      WmcTCoreNorm.NEApply(callee, arg) =>
+        collectConcreteTypeKeysFromExpr(arg, collectConcreteTypeKeysFromExpr(callee, accWithNode)),
+      WmcTCoreNorm.NELet(_name, valueExpr, bodyExpr) =>
+        collectConcreteTypeKeysFromExpr(bodyExpr, collectConcreteTypeKeysFromExpr(valueExpr, accWithNode)),
+      WmcTCoreNorm.NELambda(_param, body) =>
+        collectConcreteTypeKeysFromExpr(body, accWithNode),
+      WmcTCoreNorm.NETuple(items) =>
+        List.reduce(
+          (accX: List<String>, item: WmcTCoreNorm.Expr) => collectConcreteTypeKeysFromExpr(item, accX),
+          accWithNode,
+          items,
+        ),
+      WmcTCoreNorm.NERecordLit(items) =>
+        List.reduce(
+          (accX: List<String>, item: WmcTCoreNorm.RecordItem) =>
+            match (item) {
+              WmcTCoreNorm.NRField(_, value) => collectConcreteTypeKeysFromExpr(value, accX),
+              WmcTCoreNorm.NRSpread(value) => collectConcreteTypeKeysFromExpr(value, accX),
+            },
+          accWithNode,
+          items,
+        ),
+      WmcTCoreNorm.NEMatch(m) =>
+        {
+          let acc1 = collectConcreteTypeKeysFromExpr(m.scrutinee, accWithNode)
+          List.reduce(
+            (accX: List<String>, clause: WmcTCoreNorm.MatchClause) => {
+              let acc2 = match (clause.guard) {
+                None => accX,
+                Some(guardExpr) => collectConcreteTypeKeysFromExpr(guardExpr, accX),
+              }
+              collectConcreteTypeKeysFromExpr(clause.body, acc2)
+            },
+            acc1,
+            m.clauses,
+          )
+        },
+    }
+  }
+
+provide let collectProgramConcreteTypeKeys = (programProto: WmcDriver.ProgramPrototype) => {
+  let rec loopModules = (modules: List<WmcDriver.BackendModule>, accRev: List<String>) =>
+    match (modules) {
+      [] => List.reverse(accRev),
+      [backendModule, ...tail] => {
+        let accTypes = List.reduce(
+          (accX: List<String>, binding: WmcTCoreNorm.TopValueBinding) =>
+            collectConcreteTypeKeysFromExpr(binding.value, accX),
+          accRev,
+          backendModule.normalized.values,
+        )
+        loopModules(tail, accTypes)
+      },
+    }
+  loopModules(programProto.modules, [])
+}
+
+let insertConcreteNominalInstance = (
+  item: ConcreteNominalInstance,
+  accRev: List<ConcreteNominalInstance>,
+) =>
+  if (List.some((existing: ConcreteNominalInstance) => existing.key == item.key, accRev)) {
+    accRev
+  } else {
+    [item, ...accRev]
+  }
+
+let rec collectConcreteNominalInstancesFromType = (
+  ty: Types.Type,
+  accRev: List<ConcreteNominalInstance>,
+) =>
+  if (backendTypeHasOpenVars(ty)) {
+    accRev
+  } else {
+    let accWithChildren = match (ty) {
+      Types.TFun(arg, result) =>
+        collectConcreteNominalInstancesFromType(
+          result,
+          collectConcreteNominalInstancesFromType(arg, accRev),
+        ),
+      Types.TTuple(items) =>
+        List.reduce(
+          (accX: List<ConcreteNominalInstance>, item: Types.Type) =>
+            collectConcreteNominalInstancesFromType(item, accX),
+          accRev,
+          items,
+        ),
+      Types.TNominal(_, args) =>
+        List.reduce(
+          (accX: List<ConcreteNominalInstance>, item: Types.Type) =>
+            collectConcreteNominalInstancesFromType(item, accX),
+          accRev,
+          args,
+        ),
+      _ => accRev,
+    }
+    match (ty) {
+      Types.TNominal(name, args) when args != [] =>
+        insertConcreteNominalInstance(
+          {
+            typeName: name,
+            key: backendTypeKeyFromType(ty),
+            argKeys: List.map(backendTypeKeyFromType, args),
+          }: ConcreteNominalInstance,
+          accWithChildren,
+        ),
+      _ => accWithChildren,
+    }
+  }
+
+let rec collectConcreteNominalInstancesFromExpr = (
+  expr: WmcTCoreNorm.Expr,
+  accRev: List<ConcreteNominalInstance>,
+) =>
+  {
+    let accWithNode = match (expr.node.ty) {
+      Some(ty) => collectConcreteNominalInstancesFromType(ty, accRev),
+      None => accRev,
+    }
+    match (expr.kind) {
+      WmcTCoreNorm.NELit(_) => accWithNode,
+      WmcTCoreNorm.NEIdent(_) => accWithNode,
+      WmcTCoreNorm.NEUnknown(_) => accWithNode,
+      WmcTCoreNorm.NEApply(callee, arg) =>
+        collectConcreteNominalInstancesFromExpr(
+          arg,
+          collectConcreteNominalInstancesFromExpr(callee, accWithNode),
+        ),
+      WmcTCoreNorm.NELet(_name, valueExpr, bodyExpr) =>
+        collectConcreteNominalInstancesFromExpr(
+          bodyExpr,
+          collectConcreteNominalInstancesFromExpr(valueExpr, accWithNode),
+        ),
+      WmcTCoreNorm.NELambda(_param, body) =>
+        collectConcreteNominalInstancesFromExpr(body, accWithNode),
+      WmcTCoreNorm.NETuple(items) =>
+        List.reduce(
+          (accX: List<ConcreteNominalInstance>, item: WmcTCoreNorm.Expr) =>
+            collectConcreteNominalInstancesFromExpr(item, accX),
+          accWithNode,
+          items,
+        ),
+      WmcTCoreNorm.NERecordLit(items) =>
+        List.reduce(
+          (accX: List<ConcreteNominalInstance>, item: WmcTCoreNorm.RecordItem) =>
+            match (item) {
+              WmcTCoreNorm.NRField(_, value) => collectConcreteNominalInstancesFromExpr(value, accX),
+              WmcTCoreNorm.NRSpread(value) => collectConcreteNominalInstancesFromExpr(value, accX),
+            },
+          accWithNode,
+          items,
+        ),
+      WmcTCoreNorm.NEMatch(m) =>
+        {
+          let acc1 = collectConcreteNominalInstancesFromExpr(m.scrutinee, accWithNode)
+          List.reduce(
+            (accX: List<ConcreteNominalInstance>, clause: WmcTCoreNorm.MatchClause) => {
+              let acc2 = match (clause.guard) {
+                None => accX,
+                Some(guardExpr) => collectConcreteNominalInstancesFromExpr(guardExpr, accX),
+              }
+              collectConcreteNominalInstancesFromExpr(clause.body, acc2)
+            },
+            acc1,
+            m.clauses,
+          )
+        },
+    }
+  }
+
+provide let collectProgramConcreteNominalInstances = (programProto: WmcDriver.ProgramPrototype) => {
+  let rec loopModules = (
+    modules: List<WmcDriver.BackendModule>,
+    accRev: List<ConcreteNominalInstance>,
+  ) =>
+    match (modules) {
+      [] => List.reverse(accRev),
+      [backendModule, ...tail] => {
+        let accTypes = List.reduce(
+          (accX: List<ConcreteNominalInstance>, binding: WmcTCoreNorm.TopValueBinding) =>
+            collectConcreteNominalInstancesFromExpr(binding.value, accX),
+          accRev,
+          backendModule.normalized.values,
+        )
+        loopModules(tail, accTypes)
+      },
+    }
+  loopModules(programProto.modules, [])
+}
+
+let insertSpecializedGlobalUse = (
+  item: SpecializedGlobalUse,
+  accRev: List<SpecializedGlobalUse>,
+) =>
+  if (
+    List.some(
+      (existing: SpecializedGlobalUse) =>
+        existing.moduleId == item.moduleId
+          && existing.name == item.name
+          && existing.argKey == item.argKey
+          && existing.resultKey == item.resultKey,
+      accRev,
+    )
+  ) {
+    accRev
+  } else {
+    [item, ...accRev]
+  }
+
+let closedTypeKeyOpt = (tyOpt: Option<Types.Type>) =>
+  match (tyOpt) {
+    Some(ty) when !backendTypeHasOpenVars(ty) => Some(backendTypeKeyFromType(ty)),
+    _ => None,
+  }
+
+let lookupGlobalRef = (
+  imports: List<WmcDriver.ResolvedImportBinding>,
+  rawModule: WmcTCore.Module,
+  name: String,
+) => {
+  let rec findLocal = (rest: List<WmcTCore.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [binding, ...tail] =>
+        if (binding.name == name) {
+          Some({ moduleId: rawModule.moduleId, name }: GlobalRef)
+        } else {
+          findLocal(tail)
+        },
+    }
+  match (findLocal(rawModule.values)) {
+    Some(ref) => Some(ref),
+    None => {
+      let rec findImport = (rest: List<WmcDriver.ResolvedImportBinding>) =>
+        match (rest) {
+          [] => None,
+          [item, ...tail] =>
+            if (item.localName == name) {
+              Some({ moduleId: item.providerModuleId, name: item.importedName }: GlobalRef)
+            } else {
+              findImport(tail)
+            },
+        }
+      findImport(imports)
+    },
+  }
+}
+
+let rec collectSpecializedGlobalUsesFromExpr = (
+  imports: List<WmcDriver.ResolvedImportBinding>,
+  rawModule: WmcTCore.Module,
+  expr: WmcTCoreNorm.Expr,
+  locals: List<String>,
+  accRev: List<SpecializedGlobalUse>,
+) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELit(_) => accRev,
+    WmcTCoreNorm.NEIdent(_) => accRev,
+    WmcTCoreNorm.NEUnknown(_) => accRev,
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      {
+        let acc1 = collectSpecializedGlobalUsesFromExpr(imports, rawModule, callee, locals, accRev)
+        let acc2 = collectSpecializedGlobalUsesFromExpr(imports, rawModule, arg, locals, acc1)
+        match (callee.kind) {
+          WmcTCoreNorm.NEIdent(name) =>
+            if (List.some((localName: String) => localName == name, locals)) {
+              acc2
+            } else {
+              match ((
+                lookupGlobalRef(imports, rawModule, name),
+                closedTypeKeyOpt(arg.node.ty),
+                closedTypeKeyOpt(expr.node.ty),
+              )) {
+                (Some(ref), Some(argKey), Some(resultKey)) =>
+                  insertSpecializedGlobalUse(
+                    {
+                      moduleId: ref.moduleId,
+                      name: ref.name,
+                      argKey,
+                      resultKey,
+                    }: SpecializedGlobalUse,
+                    acc2,
+                  ),
+                _ => acc2,
+              }
+            },
+          _ => acc2,
+        }
+      },
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      collectSpecializedGlobalUsesFromExpr(
+        imports,
+        rawModule,
+        bodyExpr,
+        [name, ...locals],
+        collectSpecializedGlobalUsesFromExpr(imports, rawModule, valueExpr, locals, accRev),
+      ),
+    WmcTCoreNorm.NELambda(param, body) =>
+      collectSpecializedGlobalUsesFromExpr(imports, rawModule, body, [param, ...locals], accRev),
+    WmcTCoreNorm.NETuple(items) =>
+      List.reduce(
+        (accX: List<SpecializedGlobalUse>, item: WmcTCoreNorm.Expr) =>
+          collectSpecializedGlobalUsesFromExpr(imports, rawModule, item, locals, accX),
+        accRev,
+        items,
+      ),
+    WmcTCoreNorm.NERecordLit(items) =>
+      List.reduce(
+        (accX: List<SpecializedGlobalUse>, item: WmcTCoreNorm.RecordItem) =>
+          match (item) {
+            WmcTCoreNorm.NRField(_, value) =>
+              collectSpecializedGlobalUsesFromExpr(imports, rawModule, value, locals, accX),
+            WmcTCoreNorm.NRSpread(value) =>
+              collectSpecializedGlobalUsesFromExpr(imports, rawModule, value, locals, accX),
+          },
+        accRev,
+        items,
+      ),
+    WmcTCoreNorm.NEMatch(m) =>
+      {
+        let acc1 = collectSpecializedGlobalUsesFromExpr(imports, rawModule, m.scrutinee, locals, accRev)
+        List.reduce(
+          (accX: List<SpecializedGlobalUse>, clause: WmcTCoreNorm.MatchClause) => {
+            let acc2 = match (clause.guard) {
+              None => accX,
+              Some(guardExpr) => collectSpecializedGlobalUsesFromExpr(imports, rawModule, guardExpr, locals, accX),
+            }
+            collectSpecializedGlobalUsesFromExpr(imports, rawModule, clause.body, locals, acc2)
+          },
+          acc1,
+          m.clauses,
+        )
+      },
+  }
+
+provide let collectProgramSpecializedGlobalUses = (programProto: WmcDriver.ProgramPrototype) => {
+  let rec loopModules = (
+    modules: List<WmcDriver.BackendModule>,
+    accRev: List<SpecializedGlobalUse>,
+  ) =>
+    match (modules) {
+      [] => List.reverse(accRev),
+      [backendModule, ...tail] => {
+        let accUses = List.reduce(
+          (accX: List<SpecializedGlobalUse>, binding: WmcTCoreNorm.TopValueBinding) =>
+            collectSpecializedGlobalUsesFromExpr(backendModule.imports, backendModule.module_, binding.value, [], accX),
+          accRev,
+          backendModule.normalized.values,
+        )
+        loopModules(tail, accUses)
+      },
+    }
+  loopModules(programProto.modules, [])
+}

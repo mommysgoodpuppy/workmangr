@@ -771,13 +771,13 @@ test("module infer surfaces empty-function-clause diagnostics without crashing",
 })
 
 test("workman examples aoc.wm has no diagnostics", () => {
-  let entryPath = "/Users/profilence/git/workman/examples/aoc.wm"
+  let entryPath = "examples/aoc.wm"
   let result = ModuleInfer.inferEntry(
     entryPath,
     options={
       ...ModuleSystem.defaultOptions(),
-      rootDir: "/Users/profilence/git/workman/examples",
-      stdRoots: ["/Users/profilence/git/workman/std"],
+      rootDir: ".",
+      stdRoots: ["std"],
     }
   )
   let entry = expectModule(result, result.graph.entry)

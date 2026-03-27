@@ -1,0 +1,115 @@
+from "std/list" import * as List;
+from "std/coretypes" import { Empty, Link };
+from "std/core/int" import {
+  intAdd,
+  intSub,
+  intMul,
+  intDiv,
+  intEq,
+  intNeq,
+  intLt,
+  intGt,
+  intLte,
+  intGte,
+  intCompare,
+};
+
+export from "std/coretypes" type Ordering(..);
+export from "std/coretypes" type Option(..);
+export from "std/coretypes" type Result(..);
+export from "std/coretypes" type IOption(..);
+export from "std/coretypes" type IResult(..);
+export from "std/coretypes" type List(..);
+
+export let add = (left, right) => {
+  intAdd(left, right)
+};
+
+export let sub = (left, right) => {
+  intSub(left, right)
+};
+
+export let mul = (left, right) => {
+  intMul(left, right)
+};
+
+export let div = (left, right) => {
+  intDiv(left, right)
+};
+
+export let eq = (left, right) => {
+  intEq(left, right)
+};
+
+export let neq = (left, right) => {
+  intNeq(left, right)
+};
+
+export let lt = (left, right) => {
+  intLt(left, right)
+};
+
+export let gt = (left, right) => {
+  intGt(left, right)
+};
+
+export let lte = (left, right) => {
+  intLte(left, right)
+};
+
+export let gte = (left, right) => {
+  intGte(left, right)
+};
+
+export let cmpInt = (left, right) => {
+  intCompare(left, right)
+};
+
+let digitChar = match(n) => {
+  0 => { '0' },
+  1 => { '1' },
+  2 => { '2' },
+  3 => { '3' },
+  4 => { '4' },
+  5 => { '5' },
+  6 => { '6' },
+  7 => { '7' },
+  8 => { '8' },
+  _ => { '9' }
+};
+
+let rec intCharsPositive = (n) => {
+  if (n == 0) {
+    Empty
+  } else {
+    let rest = intCharsPositive(intDiv(n, 10));
+    let digit = digitChar(intSub(n, intMul(intDiv(n, 10), 10)));
+    List.append(rest, Link(digit, Empty))
+  }
+};
+
+let intChars = (n) => {
+  if (n == 0) {
+    Link('0', Empty)
+  } else if (n < 0) {
+    Link('-', intCharsPositive(0 - n))
+  } else {
+    intCharsPositive(n)
+  }
+};
+
+export let intToString = (n) => {
+  List.toString(intChars(n))
+};
+
+export let stringConcat = (left, right) => {
+  List.toString(List.append(List.fromString(left), List.fromString(right)))
+};
+
+export let strEq = (left, right) => {
+  List.charListEq(left, right)
+};
+
+export let print = (value) => {
+  nativePrint(value)
+};

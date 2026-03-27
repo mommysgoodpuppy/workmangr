@@ -1,0 +1,20 @@
+domain effect {
+  stateKind rowSet;
+  merge singleton;
+  mergeRow union;
+  boundary mustBeCarrier;
+  conflict none;
+};
+
+export type Option<T> = Some<T> | None;
+export type infectious effect Result<T, E> = @value Ok<T> | @effect Err<E>;
+export type infectious effect IOption<T> = @value ISome<T> | @effect INone;
+export type infectious effect IResult<T, E> = @value IOk<T> | @effect IErr<E>;
+
+export type List<T> = Empty | Link<T, List<T>>;
+
+export type Ordering = LT | EQ | GT;
+
+export let lt = LT;
+export let eq = EQ;
+export let gt = GT;

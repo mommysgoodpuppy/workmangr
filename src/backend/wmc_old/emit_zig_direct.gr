@@ -1,0 +1,2359 @@
+module WmcEmitZigDirect
+
+from "char" include Char
+from "list" include List
+from "string" include String
+from "runtime/unsafe/panic" include Panic
+use Panic.{ panic }
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/error.gr" include Error
+from "../../core/source.gr" include Source
+from "../../core/types.gr" include Types
+from "./analysis.gr" include WmcEmitAnalysis
+from "./common.gr" include WmcEmitCommon
+from "./driver.gr" include WmcDriver
+from "./expr_inline.gr" include WmcExprInline
+from "./planning.gr" include WmcEmitPlanning
+from "./std_list_specialization.gr" include WmcEmitStdListSpecialization
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+from "./top_bindings.gr" include WmcEmitTopBindings
+from "./type_defs.gr" include WmcEmitTypeDefs
+
+record DirectState {
+  nextId: Number,
+}
+
+let emptyState = { nextId: 0 }: DirectState
+
+record LocalFnBinding {
+  fnName: String,
+  capturedArgs: List<String>,
+}
+
+record LiftedLocalFnEmit {
+  zigName: String,
+  localFnBinding: LocalFnBinding,
+  capturesNeeded: Bool,
+  helperFns: List<String>,
+  usesPrint: Bool,
+  usesPrintString: Bool,
+  state: DirectState,
+}
+
+record ExprEmit {
+  lines: List<String>,
+  exprText: String,
+  helperFns: List<String>,
+  usesPrint: Bool,
+  usesPrintString: Bool,
+  state: DirectState,
+}
+
+record FunctionEmit {
+  helperFns: List<String>,
+  fnSource: String,
+  usesPrint: Bool,
+  usesPrintString: Bool,
+  state: DirectState,
+}
+
+record FlatParam {
+  sourceName: String,
+  zigName: String,
+  zigType: String,
+}
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let indent = (s: String) => "  " ++ s
+
+let lineTextAt = (source: String, targetLine: Number) => {
+  let len = String.length(source)
+  let rec loop = (idx: Number, line: Number, start: Number) => {
+    if (idx >= len) {
+      if (line == targetLine) {
+        Some(String.slice(start, end=len, source))
+      } else {
+        None
+      }
+    } else {
+      let ch = String.charAt(idx, source)
+      if (ch == '\n') {
+        if (line == targetLine) {
+          Some(String.slice(start, end=idx, source))
+        } else {
+          loop(idx + 1, line + 1, idx + 1)
+        }
+      } else {
+        loop(idx + 1, line, start)
+      }
+    }
+  }
+  loop(0, 1, 0)
+}
+
+let wmSourceComment = (node: WmcTCore.TypedNode, sourceText: Option<String>) =>
+  {
+    let span: Source.Span = node.span
+    let base = "// wm: node="
+      ++ toString(node.id)
+      ++ " at "
+      ++ toString(span.line)
+      ++ ":"
+      ++ toString(span.col)
+      ++ " ["
+      ++ toString(span.start)
+      ++ ".."
+      ++ toString(span.end)
+      ++ "]"
+    match (sourceText) {
+      None => base,
+      Some(src) =>
+        match (lineTextAt(src, span.line)) {
+          None => base,
+          Some(line) => base ++ " | " ++ String.replaceAll("\r", "", line),
+        },
+    }
+  }
+
+let isAsciiLetter = (c: Char) =>
+  {
+    let code = Char.code(c)
+    (code >= Char.code('a') && code <= Char.code('z'))
+      || (code >= Char.code('A') && code <= Char.code('Z'))
+  }
+
+let isAsciiDigit = (c: Char) => {
+  let code = Char.code(c)
+  code >= Char.code('0') && code <= Char.code('9')
+}
+
+let isZigReserved = (name: String) =>
+  name == "align"
+    || name == "allowzero"
+    || name == "and"
+    || name == "anyframe"
+    || name == "anytype"
+    || name == "asm"
+    || name == "async"
+    || name == "await"
+    || name == "break"
+    || name == "catch"
+    || name == "comptime"
+    || name == "const"
+    || name == "continue"
+    || name == "defer"
+    || name == "else"
+    || name == "enum"
+    || name == "errdefer"
+    || name == "error"
+    || name == "export"
+    || name == "extern"
+    || name == "false"
+    || name == "for"
+    || name == "if"
+    || name == "inline"
+    || name == "linksection"
+    || name == "noalias"
+    || name == "noinline"
+    || name == "nosuspend"
+    || name == "opaque"
+    || name == "or"
+    || name == "orelse"
+    || name == "packed"
+    || name == "pub"
+    || name == "resume"
+    || name == "return"
+    || name == "struct"
+    || name == "suspend"
+    || name == "switch"
+    || name == "test"
+    || name == "threadlocal"
+    || name == "true"
+    || name == "try"
+    || name == "union"
+    || name == "unreachable"
+    || name == "usingnamespace"
+    || name == "var"
+    || name == "volatile"
+    || name == "while"
+    || name == "_"
+
+let sanitizeIdentBase = (input: String) => {
+  if (String.length(input) == 0) {
+    "_wm"
+  } else {
+    let rec loop = (idx: Number, out: String) => {
+      if (idx >= String.length(input)) {
+        out
+      } else {
+        let ch = String.charAt(idx, input)
+        let keep = isAsciiLetter(ch) || isAsciiDigit(ch) || ch == '_'
+        let next = if (keep) { out ++ Char.toString(ch) } else { out ++ "_" }
+        loop(idx + 1, next)
+      }
+    }
+    let raw = loop(0, "")
+    if (raw == "") {
+      "_wm"
+    } else {
+      let first = String.charAt(0, raw)
+      if (isAsciiDigit(first)) { "_" ++ raw } else { raw }
+    }
+  }
+}
+
+let sanitizeLocalBase = (name: String) => {
+  let base = sanitizeIdentBase(name)
+  if (isZigReserved(base)) { base ++ "_wm" } else { base }
+}
+
+let backendPanic = (message: String) => panic("WMC direct Zig backend: " ++ message)
+
+let backendLocationPrefix = (moduleId: String, node: WmcTCore.TypedNode) =>
+  moduleId ++ ":" ++ toString(node.span.line) ++ ":" ++ toString(node.span.col)
+
+let backendPanicAtNode = (moduleId: String, node: WmcTCore.TypedNode, message: String) =>
+  Error.createPanicError(
+    Error.Backend,
+    node.span,
+    backendLocationPrefix(moduleId, node) ++ ": " ++ message,
+    clues=[],
+    severity=Error.SError,
+  )
+
+let unsupportedTypeSummary = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNumber => "Number",
+    Types.TString => "String",
+    Types.TChar => "Char",
+    Types.TByte => "Byte",
+    Types.TBool => "Bool",
+    Types.TVoid => "Void",
+    Types.TTuple(_) => "Tuple",
+    Types.TFun(_, _) => "Function",
+    Types.TNominal(name, _) => name,
+    Types.THole(id) => "Hole(" ++ toString(id) ++ ")",
+    Types.TVar(id) => "Var(" ++ toString(id) ++ ")",
+  }
+
+let unsupportedZigTypeAt = (moduleId: String, node: WmcTCore.TypedNode, context: String, ty: Types.Type) =>
+  backendPanicAtNode(
+    moduleId,
+    node,
+    context ++ ": unsupported type lowering for " ++ unsupportedTypeSummary(ty),
+  )
+
+let tupleArgTypesFromFnType = (tyOpt: Option<Types.Type>) =>
+  match (tyOpt) {
+    Some(Types.TFun(Types.TTuple(items), _)) => Some(items),
+    _ => None,
+  }
+
+let rec zigTypeNameFromTypeAt = (moduleId: String, node: WmcTCore.TypedNode, context: String, ty: Types.Type) =>
+  match (ty) {
+    Types.TNumber => "comptime_int",
+    Types.TString => "[]const u8",
+    Types.TChar => "u8",
+    Types.TByte => "u8",
+    Types.TBool => "bool",
+    Types.TVoid => "void",
+    Types.TTuple(items) => "struct { " ++ joinStrings(", ", List.map((itemTy) => zigTypeNameFromTypeAt(moduleId, node, context, itemTy), items)) ++ " }",
+    Types.TFun(_, _) => unsupportedZigTypeAt(moduleId, node, context ++ " function type", ty),
+    Types.TNominal("List", [itemTy]) =>
+      if (WmcEmitAnalysis.backendTypeKeyFromType(itemTy) == "u8") {
+        "[]const u8"
+      } else {
+        unsupportedZigTypeAt(moduleId, node, context ++ " non-char list", ty)
+      },
+    Types.TNominal(name, _) =>
+      if (name == "Int") {
+        "comptime_int"
+      } else if (name == "U8") {
+        "u8"
+      } else {
+        unsupportedZigTypeAt(moduleId, node, context ++ " nominal", ty)
+      },
+    Types.THole(_) => unsupportedZigTypeAt(moduleId, node, context ++ " unresolved hole", ty),
+    Types.TVar(_) => unsupportedZigTypeAt(moduleId, node, context ++ " unresolved type variable", ty),
+  }
+
+let flatParamsFromTupleArgTypes = (
+  moduleId: String,
+  node: WmcTCore.TypedNode,
+  context: String,
+  baseName: String,
+  itemTypes: List<Types.Type>,
+) => {
+  let rec loop = (rest: List<Types.Type>, idx: Number, accRev: List<FlatParam>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [itemTy, ...tail] => {
+        let sourceName = baseName ++ "." ++ toString(idx)
+        let zigName = sanitizeLocalBase(baseName) ++ "_" ++ toString(idx)
+        loop(
+          tail,
+          idx + 1,
+          [
+            {
+              sourceName,
+              zigName,
+              zigType: zigTypeNameFromTypeAt(moduleId, node, context, itemTy),
+            }: FlatParam,
+            ...accRev,
+          ],
+        )
+      },
+    }
+  loop(itemTypes, 0, [])
+}
+
+let zigGlobalSymbol = (moduleId: String, name: String) =>
+  "__wm_g_" ++ sanitizeIdentBase(moduleId) ++ "__" ++ sanitizeLocalBase(name)
+
+let rec lookupEnvOpt = (env: List<(String, String)>, name: String) =>
+  match (env) {
+    [] => None,
+    [(k, v), ...tail] => if (k == name) { Some(v) } else { lookupEnvOpt(tail, name) },
+  }
+
+let rec lookupLocalFn = (env: List<(String, LocalFnBinding)>, name: String) =>
+  match (env) {
+    [] => None,
+    [(k, v), ...tail] => if (k == name) { Some(v) } else { lookupLocalFn(tail, name) },
+  }
+
+let nextTmp = (hint: String, state: DirectState) =>
+  (
+    "__wm_" ++ sanitizeLocalBase(hint) ++ "_" ++ toString(state.nextId),
+    { nextId: state.nextId + 1 }: DirectState,
+  )
+
+let boolClauseBodies = (clauses: List<WmcTCoreNorm.MatchClause>) =>
+  match (clauses) {
+    [c1, c2] =>
+      if (c1.guard != None || c2.guard != None) {
+        None
+      } else {
+        match ((c1.param.kind, c2.param.kind)) {
+          (WmcTCoreNorm.NPLit(CoreAst.Bool(true)), WmcTCoreNorm.NPLit(CoreAst.Bool(false))) =>
+            Some((c1.body, c2.body)),
+          (WmcTCoreNorm.NPLit(CoreAst.Bool(false)), WmcTCoreNorm.NPLit(CoreAst.Bool(true))) =>
+            Some((c2.body, c1.body)),
+          _ => None,
+        }
+      },
+    _ => None,
+  }
+
+let atomLiteralToZig = (lit: CoreAst.AtomLiteral) =>
+  match (lit) {
+    CoreAst.Int(n) => toString(n),
+    CoreAst.Bool(true) => "true",
+    CoreAst.Bool(false) => "false",
+    CoreAst.Unit => "{}",
+    CoreAst.Byte(n) => toString(n),
+    CoreAst.Char(ch) => toString(Char.code(ch)),
+    CoreAst.Str(s) =>
+      "\""
+        ++ String.replaceAll(
+          "\"",
+          "\\\"",
+          String.replaceAll(
+            "\\",
+            "\\\\",
+            String.replaceAll(
+              "\n",
+              "\\n",
+              String.replaceAll("\r", "\\r", String.replaceAll("\t", "\\t", s)),
+            ),
+          ),
+        )
+        ++ "\"",
+  }
+
+let wrapBlockExprNamed = (label: String, lines: List<String>, exprText: String) =>
+  if (lines == []) {
+    exprText
+  } else {
+    label
+      ++ ": {\n"
+      ++ joinStrings("\n", List.map(indent, lines))
+      ++ "\n"
+      ++ indent("break :" ++ label ++ " " ++ exprText ++ ";")
+      ++ "\n"
+      ++ "}"
+  }
+
+let wrapBlockExpr = (hint: String, lines: List<String>, exprText: String, state: DirectState) => {
+  let (label, state2) = nextTmp(hint, state)
+  (wrapBlockExprNamed(label, lines, exprText), state2)
+}
+
+let appendExprEmit = (left: ExprEmit, right: ExprEmit, exprText: String) =>
+  {
+    lines: List.append(left.lines, right.lines),
+    exprText,
+    helperFns: List.append(left.helperFns, right.helperFns),
+    usesPrint: left.usesPrint || right.usesPrint,
+    usesPrintString: left.usesPrintString || right.usesPrintString,
+    state: right.state,
+  }: ExprEmit
+
+let appendExprEmits = (
+  left: ExprEmit,
+  right: ExprEmit,
+) =>
+  {
+    lines: List.append(left.lines, right.lines),
+    exprText: right.exprText,
+    helperFns: List.append(left.helperFns, right.helperFns),
+    usesPrint: left.usesPrint || right.usesPrint,
+    usesPrintString: left.usesPrintString || right.usesPrintString,
+    state: right.state,
+  }: ExprEmit
+
+let emptyExprEmit = (state: DirectState) =>
+  {
+    lines: [],
+    exprText: "",
+    helperFns: [],
+    usesPrint: false,
+    usesPrintString: false,
+    state,
+  }: ExprEmit
+
+
+let isStringTy = (tyOpt: Option<Types.Type>) =>
+  match (tyOpt) {
+    Some(Types.TString) => true,
+    Some(Types.TNominal("String", _)) => true,
+    _ => false,
+  }
+
+let tupleFieldText = (base: String, idx: Number) => base ++ ".@\"" ++ toString(idx) ++ "\""
+
+record MatchPrep {
+  checks: List<String>,
+  bindings: List<(String, String)>,
+}
+let emptyMatchPrep = { checks: [], bindings: [] }: MatchPrep
+
+let addMatchCheck = (acc: MatchPrep, check: String) =>
+  {
+    checks: [check, ...acc.checks],
+    bindings: acc.bindings,
+  }: MatchPrep
+
+let addMatchBinding = (acc: MatchPrep, name: String, valueText: String) =>
+  {
+    checks: acc.checks,
+    bindings: [(name, valueText), ...acc.bindings],
+  }: MatchPrep
+
+let finalizeMatchPrep = (acc: MatchPrep) =>
+  {
+    checks: List.reverse(acc.checks),
+    bindings: List.reverse(acc.bindings),
+  }: MatchPrep
+
+let moduleHasConstructorName = (m: WmcTCore.Module, target: String) => {
+  let rec typeLoop = (types: List<WmcTCore.TypeInfo>) =>
+    match (types) {
+      [] => false,
+      [typeInfo, ...tail] =>
+        if (ctorLoop(typeInfo.constructors)) { true } else { typeLoop(tail) },
+    }
+  and ctorLoop = (ctors: List<WmcTCore.ConstructorInfo>) =>
+    match (ctors) {
+      [] => false,
+      [ctor, ...tail] => if (ctor.name == target) { true } else { ctorLoop(tail) },
+    }
+  typeLoop(m.typeInfos)
+}
+
+let constructorExists = (ctx: WmcEmitCommon.ProgramEmitCtx, target: String) => {
+  let rec loop = (modules: List<WmcDriver.BackendModule>) =>
+    match (modules) {
+      [] => false,
+      [m, ...tail] =>
+        if (moduleHasConstructorName(m.module_, target)) { true } else { loop(tail) },
+    }
+  loop(ctx.modules)
+}
+
+let rec preparePatternMatch = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  pattern: WmcTCoreNorm.Pattern,
+  valueText: String,
+  env: List<(String, String)>,
+) =>
+  match (preparePatternMatchAcc(ctx, rawModule, pattern, valueText, env, emptyMatchPrep)) {
+    None => None,
+    Some(acc) => Some(finalizeMatchPrep(acc)),
+  }
+
+and preparePatternMatchAcc = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  pattern: WmcTCoreNorm.Pattern,
+  valueText: String,
+  env: List<(String, String)>,
+  acc: MatchPrep,
+) =>
+  match (pattern.kind) {
+    WmcTCoreNorm.NPHole(_) => Some(acc),
+    WmcTCoreNorm.NPWildcard => Some(acc),
+    WmcTCoreNorm.NPAllErrors => Some(acc),
+    WmcTCoreNorm.NPVar(name) => Some(addMatchBinding(acc, name, valueText)),
+    WmcTCoreNorm.NPPin(name) =>
+      {
+        let pinTarget = match (lookupEnvOpt(env, name)) {
+          Some(localName) => localName,
+          None => sanitizeLocalBase(name),
+        }
+        Some(addMatchCheck(acc, valueText ++ " == " ++ pinTarget))
+      },
+    WmcTCoreNorm.NPLit(lit) =>
+      Some(addMatchCheck(acc, valueText ++ " == " ++ atomLiteralToZig(lit))),
+    WmcTCoreNorm.NPTuple(items) => {
+      let rec loop = (rest: List<WmcTCoreNorm.Pattern>, idx: Number, accX: MatchPrep) =>
+        match (rest) {
+          [] => Some(accX),
+          [item, ...tail] =>
+            match (preparePatternMatchAcc(ctx, rawModule, item, tupleFieldText(valueText, idx), env, accX)) {
+              None => None,
+              Some(prep) => loop(tail, idx + 1, prep),
+            },
+        }
+      loop(items, 0, acc)
+    },
+    WmcTCoreNorm.NPConstructor(name, args) =>
+      if (!constructorExists(ctx, name)) {
+        None
+      } else {
+        let base = addMatchCheck(acc, "@import(\"std\").mem.eql(u8, " ++ valueText ++ ".tag, \"" ++ name ++ "\")")
+        let fieldCount = List.length(args)
+        let rec loop = (rest: List<WmcTCoreNorm.Pattern>, idx: Number, accX: MatchPrep) =>
+          match (rest) {
+              [] => Some(accX),
+              [item, ...tail] => {
+                let fieldText = if (fieldCount == 1) { valueText ++ ".payload" } else { tupleFieldText(valueText ++ ".payload", idx) }
+                match (preparePatternMatchAcc(ctx, rawModule, item, fieldText, env, accX)) {
+                  None => None,
+                  Some(prep) => loop(tail, idx + 1, prep),
+                }
+              },
+            }
+          loop(args, 0, base)
+      },
+    WmcTCoreNorm.NPList(_, _) => None,
+  }
+
+let prepareTupleRootPatternMatch = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  pattern: WmcTCoreNorm.Pattern,
+  flatParams: List<FlatParam>,
+  env: List<(String, String)>,
+) =>
+  match (pattern.kind) {
+    WmcTCoreNorm.NPTuple(items) =>
+      if (List.length(items) != List.length(flatParams)) {
+        None
+      } else {
+        let rec loop = (
+          pats: List<WmcTCoreNorm.Pattern>,
+          params: List<FlatParam>,
+          acc: MatchPrep,
+        ) =>
+          match ((pats, params)) {
+            ([], []) => Some(finalizeMatchPrep(acc)),
+            ([pat, ...patTail], [param, ...paramTail]) =>
+              match (preparePatternMatchAcc(ctx, rawModule, pat, param.zigName, env, acc)) {
+                None => None,
+                Some(nextAcc) => loop(patTail, paramTail, nextAcc),
+              },
+            _ => None,
+          }
+        loop(items, flatParams, emptyMatchPrep)
+      },
+    _ => None,
+  }
+
+let withNodeComment = (node: WmcTCore.TypedNode, line: String, sourceText: Option<String>) =>
+  [wmSourceComment(node, sourceText), line]
+
+let rec containsString = (items: List<String>, target: String) =>
+  match (items) {
+    [] => false,
+    [head, ...tail] => if (head == target) { true } else { containsString(tail, target) },
+  }
+
+let dedupeStrings = (items: List<String>) => {
+  let rec loop = (rest: List<String>, accRev: List<String>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [item, ...tail] =>
+        if (containsString(accRev, item)) {
+          loop(tail, accRev)
+        } else {
+          loop(tail, [item, ...accRev])
+        },
+    }
+  loop(items, [])
+}
+
+let findBackendModule = (ctx: WmcEmitCommon.ProgramEmitCtx, moduleId: String) => {
+  let rec loop = (rest: List<WmcDriver.BackendModule>) =>
+    match (rest) {
+      [] => None,
+      [item, ...tail] => if (item.moduleId == moduleId) { Some(item) } else { loop(tail) },
+    }
+  loop(ctx.modules)
+}
+
+let resolveGlobalRef = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  name: String,
+) => {
+  let rec findLocal = (rest: List<WmcTCore.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [binding, ...tail] =>
+        if (binding.name == name) {
+          Some({ moduleId: rawModule.moduleId, name }: WmcEmitCommon.GlobalRef)
+        } else {
+          findLocal(tail)
+        },
+    }
+  match (findLocal(rawModule.values)) {
+    Some(ref) => Some(ref),
+    None => {
+      let rec findImport = (rest: List<WmcDriver.ResolvedImportBinding>) =>
+        match (rest) {
+          [] => None,
+          [item, ...tail] =>
+            if (item.localName == name) {
+              Some({ moduleId: item.providerModuleId, name: item.importedName }: WmcEmitCommon.GlobalRef)
+            } else {
+              findImport(tail)
+            },
+        }
+      findImport(ctx.currentImports)
+    },
+  }
+}
+
+let classifyGlobalRef = (ref: WmcEmitCommon.GlobalRef) =>
+  if (ref.moduleId == "std/list.wm" && ref.name == "fromString") {
+    "intrinsic"
+  } else if (
+    ref.moduleId == "std/list.wm"
+      && WmcEmitStdListSpecialization.isSpecializedStdListBindingName(ref.name)
+  ) {
+    "specialized"
+  } else {
+    "generic"
+  }
+
+let resolveBackendBinding = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  name: String,
+) =>
+  match (resolveGlobalRef(ctx, rawModule, name)) {
+    Some(ref) => Some({ ref, kind: classifyGlobalRef(ref) }: WmcEmitCommon.ResolvedBackendBinding),
+    None => None,
+  }
+
+let resolveGlobalBinding = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  name: String,
+) =>
+  match (resolveBackendBinding(ctx, rawModule, name)) {
+    Some(resolved) =>
+      if (resolved.kind == "intrinsic") {
+        None
+      } else {
+        Some(zigGlobalSymbol(resolved.ref.moduleId, resolved.ref.name))
+      },
+    None => None,
+  }
+
+let isResolvedBackendBinding = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  localName: String,
+  targetModuleId: String,
+  targetName: String,
+  kind: String,
+) =>
+  match (resolveBackendBinding(ctx, rawModule, localName)) {
+    Some(resolved) =>
+      resolved.kind == kind
+        && resolved.ref.moduleId == targetModuleId
+        && resolved.ref.name == targetName,
+    None => false,
+  }
+
+let isClosedListType = (expr: WmcTCoreNorm.Expr) =>
+  match (expr.node.ty) {
+    Some(Types.TNominal("List", [_argTy])) => true,
+    _ => false,
+  }
+
+let isClosedCharListType = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNominal("List", [itemTy]) => WmcEmitAnalysis.backendTypeKeyFromType(itemTy) == "u8",
+    _ => false,
+  }
+
+let isExprClosedCharList = (expr: WmcTCoreNorm.Expr) =>
+  match (expr.node.ty) {
+    Some(ty) => isClosedCharListType(ty),
+    None => false,
+  }
+
+let isEmptyListExpr = (expr: WmcTCoreNorm.Expr) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NEIdent("Empty") => isClosedListType(expr),
+    _ => false,
+  }
+
+let isIntrinsicName = (name: String) =>
+  name == "+"
+    || name == "-"
+    || name == "*"
+    || name == "=="
+    || name == "!="
+    || name == "<"
+    || name == ">"
+    || name == "print"
+    || name == "intAdd"
+    || name == "intSub"
+    || name == "intMul"
+    || name == "nativeAdd"
+    || name == "nativeSub"
+    || name == "nativeMul"
+    || name == "nativeDiv"
+    || name == "nativeCharEq"
+    || name == "nativeCmpInt"
+    || name == "nativePrint"
+    || name == WmcTCoreNorm.zeroArgThunkParamName
+
+let isDirectBinaryOp = (name: String) =>
+  name == "+"
+    || name == "-"
+    || name == "*"
+    || name == "=="
+    || name == "!="
+    || name == "<"
+    || name == ">"
+    || name == "nativeAdd"
+    || name == "nativeSub"
+    || name == "nativeMul"
+    || name == "nativeDiv"
+    || name == "nativeCharEq"
+
+let zigBinaryOpSymbol = (name: String) =>
+  if (name == "+" || name == "nativeAdd") {
+    Some("+")
+  } else if (name == "-" || name == "nativeSub") {
+    Some("-")
+  } else if (name == "*" || name == "nativeMul") {
+    Some("*")
+  } else if (name == "==" || name == "nativeCharEq") {
+    Some("==")
+  } else if (name == "!=") {
+    Some("!=")
+  } else if (name == "<") {
+    Some("<")
+  } else if (name == ">") {
+    Some(">")
+  } else if (name == "nativeDiv") {
+    Some("/")
+  } else {
+    None
+  }
+
+let emitDirectBinaryOp = (
+  op: String,
+  leftOut: ExprEmit,
+  rightOut: ExprEmit,
+) =>
+  match (zigBinaryOpSymbol(op)) {
+    Some(symbol) =>
+      appendExprEmit(
+        leftOut,
+        rightOut,
+        "(" ++ leftOut.exprText ++ " " ++ symbol ++ " " ++ rightOut.exprText ++ ")",
+      ),
+    None => appendExprEmit(leftOut, rightOut, "0"),
+  }
+
+let emitNativeCmpIntExpr = (
+  leftOut: ExprEmit,
+  rightOut: ExprEmit,
+) =>
+  appendExprEmit(
+    leftOut,
+    rightOut,
+    "if (" ++ leftOut.exprText ++ " < " ++ rightOut.exprText ++ ") "
+      ++ ".{ .tag = \"LT\", .payload = 0 } else if ("
+      ++ leftOut.exprText
+      ++ " > "
+      ++ rightOut.exprText
+      ++ ") .{ .tag = \"GT\", .payload = 0 } else .{ .tag = \"EQ\", .payload = 0 }",
+  )
+
+let startsWithUpper = (name: String) =>
+  if (String.length(name) == 0) {
+    false
+  } else {
+    let ch = String.charAt(0, name)
+    let code = Char.code(ch)
+    code >= Char.code('A') && code <= Char.code('Z')
+  }
+
+let hasConstructorName = (ctx: WmcEmitCommon.ProgramEmitCtx, target: String) =>
+  constructorExists(ctx, target)
+
+let moduleHasRecordTypeName = (m: WmcTCore.Module, target: String) => {
+  let rec loop = (types: List<WmcTCore.TypeInfo>) =>
+    match (types) {
+      [] => false,
+      [typeInfo, ...tail] =>
+        if (typeInfo.name == target && typeInfo.recordFields != None) { true } else { loop(tail) },
+    }
+  loop(m.typeInfos)
+}
+
+let hasRecordTypeName = (ctx: WmcEmitCommon.ProgramEmitCtx, target: String) => {
+  let rec loop = (modules: List<WmcDriver.BackendModule>) =>
+    match (modules) {
+      [] => false,
+      [m, ...tail] =>
+        if (moduleHasRecordTypeName(m.module_, target)) { true } else { loop(tail) },
+    }
+  loop(ctx.modules)
+}
+
+let functionInfoForNode = (rawModule: WmcTCore.Module, nodeId: Number) => {
+  let rec loop = (rest: List<WmcTCore.FunctionInfo>) =>
+    match (rest) {
+      [] => None,
+      [info, ...tail] => if (info.nodeId == nodeId) { Some(info) } else { loop(tail) },
+    }
+  loop(rawModule.functionInfos)
+}
+
+let capturedNamesForLambda = (
+  rawModule: WmcTCore.Module,
+  lambdaNodeId: Number,
+) =>
+  match (functionInfoForNode(rawModule, lambdaNodeId)) {
+    Some(info) => info.capturedNames,
+    None => [],
+  }
+
+let thunkParamZigName = (param: String) =>
+  if (param == WmcTCoreNorm.zeroArgThunkParamName) { "_" } else { sanitizeLocalBase(param) }
+
+let rec decomposeLetLambdaValue = (expr: WmcTCoreNorm.Expr) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      match (decomposeLetLambdaValue(bodyExpr)) {
+        Some((bindings, param, fnBody, lambdaNode)) =>
+          Some(([(name, valueExpr, valueExpr.node), ...bindings], param, fnBody, lambdaNode)),
+        None => None,
+      },
+    WmcTCoreNorm.NELambda(param, fnBody) => Some(([], param, fnBody, expr.node)),
+    _ => None,
+  }
+
+let rec emitCaptureLets = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  lets: List<(String, WmcTCoreNorm.Expr, WmcTCore.TypedNode)>,
+  envX: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  stX: DirectState,
+  sourceText: Option<String>,
+  linesRev: List<String>,
+  helperRev: List<String>,
+  usesPrintX: Bool,
+  usesPrintStringX: Bool,
+) =>
+  match (lets) {
+    [] =>
+      (
+        envX,
+        stX,
+        List.reverse(linesRev),
+        List.reverse(helperRev),
+        usesPrintX,
+        usesPrintStringX,
+      ),
+    [(capName, capExpr, capNode), ...tail] => {
+      let capOut = emitExpr(ctx, rawModule, capExpr, envX, fnEnv, stX, sourceText)
+      let (capZig, stY) = nextTmp(capName, capOut.state)
+      let nextLinesRev = List.append(
+        List.reverse(
+          List.append(
+            capOut.lines,
+            withNodeComment(capNode, "const " ++ capZig ++ " = " ++ capOut.exprText ++ ";", sourceText),
+          )
+        ),
+        linesRev,
+      )
+      emitCaptureLets(
+        ctx,
+        rawModule,
+        tail,
+        [(capName, capZig), ...envX],
+        fnEnv,
+        stY,
+        sourceText,
+        nextLinesRev,
+        List.append(List.reverse(capOut.helperFns), helperRev),
+        usesPrintX || capOut.usesPrint,
+        usesPrintStringX || capOut.usesPrintString,
+      )
+    },
+  }
+
+and emitMatchChain:
+  (
+    WmcEmitCommon.ProgramEmitCtx,
+    WmcTCore.Module,
+    String,
+    List<WmcTCoreNorm.MatchClause>,
+    List<(String, String)>,
+    List<(String, LocalFnBinding)>,
+    DirectState,
+    Option<String>,
+  ) => ExprEmit = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  scrutText: String,
+  clauses: List<WmcTCoreNorm.MatchClause>,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) => {
+  let rec loop = (remaining: List<WmcTCoreNorm.MatchClause>, st: DirectState) =>
+    match (remaining) {
+      [] =>
+        {
+          lines: [],
+          exprText: "0",
+          helperFns: [],
+          usesPrint: false,
+          usesPrintString: false,
+          state: st,
+      }: ExprEmit,
+      [clause, ...tail] =>
+        match (preparePatternMatch(ctx, rawModule, clause.param, scrutText, env)) {
+          None => loop(tail, st),
+          Some(prep) => {
+            let rec allocateBindings = (
+              rest: List<(String, String)>,
+              accEnv: List<(String, String)>,
+              accLines: List<String>,
+              accState: DirectState,
+            ) =>
+              match (rest) {
+                [] => (List.reverse(accEnv), List.reverse(accLines), accState),
+                [(name, valueText), ...tail] => {
+                  let (zigName, st1) = nextTmp(name, accState)
+                  allocateBindings(
+                    tail,
+                    [(name, zigName), ...accEnv],
+                    ["const " ++ zigName ++ " = " ++ valueText ++ ";", ...accLines],
+                    st1,
+                  )
+                },
+              }
+            let (bindingsEnv, bindingLines, bindingState) = allocateBindings(prep.bindings, [], [], st)
+            let nextOut = loop(tail, bindingState)
+            let clauseEnv = List.append(bindingsEnv, env)
+            let guardOut = match (clause.guard) {
+              None => None,
+              Some(g) => Some(emitExpr(ctx, rawModule, g, clauseEnv, fnEnv, nextOut.state, sourceText)),
+            }
+            let bodyState = match (guardOut) {
+              None => nextOut.state,
+              Some(out) => out.state,
+            }
+            let bodyOut = emitExpr(ctx, rawModule, clause.body, clauseEnv, fnEnv, bodyState, sourceText)
+            let condText = match (prep.checks) {
+              [] => "true",
+              [first, ...restChecks] => List.reduce((acc, item) => acc ++ " and " ++ item, first, restChecks),
+            }
+            let nextExprText = nextOut.exprText
+            let (thenExprText, finalState) = match (guardOut) {
+              None => wrapBlockExpr("match_blk", List.append(bindingLines, bodyOut.lines), bodyOut.exprText, bodyOut.state),
+              Some(gout) => {
+                let (guardLabel, st1) = nextTmp("guard_blk", bodyOut.state)
+                let (bodyExprText, st2) = wrapBlockExpr("match_body", bodyOut.lines, bodyOut.exprText, st1)
+                (
+                  wrapBlockExprNamed(
+                    guardLabel,
+                    List.append(bindingLines, gout.lines),
+                    "if ("
+                      ++ gout.exprText
+                      ++ ") "
+                      ++ bodyExprText
+                      ++ " else "
+                      ++ nextExprText,
+                  ),
+                  st2,
+                )
+              },
+            }
+            {
+              lines: [],
+              exprText: "if (" ++ condText ++ ") " ++ thenExprText ++ " else " ++ nextExprText,
+              helperFns: List.append(
+                nextOut.helperFns,
+                List.append(
+                  match (guardOut) {
+                    None => [],
+                    Some(gout) => gout.helperFns,
+                  },
+                  bodyOut.helperFns,
+                ),
+              ),
+              usesPrint:
+                nextOut.usesPrint
+                  || bodyOut.usesPrint
+                  || match (guardOut) {
+                    None => false,
+                    Some(gout) => gout.usesPrint,
+                  },
+              usesPrintString:
+                nextOut.usesPrintString
+                  || bodyOut.usesPrintString
+                  || match (guardOut) {
+                    None => false,
+                    Some(gout) => gout.usesPrintString,
+                  },
+              state: finalState,
+            }: ExprEmit
+          },
+      },
+    }
+  loop(clauses, state)
+}
+
+and emitLiftedLocalFn = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  bindingName: String,
+  closureEnv: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  lambdaNode: WmcTCore.TypedNode,
+  valueTyOpt: Option<Types.Type>,
+  param: String,
+  fnBody: WmcTCoreNorm.Expr,
+  state: DirectState,
+  sourceText: Option<String>,
+) => {
+  let zigName = sanitizeLocalBase(bindingName)
+  let (localFnName, stFnName) = nextTmp(bindingName, state)
+  let capturedNames = List.filterMap((captureName: String) =>
+    match (lookupEnvOpt(closureEnv, captureName)) {
+      None => None,
+      Some(capturedZigName) => Some((captureName, capturedZigName)),
+    },
+    capturedNamesForLambda(rawModule, lambdaNode.id),
+  )
+  let (paramTy, returnTy) = match (valueTyOpt) {
+    Some(Types.TFun(paramTy, returnTy)) =>
+      (
+        zigTypeNameFromTypeAt(
+          rawModule.moduleId,
+          lambdaNode,
+          "lifted local function `" ++ bindingName ++ "` param",
+          paramTy,
+        ),
+        zigTypeNameFromTypeAt(
+          rawModule.moduleId,
+          lambdaNode,
+          "lifted local function `" ++ bindingName ++ "` return",
+          returnTy,
+        ),
+      ),
+    Some(otherTy) =>
+      backendPanicAtNode(
+        rawModule.moduleId,
+        lambdaNode,
+        "lifted local function expected inferred function type, got " ++ unsupportedTypeSummary(otherTy),
+      ),
+    None => backendPanicAtNode(rawModule.moduleId, lambdaNode, "lifted local function missing inferred function type"),
+  }
+  let paramZig = thunkParamZigName(param)
+  let fnParamSig = joinStrings(
+    ", ",
+    List.append(
+      List.map(
+        ((captureName, _captureZig): (String, String)) =>
+          sanitizeLocalBase(captureName) ++ "_env: comptime_int",
+        capturedNames,
+      ),
+      [paramZig ++ ": " ++ paramTy],
+    ),
+  )
+  let fnBodyOut = emitExpr(
+    ctx,
+    rawModule,
+    fnBody,
+    List.append(
+      List.map(
+        ((captureName, _captureZig): (String, String)) =>
+          (captureName, sanitizeLocalBase(captureName) ++ "_env"),
+        capturedNames,
+      ),
+      [(param, paramZig)],
+    ),
+    fnEnv,
+    stFnName,
+    sourceText,
+  )
+  let fnLines = List.append(
+    withNodeComment(
+      lambdaNode,
+      "fn " ++ localFnName ++ "(" ++ fnParamSig ++ ") " ++ returnTy ++ " {",
+      sourceText,
+    ),
+    List.append(
+      List.map(indent, fnBodyOut.lines),
+      List.append(
+        (
+          if (returnTy == "void") {
+            List.append(
+              List.map(indent, withNodeComment(fnBody.node, "_ = " ++ fnBodyOut.exprText ++ ";", sourceText)),
+              List.map(indent, withNodeComment(fnBody.node, "return;", sourceText)),
+            )
+          } else {
+            List.map(
+              indent,
+              withNodeComment(fnBody.node, "return " ++ fnBodyOut.exprText ++ ";", sourceText),
+            )
+          }
+        ),
+        ["}"],
+      )
+    ),
+  )
+  let localFnBinding: LocalFnBinding = {
+    fnName: localFnName,
+    capturedArgs: List.map(
+      ((_, captureZig): (String, String)) => captureZig,
+      capturedNames,
+    ),
+  }
+  {
+    zigName,
+    localFnBinding,
+    capturesNeeded: capturedNames != [],
+    helperFns: List.append([joinStrings("\n", fnLines)], fnBodyOut.helperFns),
+    usesPrint: fnBodyOut.usesPrint,
+    usesPrintString: fnBodyOut.usesPrintString,
+    state: fnBodyOut.state,
+  }: LiftedLocalFnEmit
+}
+
+and emitExpr:
+  (
+    WmcEmitCommon.ProgramEmitCtx,
+    WmcTCore.Module,
+    WmcTCoreNorm.Expr,
+    List<(String, String)>,
+    List<(String, LocalFnBinding)>,
+    DirectState,
+    Option<String>,
+  ) => ExprEmit = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  expr: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELit(lit) =>
+      {
+        lines: [],
+        exprText: atomLiteralToZig(lit),
+        helperFns: [],
+        usesPrint: false,
+        usesPrintString: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NEIdent(name) =>
+      match (lookupEnvOpt(env, name)) {
+        Some(localName) =>
+          {
+            lines: [],
+            exprText: localName,
+            helperFns: [],
+            usesPrint: false,
+            usesPrintString: false,
+            state,
+          }: ExprEmit,
+        None =>
+          if (name == "Empty" && isExprClosedCharList(expr)) {
+            {
+              lines: [],
+              exprText: "\"\"",
+              helperFns: [],
+              usesPrint: false,
+              usesPrintString: false,
+              state,
+            }: ExprEmit
+          } else if (hasConstructorName(ctx, name)) {
+            {
+              lines: [],
+              exprText: ".{ .tag = \"" ++ name ++ "\", .payload = 0 }",
+              helperFns: [],
+              usesPrint: false,
+              usesPrintString: false,
+              state,
+            }: ExprEmit
+          } else {
+            match (resolveGlobalBinding(ctx, rawModule, name)) {
+              Some(globalName) =>
+                {
+                  lines: [],
+                  exprText: globalName,
+                  helperFns: [],
+                  usesPrint: false,
+                  usesPrintString: false,
+                  state,
+                }: ExprEmit,
+              None =>
+                {
+                  lines: [],
+                  exprText: sanitizeLocalBase(name),
+                  helperFns: [],
+                  usesPrint: false,
+                  usesPrintString: false,
+                  state,
+                }: ExprEmit,
+            }
+          },
+      },
+    WmcTCoreNorm.NEUnknown(_) =>
+      {
+        lines: [],
+        exprText: "0",
+        helperFns: [],
+        usesPrint: false,
+        usesPrintString: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NERecordLit(items) => {
+      let rec loop = (rest: List<WmcTCoreNorm.RecordItem>, acc: ExprEmit, fieldTextsRev: List<String>) =>
+        match (rest) {
+          [] =>
+            {
+              ...acc,
+              exprText: ".{ " ++ joinStrings(", ", List.reverse(fieldTextsRev)) ++ " }",
+            }: ExprEmit,
+          [item, ...tail] =>
+            match (item) {
+              WmcTCoreNorm.NRField(name, value) => {
+                let valueOut = emitExpr(ctx, rawModule, value, env, fnEnv, acc.state, sourceText)
+                loop(
+                  tail,
+                  appendExprEmits(acc, valueOut),
+                  ["." ++ name ++ " = " ++ valueOut.exprText, ...fieldTextsRev],
+                )
+              },
+              WmcTCoreNorm.NRSpread(value) => {
+                let valueOut = emitExpr(ctx, rawModule, value, env, fnEnv, acc.state, sourceText)
+                loop(
+                  tail,
+                  appendExprEmits(acc, valueOut),
+                  [valueOut.exprText, ...fieldTextsRev],
+                )
+              },
+            },
+        }
+      loop(items, emptyExprEmit(state), [])
+    },
+    WmcTCoreNorm.NETuple(_items) =>
+      {
+        let rec loop = (rest: List<WmcTCoreNorm.Expr>, acc: ExprEmit, itemTextsRev: List<String>) =>
+          match (rest) {
+            [] =>
+              {
+                ...acc,
+                exprText: ".{ " ++ joinStrings(", ", List.reverse(itemTextsRev)) ++ " }",
+              }: ExprEmit,
+            [item, ...tail] => {
+              let itemOut = emitExpr(ctx, rawModule, item, env, fnEnv, acc.state, sourceText)
+              loop(tail, appendExprEmits(acc, itemOut), [itemOut.exprText, ...itemTextsRev])
+            },
+          }
+        loop(_items, emptyExprEmit(state), [])
+      },
+    WmcTCoreNorm.NELambda(_param, _body) =>
+      {
+        lines: [],
+        exprText: "0",
+        helperFns: [],
+        usesPrint: false,
+        usesPrintString: false,
+        state,
+      }: ExprEmit,
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      match (valueExpr.kind) {
+        WmcTCoreNorm.NELambda(param, fnBody) => {
+          let lifted = emitLiftedLocalFn(
+            ctx,
+            rawModule,
+            name,
+            env,
+            fnEnv,
+            valueExpr.node,
+            valueExpr.node.ty,
+            param,
+            fnBody,
+            state,
+            sourceText,
+          )
+          let nextFnEnv = if (lifted.capturesNeeded) { [(name, lifted.localFnBinding), ...fnEnv] } else { fnEnv }
+          let bodyOut = emitExpr(
+            ctx,
+            rawModule,
+            bodyExpr,
+            [(name, lifted.zigName), ...env],
+            nextFnEnv,
+            lifted.state,
+            sourceText,
+          )
+          if (name == "_" || lifted.capturesNeeded) {
+            {
+              lines: bodyOut.lines,
+              exprText: bodyOut.exprText,
+              helperFns: List.append(lifted.helperFns, bodyOut.helperFns),
+              usesPrint: lifted.usesPrint || bodyOut.usesPrint,
+              usesPrintString: lifted.usesPrintString || bodyOut.usesPrintString,
+              state: bodyOut.state,
+            }: ExprEmit
+          } else {
+            {
+              lines: List.append(
+                withNodeComment(
+                  valueExpr.node,
+                  "const " ++ lifted.zigName ++ " = " ++ lifted.localFnBinding.fnName ++ ";",
+                  sourceText,
+                ),
+                bodyOut.lines,
+              ),
+              exprText: bodyOut.exprText,
+              helperFns: List.append(lifted.helperFns, bodyOut.helperFns),
+              usesPrint: lifted.usesPrint || bodyOut.usesPrint,
+              usesPrintString: lifted.usesPrintString || bodyOut.usesPrintString,
+              state: bodyOut.state,
+            }: ExprEmit
+          }
+        },
+        _ => {
+          match (if (name == "_") { None } else { decomposeLetLambdaValue(valueExpr) }) {
+            Some((captureLets, param, fnBody, lambdaNode)) => {
+              let (
+                closureEnv,
+                stCaptured,
+                capturedLines,
+                capturedHelpers,
+                captureUsesPrint,
+                captureUsesPrintString,
+              ) = emitCaptureLets(
+                ctx,
+                rawModule,
+                captureLets,
+                env,
+                fnEnv,
+                state,
+                sourceText,
+                [],
+                [],
+                false,
+                false,
+              )
+              let lifted = emitLiftedLocalFn(
+                ctx,
+                rawModule,
+                name,
+                closureEnv,
+                fnEnv,
+                lambdaNode,
+                valueExpr.node.ty,
+                param,
+                fnBody,
+                stCaptured,
+                sourceText,
+              )
+              let bodyOut = emitExpr(
+                ctx,
+                rawModule,
+                bodyExpr,
+                [(name, lifted.zigName), ...env],
+                [(name, lifted.localFnBinding), ...fnEnv],
+                lifted.state,
+                sourceText,
+              )
+              {
+                lines: List.append(capturedLines, bodyOut.lines),
+                exprText: bodyOut.exprText,
+                helperFns: List.append(
+                  capturedHelpers,
+                  List.append(lifted.helperFns, bodyOut.helperFns),
+                ),
+                usesPrint: captureUsesPrint || lifted.usesPrint || bodyOut.usesPrint,
+                usesPrintString: captureUsesPrintString || lifted.usesPrintString || bodyOut.usesPrintString,
+                state: bodyOut.state,
+              }: ExprEmit
+            },
+            None =>
+              {
+                let valueOut = emitExpr(ctx, rawModule, valueExpr, env, fnEnv, state, sourceText)
+                if (name == "_") {
+                  let bodyOut = emitExpr(ctx, rawModule, bodyExpr, env, fnEnv, valueOut.state, sourceText)
+                  {
+                    lines: List.append(
+                      valueOut.lines,
+                      List.append(
+                        withNodeComment(valueExpr.node, "_ = " ++ valueOut.exprText ++ ";", sourceText),
+                        bodyOut.lines,
+                      ),
+                    ),
+                    exprText: bodyOut.exprText,
+                    helperFns: List.append(valueOut.helperFns, bodyOut.helperFns),
+                    usesPrint: valueOut.usesPrint || bodyOut.usesPrint,
+                    usesPrintString: valueOut.usesPrintString || bodyOut.usesPrintString,
+                    state: bodyOut.state,
+                  }: ExprEmit
+                } else {
+                  let zigName = sanitizeLocalBase(name)
+                  let bodyOut = emitExpr(ctx, rawModule, bodyExpr, [(name, zigName), ...env], fnEnv, valueOut.state, sourceText)
+                  {
+                    lines: List.append(
+                      valueOut.lines,
+                      List.append(
+                        withNodeComment(valueExpr.node, "const " ++ zigName ++ " = " ++ valueOut.exprText ++ ";", sourceText),
+                        bodyOut.lines,
+                      ),
+                    ),
+                    exprText: bodyOut.exprText,
+                    helperFns: List.append(valueOut.helperFns, bodyOut.helperFns),
+                    usesPrint: valueOut.usesPrint || bodyOut.usesPrint,
+                    usesPrintString: valueOut.usesPrintString || bodyOut.usesPrintString,
+                    state: bodyOut.state,
+                  }: ExprEmit
+                }
+              },
+          }
+        },
+      },
+    WmcTCoreNorm.NEMatch(m) =>
+      {
+        let scrutOut = emitExpr(ctx, rawModule, m.scrutinee, env, fnEnv, state, sourceText)
+        let (scrutVar, st1) = nextTmp("match_scrut", scrutOut.state)
+        let chainOut = emitMatchChain(
+          ctx,
+          rawModule,
+          scrutVar,
+          m.clauses,
+          env,
+          fnEnv,
+          st1,
+          sourceText,
+        )
+        {
+          lines: List.append(
+            scrutOut.lines,
+            List.append(
+              withNodeComment(m.scrutinee.node, "const " ++ scrutVar ++ " = " ++ scrutOut.exprText ++ ";", sourceText),
+              chainOut.lines,
+            ),
+          ),
+          exprText: chainOut.exprText,
+          helperFns: List.append(scrutOut.helperFns, chainOut.helperFns),
+          usesPrint: scrutOut.usesPrint || chainOut.usesPrint,
+          usesPrintString: scrutOut.usesPrintString || chainOut.usesPrintString,
+          state: chainOut.state,
+        }: ExprEmit
+      },
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      match (callee.kind) {
+        WmcTCoreNorm.NEApply(callee2, left) =>
+          match (callee2.kind) {
+            WmcTCoreNorm.NEIdent(op) =>
+              if (op == "project") {
+                let targetOut = emitExpr(ctx, rawModule, left, env, fnEnv, state, sourceText)
+                match (arg.kind) {
+                  WmcTCoreNorm.NELit(CoreAst.Str(fieldName)) =>
+                    {
+                      lines: targetOut.lines,
+                      exprText: targetOut.exprText ++ "." ++ sanitizeLocalBase(fieldName),
+                      helperFns: targetOut.helperFns,
+                      usesPrint: targetOut.usesPrint,
+                      usesPrintString: targetOut.usesPrintString,
+                      state: targetOut.state,
+                    }: ExprEmit,
+                  _ => {
+                    let rightOut = emitExpr(ctx, rawModule, arg, env, fnEnv, targetOut.state, sourceText)
+                    appendExprEmit(targetOut, rightOut, "0")
+                  },
+                }
+              } else {
+                emitBinaryOrNamedApply(
+                  ctx,
+                  rawModule,
+                  callee,
+                  op,
+                  left,
+                  arg,
+                  env,
+                  fnEnv,
+                  state,
+                  sourceText,
+                  isExprClosedCharList(expr),
+                  Some(true),
+                  false,
+                )
+              },
+            _ => {
+              emitGenericApplyCall(ctx, rawModule, callee, arg, env, fnEnv, state, sourceText, true)
+            },
+          },
+        WmcTCoreNorm.NEIdent(op) =>
+          match (arg.kind) {
+            WmcTCoreNorm.NETuple([left, right]) =>
+              emitBinaryOrNamedApply(
+                ctx,
+                rawModule,
+                callee,
+                op,
+                left,
+                right,
+                env,
+                fnEnv,
+                state,
+                sourceText,
+                isExprClosedCharList(expr),
+                None,
+                true,
+              ),
+            _ =>
+              emitIdentApply(
+                ctx,
+                rawModule,
+                callee,
+                op,
+                arg,
+                env,
+                fnEnv,
+                state,
+                sourceText,
+                false,
+                false,
+              ),
+          },
+        _ =>
+          match (callee.kind) {
+            WmcTCoreNorm.NEIdent(name) =>
+              emitIdentApply(
+                ctx,
+                rawModule,
+                callee,
+                name,
+                arg,
+                env,
+                fnEnv,
+                state,
+                sourceText,
+                false,
+                false,
+              ),
+            _ =>
+              emitGenericApplyCall(
+                ctx,
+                rawModule,
+                callee,
+                arg,
+                env,
+                fnEnv,
+                state,
+                sourceText,
+                false,
+              ),
+          },
+      },
+  }
+
+and emitResolvedIntrinsicApply = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  localName: String,
+  arg: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) =>
+  match (resolveBackendBinding(ctx, rawModule, localName)) {
+    Some(resolved) =>
+      match ((resolved.kind, resolved.ref.moduleId, resolved.ref.name)) {
+        ("intrinsic", "std/list.wm", "fromString") =>
+          Some(emitExpr(ctx, rawModule, arg, env, fnEnv, state, sourceText)),
+        _ => None,
+      },
+    None => None,
+  }
+
+and emitBinaryOrNamedApply = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  callee: WmcTCoreNorm.Expr,
+  op: String,
+  left: WmcTCoreNorm.Expr,
+  right: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+  resultIsClosedCharList: Bool,
+  flattenTupleByCalleeTypeOpt: Option<Bool>,
+  preserveTypedCtorRecordLit: Bool,
+) =>
+  if (op == "Link" && resultIsClosedCharList) {
+    let leftOut = emitExpr(ctx, rawModule, left, env, fnEnv, state, sourceText)
+    let rightOut = emitExpr(ctx, rawModule, right, env, fnEnv, leftOut.state, sourceText)
+    appendExprEmit(leftOut, rightOut, "__wm_char_list_cons(" ++ leftOut.exprText ++ ", " ++ rightOut.exprText ++ ")")
+  } else if (
+    isResolvedBackendBinding(ctx, rawModule, op, "std/list.wm", "append", "specialized")
+      && isEmptyListExpr(left)
+  ) {
+    emitExpr(ctx, rawModule, right, env, fnEnv, state, sourceText)
+  } else if (isDirectBinaryOp(op)) {
+    let leftOut = emitExpr(ctx, rawModule, left, env, fnEnv, state, sourceText)
+    let rightOut = emitExpr(ctx, rawModule, right, env, fnEnv, leftOut.state, sourceText)
+    emitDirectBinaryOp(op, leftOut, rightOut)
+  } else if (op == "nativeCmpInt") {
+    let leftOut = emitExpr(ctx, rawModule, left, env, fnEnv, state, sourceText)
+    let rightOut = emitExpr(ctx, rawModule, right, env, fnEnv, leftOut.state, sourceText)
+    emitNativeCmpIntExpr(leftOut, rightOut)
+  } else {
+    emitIdentApply(
+      ctx,
+      rawModule,
+      callee,
+      op,
+      {
+        node: right.node,
+        kind: WmcTCoreNorm.NETuple([left, right]),
+      }: WmcTCoreNorm.Expr,
+      env,
+      fnEnv,
+      state,
+      sourceText,
+      match (flattenTupleByCalleeTypeOpt) {
+        Some(flatten) => flatten,
+        None => false,
+      },
+      preserveTypedCtorRecordLit,
+    )
+  }
+
+and emitIdentApply = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  callee: WmcTCoreNorm.Expr,
+  localName: String,
+  arg: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+  flattenTupleByCalleeType: Bool,
+  preserveTypedCtorRecordLit: Bool,
+) =>
+  match (lookupLocalFn(fnEnv, localName)) {
+    Some(localFn) =>
+      emitCallWithPreparedArgs(
+        ctx,
+        rawModule,
+        localFn.fnName,
+        arg,
+        env,
+        fnEnv,
+        state,
+        sourceText,
+        true,
+        localFn.capturedArgs,
+      ),
+    None =>
+      match (emitResolvedIntrinsicApply(ctx, rawModule, localName, arg, env, fnEnv, state, sourceText)) {
+        Some(out) => out,
+        None =>
+          if (hasConstructorName(ctx, localName)) {
+            let argOut = emitExpr(ctx, rawModule, arg, env, fnEnv, state, sourceText)
+            let payloadText = if (preserveTypedCtorRecordLit) {
+              match (arg.kind) {
+                WmcTCoreNorm.NERecordLit(_) when match (arg.node.ty) {
+                  Some(Types.TNominal(typeName, _)) => typeName == localName,
+                  _ => false,
+                } => argOut.exprText,
+                _ => ".{ .tag = \"" ++ localName ++ "\", .payload = " ++ argOut.exprText ++ " }",
+              }
+            } else {
+              ".{ .tag = \"" ++ localName ++ "\", .payload = " ++ argOut.exprText ++ " }"
+            }
+            {
+              lines: argOut.lines,
+              exprText: payloadText,
+              helperFns: argOut.helperFns,
+              usesPrint: argOut.usesPrint,
+              usesPrintString: argOut.usesPrintString,
+              state: argOut.state,
+            }: ExprEmit
+          } else if (hasRecordTypeName(ctx, localName)) {
+            let argOut = emitExpr(ctx, rawModule, arg, env, fnEnv, state, sourceText)
+            {
+              lines: argOut.lines,
+              exprText: argOut.exprText,
+              helperFns: argOut.helperFns,
+              usesPrint: argOut.usesPrint,
+              usesPrintString: argOut.usesPrintString,
+              state: argOut.state,
+            }: ExprEmit
+          } else if (localName == "print" || localName == "nativePrint") {
+            emitPrintFromArg(ctx, rawModule, callee, arg, env, fnEnv, state, sourceText)
+          } else {
+            emitGenericApplyCall(
+              ctx,
+              rawModule,
+              callee,
+              arg,
+              env,
+              fnEnv,
+              state,
+              sourceText,
+              flattenTupleByCalleeType,
+            )
+          },
+      },
+  }
+
+and emitPrintFromArg = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  callee: WmcTCoreNorm.Expr,
+  arg: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) => {
+  let argOut = emitExpr(ctx, rawModule, arg, env, fnEnv, state, sourceText)
+  let printFn = if (isStringTy(arg.node.ty)) { "__wm_print_string" } else { "__wm_print" }
+  {
+    lines: List.append(
+      argOut.lines,
+      withNodeComment(callee.node, printFn ++ "(" ++ argOut.exprText ++ ");", sourceText),
+    ),
+    exprText: "0",
+    helperFns: argOut.helperFns,
+    usesPrint: true || argOut.usesPrint,
+    usesPrintString: isStringTy(arg.node.ty) || argOut.usesPrintString,
+    state: argOut.state,
+  }: ExprEmit
+}
+
+and emitGenericApplyCall = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  callee: WmcTCoreNorm.Expr,
+  arg: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+  flattenTupleByCalleeType: Bool,
+) => {
+  let calleeOut = emitExpr(ctx, rawModule, callee, env, fnEnv, state, sourceText)
+  appendExprEmits(
+    calleeOut,
+    emitCallWithPreparedArgs(
+      ctx,
+      rawModule,
+      calleeOut.exprText,
+      arg,
+      env,
+      fnEnv,
+      calleeOut.state,
+      sourceText,
+      if (flattenTupleByCalleeType) { tupleArgTypesFromFnType(callee.node.ty) != None } else { true },
+      [],
+    ),
+  )
+}
+
+and emitExprList = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  items: List<WmcTCoreNorm.Expr>,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+) => {
+  let rec loop = (rest: List<WmcTCoreNorm.Expr>, acc: ExprEmit, textsRev: List<String>) =>
+    match (rest) {
+      [] => (acc, List.reverse(textsRev)),
+      [item, ...tail] => {
+        let itemOut = emitExpr(ctx, rawModule, item, env, fnEnv, acc.state, sourceText)
+        loop(tail, appendExprEmits(acc, itemOut), [itemOut.exprText, ...textsRev])
+      },
+    }
+  loop(items, emptyExprEmit(state), [])
+}
+
+and emitCallWithPreparedArgs = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  calleeExprText: String,
+  arg: WmcTCoreNorm.Expr,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+  spreadTupleArgs: Bool,
+  prefixArgs: List<String>,
+) =>
+  match (arg.kind) {
+    WmcTCoreNorm.NETuple(items) when spreadTupleArgs =>
+      emitCallWithArgs(
+        ctx,
+        rawModule,
+        calleeExprText,
+        items,
+        env,
+        fnEnv,
+        state,
+        sourceText,
+        prefixArgs,
+      ),
+    _ => {
+      let argOut = emitExpr(ctx, rawModule, arg, env, fnEnv, state, sourceText)
+      {
+        lines: argOut.lines,
+        exprText: calleeExprText ++ "(" ++ joinStrings(", ", List.append(prefixArgs, [argOut.exprText])) ++ ")",
+        helperFns: argOut.helperFns,
+        usesPrint: argOut.usesPrint,
+        usesPrintString: argOut.usesPrintString,
+        state: argOut.state,
+      }: ExprEmit
+    },
+  }
+
+and emitCallWithArgs = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  calleeExprText: String,
+  argItems: List<WmcTCoreNorm.Expr>,
+  env: List<(String, String)>,
+  fnEnv: List<(String, LocalFnBinding)>,
+  state: DirectState,
+  sourceText: Option<String>,
+  prefixArgs: List<String>,
+) => {
+  let (argsOut, argTexts) = emitExprList(ctx, rawModule, argItems, env, fnEnv, state, sourceText)
+  {
+    lines: argsOut.lines,
+    exprText: calleeExprText ++ "(" ++ joinStrings(", ", List.append(prefixArgs, argTexts)) ++ ")",
+    helperFns: argsOut.helperFns,
+    usesPrint: argsOut.usesPrint,
+    usesPrintString: argsOut.usesPrintString,
+    state: argsOut.state,
+  }: ExprEmit
+}
+
+let emitFunctionFromExpr = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  fnName: String,
+  paramOpt: Option<(String, String)>,
+  tupleParamTypesOpt: Option<List<Types.Type>>,
+  resultTy: String,
+  expr: WmcTCoreNorm.Expr,
+  state: DirectState,
+  sourceText: Option<String>,
+  headerNode: Option<WmcTCore.TypedNode>,
+  isPublic: Bool,
+) => {
+  let fnNameZig = sanitizeLocalBase(fnName)
+  let tupleArgTypesOpt = tupleParamTypesOpt
+  let flatParams = match ((paramOpt, tupleArgTypesOpt)) {
+    (Some((paramName, _)), Some(itemTypes)) =>
+      flatParamsFromTupleArgTypes(
+        rawModule.moduleId,
+        expr.node,
+        "function `" ++ fnName ++ "` tuple param",
+        paramName,
+        itemTypes,
+      ),
+    _ => [],
+  }
+  let tupleMatchOpt = match ((paramOpt, tupleArgTypesOpt, expr.kind)) {
+    (Some((paramName, _)), Some(_), WmcTCoreNorm.NEMatch(m)) =>
+      match (m.scrutinee.kind) {
+        WmcTCoreNorm.NEIdent(scrutineeName) when scrutineeName == paramName => Some(m.clauses),
+        _ => None,
+      },
+    _ => None,
+  }
+  let (env, paramSig) = match (paramOpt) {
+    None => ([], ""),
+    Some((paramName, paramTy)) =>
+      match ((flatParams, tupleMatchOpt)) {
+        ([_, ..._], Some(_)) => (
+          List.map((param: FlatParam) => (param.sourceName, param.zigName), flatParams),
+          joinStrings(", ", List.map((param: FlatParam) => param.zigName ++ ": " ++ param.zigType, flatParams)),
+        ),
+        _ => {
+          let paramZig = thunkParamZigName(paramName)
+          ([(paramName, paramZig)], paramZig ++ ": " ++ paramTy)
+        },
+      },
+  }
+  let out = match (tupleMatchOpt) {
+    Some(clauses) =>
+      {
+        let rec loopClauses = (remaining: List<WmcTCoreNorm.MatchClause>, st: DirectState) =>
+          match (remaining) {
+            [] =>
+              {
+                lines: [],
+                exprText: "0",
+                helperFns: [],
+                usesPrint: false,
+                usesPrintString: false,
+                state: st,
+              }: ExprEmit,
+            [clause, ...tail] =>
+              match (prepareTupleRootPatternMatch(ctx, rawModule, clause.param, flatParams, env)) {
+                None => loopClauses(tail, st),
+                Some(prep) => {
+                  let rec allocateBindings = (
+                    rest: List<(String, String)>,
+                    accEnv: List<(String, String)>,
+                    accLines: List<String>,
+                    accState: DirectState,
+                  ) =>
+                    match (rest) {
+                      [] => (List.reverse(accEnv), List.reverse(accLines), accState),
+                      [(name, valueText), ...tailBindings] => {
+                        let (zigName, st1) = nextTmp(name, accState)
+                        allocateBindings(
+                          tailBindings,
+                          [(name, zigName), ...accEnv],
+                          ["const " ++ zigName ++ " = " ++ valueText ++ ";", ...accLines],
+                          st1,
+                        )
+                      },
+                    }
+                  let (bindingsEnv, bindingLines, bindingState) = allocateBindings(prep.bindings, [], [], st)
+                  let nextOut = loopClauses(tail, bindingState)
+                  let clauseEnv = List.append(bindingsEnv, env)
+                  let guardOut = match (clause.guard) {
+                    None => None,
+                    Some(g) => Some(emitExpr(ctx, rawModule, g, clauseEnv, [], nextOut.state, sourceText)),
+                  }
+                  let bodyState = match (guardOut) {
+                    None => nextOut.state,
+                    Some(gout) => gout.state,
+                  }
+                  let bodyOut = emitExpr(ctx, rawModule, clause.body, clauseEnv, [], bodyState, sourceText)
+                  let condText = match (prep.checks) {
+                    [] => "true",
+                    [first, ...restChecks] => List.reduce((acc, item) => acc ++ " and " ++ item, first, restChecks),
+                  }
+                  let nextExprText = nextOut.exprText
+                  let (thenExprText, finalState) = match (guardOut) {
+                    None => wrapBlockExpr("match_blk", List.append(bindingLines, bodyOut.lines), bodyOut.exprText, bodyOut.state),
+                    Some(gout) => {
+                      let (guardLabel, st1) = nextTmp("guard_blk", bodyOut.state)
+                      let (bodyExprText, st2) = wrapBlockExpr("match_body", bodyOut.lines, bodyOut.exprText, st1)
+                      (
+                        wrapBlockExprNamed(
+                          guardLabel,
+                          List.append(bindingLines, gout.lines),
+                          "if (" ++ gout.exprText ++ ") " ++ bodyExprText ++ " else " ++ nextExprText,
+                        ),
+                        st2,
+                      )
+                    },
+                  }
+                  {
+                    lines: [],
+                    exprText: "if (" ++ condText ++ ") " ++ thenExprText ++ " else " ++ nextExprText,
+                    helperFns: List.append(
+                      nextOut.helperFns,
+                      List.append(
+                        match (guardOut) {
+                          None => [],
+                          Some(gout) => gout.helperFns,
+                        },
+                        bodyOut.helperFns,
+                      ),
+                    ),
+                    usesPrint:
+                      nextOut.usesPrint
+                        || bodyOut.usesPrint
+                        || match (guardOut) {
+                          None => false,
+                          Some(gout) => gout.usesPrint,
+                        },
+                    usesPrintString:
+                      nextOut.usesPrintString
+                        || bodyOut.usesPrintString
+                        || match (guardOut) {
+                          None => false,
+                          Some(gout) => gout.usesPrintString,
+                        },
+                    state: finalState,
+                  }: ExprEmit
+                },
+              },
+          }
+        loopClauses(clauses, state)
+      },
+    None => emitExpr(ctx, rawModule, expr, env, [], state, sourceText),
+  }
+  let headerSourceNode = match (headerNode) {
+    Some(node) => node,
+    None => expr.node,
+  }
+  let header = match (paramOpt) {
+    None => (if (isPublic) { "pub fn " } else { "fn " }) ++ fnNameZig ++ "() " ++ resultTy ++ " {",
+    Some(_) => (if (isPublic) { "pub fn " } else { "fn " }) ++ fnNameZig ++ "(" ++ paramSig ++ ") " ++ resultTy ++ " {",
+  }
+  let returnLines = if (resultTy == "void") {
+    List.append(
+      List.map(indent, withNodeComment(expr.node, "_ = " ++ out.exprText ++ ";", sourceText)),
+      List.map(indent, withNodeComment(expr.node, "return;", sourceText)),
+    )
+  } else {
+    List.map(indent, withNodeComment(expr.node, "return " ++ out.exprText ++ ";", sourceText))
+  }
+  {
+    helperFns: out.helperFns,
+    fnSource: joinStrings(
+      "\n",
+      List.append(
+        withNodeComment(headerSourceNode, header, sourceText),
+        List.append(List.map(indent, out.lines), List.append(returnLines, ["}"])),
+      ),
+    ),
+    usesPrint: out.usesPrint,
+    usesPrintString: out.usesPrintString,
+    state: out.state,
+  }: FunctionEmit
+}
+
+let emitReachableBinding = (
+  programProto: WmcDriver.ProgramPrototype,
+  backendModule: WmcDriver.BackendModule,
+  bindingName: String,
+  state: DirectState,
+  entrySourceText: Option<String>,
+) =>
+  match (WmcEmitPlanning.findNormalizedBinding(backendModule, bindingName)) {
+    None => None,
+    Some(binding) => {
+      let resolved: WmcEmitCommon.ResolvedBackendBinding = {
+        ref: { moduleId: backendModule.moduleId, name: bindingName }: WmcEmitCommon.GlobalRef,
+        kind: classifyGlobalRef(
+          { moduleId: backendModule.moduleId, name: bindingName }: WmcEmitCommon.GlobalRef
+        ),
+      }
+      match (resolved.kind) {
+        "intrinsic" => None,
+        "specialized" =>
+          match (WmcEmitStdListSpecialization.specializedStdListBindingSource(bindingName)) {
+            Some(fnSource) => Some(([fnSource], state, false)),
+            None => None,
+          },
+        _ => {
+          let sourceText = WmcEmitTopBindings.moduleSourceText(programProto.entryModuleId, backendModule.moduleId, entrySourceText)
+          let ctx: WmcEmitCommon.ProgramEmitCtx = {
+            currentModuleId: backendModule.moduleId,
+            modules: programProto.modules,
+            currentImports: backendModule.imports,
+          }
+          let emitFunctionBinding = (paramName: String, fnBody: WmcTCoreNorm.Expr) => {
+            let (paramTyRaw, returnTyRaw) = WmcEmitTopBindings.findTopFunctionType(backendModule.module_, bindingName)
+            let paramTy = zigTypeNameFromTypeAt(
+              backendModule.moduleId,
+              binding.node,
+              "top binding `" ++ bindingName ++ "` param",
+              paramTyRaw,
+            )
+            let returnTy = zigTypeNameFromTypeAt(
+              backendModule.moduleId,
+              binding.node,
+              "top binding `" ++ bindingName ++ "` return",
+              returnTyRaw,
+            )
+            let emitted = emitFunctionFromExpr(
+              ctx,
+              backendModule.module_,
+              zigGlobalSymbol(backendModule.moduleId, bindingName),
+              Some((paramName, paramTy)),
+              WmcEmitTopBindings.findTopFunctionTupleArgTypes(backendModule.module_, bindingName),
+              returnTy,
+              fnBody,
+              state,
+              sourceText,
+              Some(binding.node),
+              false,
+            )
+            Some((List.append(emitted.helperFns, [emitted.fnSource]), emitted.state, emitted.usesPrint))
+          }
+          let callableBinding = match (WmcEmitTopBindings.findRawTopBinding(backendModule.module_, bindingName)) {
+            Some(rawBinding) => WmcEmitTopBindings.rawFnBundleToCallable(rawBinding),
+            None => None,
+          }
+          let simpleDef: Option<WmcExprInline.SimpleFnDef> =
+            WmcEmitTopBindings.findSimpleTopFnDef(backendModule.module_, bindingName)
+          match (callableBinding) {
+            Some((paramName, fnBody)) => emitFunctionBinding(paramName, fnBody),
+            None =>
+              match (simpleDef) {
+                Some(def) => emitFunctionBinding(def.param, def.body),
+                None =>
+                  match (binding.value.kind) {
+                    WmcTCoreNorm.NELambda(param, body) when param != WmcTCoreNorm.zeroArgThunkParamName =>
+                      emitFunctionBinding(param, body),
+                    _ => {
+                      let out = emitExpr(ctx, backendModule.module_, binding.value, [], [], state, sourceText)
+                      let (wrappedExprText, st1) = wrapBlockExpr("top_const", out.lines, out.exprText, out.state)
+                      let line = joinStrings(
+                        "\n",
+                        withNodeComment(
+                          binding.node,
+                          "const "
+                            ++ zigGlobalSymbol(backendModule.moduleId, bindingName)
+                            ++ " = "
+                            ++ wrappedExprText
+                            ++ ";",
+                          sourceText,
+                        ),
+                      )
+                      Some((List.append(out.helperFns, [line]), st1, out.usesPrint))
+                    },
+                  },
+              },
+          }
+        },
+      }
+    },
+  }
+
+provide let emitProgramDirectNoOptFromProgram = (
+  programProto: WmcDriver.ProgramPrototype,
+  mainExpr: WmcTCoreNorm.Expr,
+  mainResultType: String,
+  wmFunctionName: String="__wm_main",
+  zigMainName: String="main",
+  sourceText: Option<String>,
+) => {
+  let entryModule = programProto.entry
+  let mainExecutableExpr = match (mainExpr.kind) {
+    WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName => body,
+    _ => mainExpr,
+  }
+  let reachableRefs = WmcEmitPlanning.reachableProgramBindings(
+    programProto,
+    mainExecutableExpr,
+    findBackendModule,
+    resolveBackendBinding,
+    hasConstructorName,
+    hasRecordTypeName,
+    isIntrinsicName,
+  )
+  let rec emitReachableBindings = (
+    refs: List<WmcEmitCommon.GlobalRef>,
+    st: DirectState,
+    chunksRev: List<String>,
+    usesPrint: Bool,
+  ) =>
+    match (refs) {
+      [] => (List.reverse(chunksRev), st, usesPrint),
+      [ref, ...tailRefs] =>
+        match (findBackendModule(
+          {
+            currentModuleId: entryModule.moduleId,
+            modules: programProto.modules,
+            currentImports: entryModule.imports,
+          },
+          ref.moduleId,
+        )) {
+          None => emitReachableBindings(tailRefs, st, chunksRev, usesPrint),
+          Some(backendModule) =>
+            match (emitReachableBinding(programProto, backendModule, ref.name, st, sourceText)) {
+              None => emitReachableBindings(tailRefs, st, chunksRev, usesPrint),
+              Some((bindingChunks, nextState, bindingUsesPrint)) =>
+                emitReachableBindings(
+                  tailRefs,
+                  nextState,
+                  List.append(List.reverse(bindingChunks), chunksRev),
+                  usesPrint || bindingUsesPrint,
+                ),
+            },
+      },
+    }
+
+  let (defSources, st1, defUsesPrint) = emitReachableBindings(reachableRefs, emptyState, [], false)
+  let mainCtx: WmcEmitCommon.ProgramEmitCtx = {
+    currentModuleId: entryModule.moduleId,
+    modules: programProto.modules,
+    currentImports: entryModule.imports,
+  }
+  let emittedMain0 = emitFunctionFromExpr(
+    mainCtx,
+    entryModule.module_,
+    wmFunctionName,
+    None,
+    None,
+    mainResultType,
+    mainExecutableExpr,
+    st1,
+    sourceText,
+    Some(mainExpr.node),
+    true,
+  )
+  let effectiveMainResultType = if (mainResultType == "comptime_int" && emittedMain0.usesPrint) {
+    "i64"
+  } else {
+    mainResultType
+  }
+  let emittedMain = if (effectiveMainResultType == mainResultType) {
+    emittedMain0
+  } else {
+    emitFunctionFromExpr(
+      mainCtx,
+      entryModule.module_,
+      wmFunctionName,
+      None,
+      None,
+      effectiveMainResultType,
+      mainExecutableExpr,
+      st1,
+      sourceText,
+      Some(mainExpr.node),
+      true,
+    )
+  }
+  let typeDefs = WmcEmitTypeDefs.emitProgramTypeDefs(programProto)
+  let usesCharListSpecialization = List.some(
+    (ref: WmcEmitCommon.GlobalRef) => ref.moduleId == "std/list.wm",
+    reachableRefs,
+  )
+  let prelude = (if (defUsesPrint || emittedMain.usesPrint || usesCharListSpecialization) {
+    "const std = @import(\"std\");\n"
+      ++ (if (defUsesPrint || emittedMain.usesPrint) {
+        "fn __wm_print(value: anytype) void {\n"
+          ++ "  std.debug.print(\"{}\\n\", .{value});\n"
+          ++ "}\n\n"
+          ++ "fn __wm_print_string(value: []const u8) void {\n"
+          ++ "  std.debug.print(\"{s}\\n\", .{value});\n"
+          ++ "}\n\n"
+      } else {
+        ""
+      })
+      ++ (if (usesCharListSpecialization) {
+        WmcEmitStdListSpecialization.charListPrelude()
+      } else {
+        ""
+      })
+  } else {
+    ""
+  })
+  let mainReturnTy = if (effectiveMainResultType == "void") { "void" } else { "u8" }
+  let zigMainBody = if (effectiveMainResultType == "void") {
+    "  " ++ sanitizeLocalBase(wmFunctionName) ++ "();"
+  } else if (effectiveMainResultType == "bool") {
+    "  return @as(u8, @intFromBool(" ++ sanitizeLocalBase(wmFunctionName) ++ "()));"
+  } else {
+    "  return @as(u8, @intCast(" ++ sanitizeLocalBase(wmFunctionName) ++ "()));"
+  }
+  prelude
+    ++ (if (typeDefs == []) { "" } else { joinStrings("\n\n", typeDefs) ++ "\n\n" })
+    ++ joinStrings(
+      "\n\n",
+      List.append(
+        List.append(defSources, List.append(emittedMain.helperFns, [emittedMain.fnSource])),
+        [
+          "pub fn " ++ sanitizeLocalBase(zigMainName) ++ "() " ++ mainReturnTy ++ " {\n"
+            ++ zigMainBody
+            ++ "\n"
+            ++ "}",
+        ],
+      ),
+    )
+}
+
+provide let emitProgramDirectNoOpt = (
+  rawModule: WmcTCore.Module,
+  mainExpr: WmcTCoreNorm.Expr,
+  mainResultType: String,
+  wmFunctionName: String="__wm_main",
+  zigMainName: String="main",
+  sourceText: Option<String>,
+) => {
+  let norm = WmcTCoreNorm.normModuleDetailed(rawModule)
+  let backendModule: WmcDriver.BackendModule = {
+    moduleId: rawModule.moduleId,
+    module_: rawModule,
+    normalized: norm.normalized,
+    normalizationIssues: norm.issues,
+    imports: [],
+  }
+  let proto: WmcDriver.ProgramPrototype = {
+    entryModuleId: rawModule.moduleId,
+    entry: backendModule,
+    modules: [backendModule],
+    normalizationIssues: norm.issues,
+  }
+  emitProgramDirectNoOptFromProgram(
+    proto,
+    mainExpr,
+    mainResultType,
+    wmFunctionName=wmFunctionName,
+    zigMainName=zigMainName,
+    sourceText,
+  )
+}
+
+provide let backendTypeKeyFromType = WmcEmitAnalysis.backendTypeKeyFromType
+provide let collectProgramConcreteTypeKeys = WmcEmitAnalysis.collectProgramConcreteTypeKeys
+provide let collectProgramConcreteNominalInstances = WmcEmitAnalysis.collectProgramConcreteNominalInstances
+provide let collectProgramSpecializedGlobalUses = WmcEmitAnalysis.collectProgramSpecializedGlobalUses

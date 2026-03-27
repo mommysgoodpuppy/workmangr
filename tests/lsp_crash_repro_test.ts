@@ -260,64 +260,55 @@ Deno.test({
 });
 
 Deno.test({
-  name: "LSP didOpen on aoc2016/1 should not crash runtime",
+  name: "LSP didOpen on examples/aoc should not crash runtime",
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-  const cwd = Deno.cwd();
-  const stdRoot = Deno.env.get("WORKMAN_STD_ROOT") ?? "/Users/profilence/git/workman/std";
-  const target = "/Users/profilence/git/workman/aoc2016/1.wm";
+    const cwd = Deno.cwd();
+    const stdRoot = Deno.env.get("WORKMAN_STD_ROOT") ?? `${cwd}/std`;
+    const target = `${cwd}/examples/aoc.wm`;
 
-  try {
-    await Deno.stat(target);
-    await Deno.stat(stdRoot);
-  } catch {
-    return; // skip when external fixtures are unavailable
-  }
+    const source = await Deno.readTextFile(target);
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--dir", stdRoot,
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+        "--std-root", stdRoot,
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
 
-  const source = await Deno.readTextFile(target);
-  const proc = new Deno.Command("grain", {
-    args: [
-      "--dir", ".",
-      "--dir", stdRoot,
-      "--dir", "/Users/profilence/git/workman",
-      "--dir", "/Users/profilence/git",
-      "--include-dirs", `${cwd}/src`,
-      `${cwd}/src/cli/lsp/lsp.gr`,
-      "--",
-      "--std-root", stdRoot,
-    ],
-    cwd,
-    stdin: "piped",
-    stdout: "piped",
-    stderr: "piped",
-  }).spawn();
+    const client = new LspClient(proc);
+    const uri = `file://${target.replaceAll("\\", "/")}`;
 
-  const client = new LspClient(proc);
-  const uri = `file://${target}`;
+    await client.request("initialize", {
+      processId: null,
+      rootUri: `file://${cwd.replaceAll("\\", "/")}`,
+      capabilities: {},
+    });
+    await client.notify("initialized", {});
+    await client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri,
+        languageId: "wm",
+        version: 1,
+        text: source,
+      },
+    });
 
-  await client.request("initialize", {
-    processId: null,
-    rootUri: `file://${cwd}`,
-    capabilities: {},
-  });
-  await client.notify("initialized", {});
-  await client.notify("textDocument/didOpen", {
-    textDocument: {
-      uri,
-      languageId: "wm",
-      version: 1,
-      text: source,
-    },
-  });
+    await new Promise((r) => setTimeout(r, 3000));
+    const runtimeError = client.runtimeError;
+    await client.close();
 
-  await new Promise((r) => setTimeout(r, 3000));
-  const runtimeError = client.runtimeError;
-  await client.close();
-
-  if (runtimeError) {
-    throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
-  }
+    if (runtimeError) {
+      throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
+    }
   },
 });
 
@@ -417,28 +408,19 @@ Deno.test({
 });
 
 Deno.test({
-  name: "LSP didOpen on aoc2016/1 should publish diagnostics for the opened file",
+  name: "LSP didOpen on examples/aoc should publish diagnostics for the opened file",
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
     const cwd = Deno.cwd();
-    const stdRoot = Deno.env.get("WORKMAN_STD_ROOT") ?? "/Users/profilence/git/workman/std";
-    const target = "/Users/profilence/git/workman/aoc2016/1.wm";
-
-    try {
-      await Deno.stat(target);
-      await Deno.stat(stdRoot);
-    } catch {
-      return; // skip when external fixtures are unavailable
-    }
+    const stdRoot = Deno.env.get("WORKMAN_STD_ROOT") ?? `${cwd}/std`;
+    const target = `${cwd}/examples/aoc.wm`;
 
     const source = await Deno.readTextFile(target);
     const proc = new Deno.Command("grain", {
       args: [
         "--dir", ".",
         "--dir", stdRoot,
-        "--dir", "/Users/profilence/git/workman",
-        "--dir", "/Users/profilence/git",
         "--include-dirs", `${cwd}/src`,
         `${cwd}/src/cli/lsp/lsp.gr`,
         "--",
@@ -451,11 +433,11 @@ Deno.test({
     }).spawn();
 
     const client = new LspClient(proc);
-    const uri = `file://${target}`;
+    const uri = `file://${target.replaceAll("\\", "/")}`;
 
     await client.request("initialize", {
       processId: null,
-      rootUri: `file://${cwd}`,
+      rootUri: `file://${cwd.replaceAll("\\", "/")}`,
       capabilities: {},
     });
     await client.notify("initialized", {});
@@ -496,26 +478,16 @@ const lowerDrive = (path: string) =>
   path.length > 1 && path[1] === ":" ? `${path[0].toLowerCase()}${path.slice(1)}` : path;
 
 Deno.test({
-  name: "LSP windows external didOpen should not fail reading opened absolute module",
+  name: "LSP windows didOpen should not fail reading opened absolute module",
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
     if (Deno.build.os !== "windows") return;
 
     const cwd = Deno.cwd().replaceAll("\\", "/");
-    const workmanRoot = lowerDrive(
-      Deno.env.get("WORKMAN_V0_ROOT")?.replaceAll("\\", "/") ?? "c:/GIT/workman",
-    );
-    const stdRoot = lowerDrive(`${workmanRoot}/std`);
-    const target = lowerDrive(`${workmanRoot}/examples/aoc.wm`);
-    const workmanParent = lowerDrive(workmanRoot.replace(/\/[^/]+$/, ""));
-
-    try {
-      await Deno.stat(target);
-      await Deno.stat(stdRoot);
-    } catch {
-      return;
-    }
+    const repoRoot = lowerDrive(cwd);
+    const stdRoot = lowerDrive(`${repoRoot}/std`);
+    const target = lowerDrive(`${repoRoot}/examples/aoc.wm`);
 
     const source = await Deno.readTextFile(target);
     const targetUri = toFileUri(target);
@@ -524,9 +496,7 @@ Deno.test({
     const proc = new Deno.Command("grain", {
       args: [
         "--dir", ".",
-        "--dir", workmanRoot,
         "--dir", stdRoot,
-        "--dir", workmanParent,
         "--include-dirs", `${cwd}/src`,
         `${cwd}/src/cli/lsp/lsp.gr`,
         "--",

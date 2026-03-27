@@ -2,83 +2,67 @@ module WmcDriver
 
 from "list" include List
 from "map" include Map
-from "string" include String
 
-from "../../core/module_infer.gr" include ModuleInfer
-from "../../module/module_system.gr" include ModuleSystem
-from "../../core/error.gr" include Error
-from "../../core/types.gr" include Types
-from "./tcore.gr" include WmcTCore
-from "./tcore_norm.gr" include WmcTCoreNorm
+from "../../core/module/module_infer.gr" include ModuleInfer
+from "../../core/module/module_system.gr" include ModuleSystem
+from "../../core/module/module_ir.gr" include WmcModuleIr
+from "./module_stage.gr" include WmcModuleStage
 
-provide record EntryPrototype {
-  entryModuleId: String,
-  entry: WmcTCore.Module,
-  normalizedEntry: WmcTCoreNorm.Module,
-  normalizationIssues: List<WmcTCoreNorm.NormalizationIssue>,
+provide record BackendModuleArtifacts {
+  sourceNode: ModuleSystem.ModuleNode,
+  summary: ModuleInfer.ModuleSummary,
+  backendNode: WmcModuleIr.ModuleNode,
 }
 
-let joinStrings = (sep: String, parts: List<String>) => match (parts) {
-  [] => "",
-  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+provide record CompileGraphResult {
+  entry: String,
+  graph: WmcModuleIr.ModuleGraph,
+  modules: Map.Map<String, BackendModuleArtifacts>,
 }
 
-let hasFatalDiagnostic = (diags: List<Error.CompilerError>) =>
-  List.some((diag: Error.CompilerError) => diag.severity == Error.SError, diags)
-
-provide let buildEntryPrototype = (result: ModuleInfer.InferenceResult) => {
-  let entryModuleId = result.graph.entry
-  match (Map.get(entryModuleId, result.modules)) {
-    None => Err("missing entry module summary: " ++ entryModuleId),
-    Some(summary) => {
-      let entry = WmcTCore.fromModuleSummary(summary)
-      let norm = WmcTCoreNorm.normModuleDetailed(entry)
-      Ok({
-        entryModuleId,
-        entry,
-        normalizedEntry: norm.normalized,
-        normalizationIssues: norm.issues,
-      }: EntryPrototype)
-    },
-  }
+provide record BackendBootstrap {
+  inference: ModuleInfer.InferenceResult,
+  moduleGraph: WmcModuleIr.ModuleGraph,
 }
 
-provide let inferEntryPrototype = (
+provide let compileWorkmanGraph = (
   entryPath: String,
   options: ModuleSystem.BuildOptions=ModuleSystem.defaultOptions(),
 ) => {
-  let inferred = ModuleInfer.inferEntry(entryPath, options=options)
-  buildEntryPrototype(inferred)
+  let moduleSummaries = ModuleInfer.inferEntry(entryPath, options=options)
+  let moduleGraph = WmcModuleStage.buildModuleGraph(moduleSummaries)
+  let sourceGraph = moduleSummaries.graph
+  let sourceGraphNodes = sourceGraph.nodes
+  let sourceGraphTopo = sourceGraph.topo
+  let summaries = moduleSummaries.modules
+
+  let modules: Map.Map<String, BackendModuleArtifacts> = Map.make()
+  List.forEach((moduleId: String) => {
+    match (
+      (
+        Map.get(moduleId, moduleSummaries.graph.nodes),
+        Map.get(moduleId, moduleSummaries.modules),
+        Map.get(moduleId, moduleGraph.nodes),
+      )
+    ) {
+      (Some(sourceNode), Some(summary), Some(backendNode)) =>
+        Map.set(
+          moduleId,
+          { sourceNode, summary, backendNode }: BackendModuleArtifacts,
+          modules
+        ),
+      _ => void,
+    }
+  }, sourceGraphTopo)
+
+  { entry: sourceGraph.entry, graph: moduleGraph, modules }: CompileGraphResult
 }
 
-provide let isBackendReadyEntry = (proto: EntryPrototype) =>
-  !hasFatalDiagnostic(proto.entry.diagnostics)
-
-provide let debugSummary = (proto: EntryPrototype) => {
-  let valueLines = List.map((binding: WmcTCore.TopValueBinding) => {
-    let tyText = match (binding.binding.value.node.ty) {
-      None => "?",
-      Some(ty) => Types.typeToReadableString(ty),
-    }
-    let exportTag = if (binding.exported) { "export " } else { "" }
-    exportTag ++ binding.name ++ ": " ++ tyText
-  }, proto.entry.values)
-
-  "WMC backend prototype entry="
-    ++ proto.entryModuleId
-    ++ " values="
-    ++ toString(List.length(proto.entry.values))
-    ++ " types="
-    ++ toString(List.length(proto.entry.typeDeclNames))
-    ++ " records="
-    ++ toString(List.length(proto.entry.recordDeclNames))
-    ++ " fatal="
-    ++ toString(hasFatalDiagnostic(proto.entry.diagnostics))
-    ++ " norm_issues="
-    ++ toString(List.length(proto.normalizationIssues))
-    ++ (if (valueLines == []) {
-      ""
-    } else {
-      "\n" ++ joinStrings("\n", valueLines)
-    })
+provide let bootstrap = (
+  entryPath: String,
+  options: ModuleSystem.BuildOptions=ModuleSystem.defaultOptions(),
+) => {
+  let inference = ModuleInfer.inferEntry(entryPath, options=options)
+  let moduleGraph = WmcModuleStage.buildModuleGraph(inference)
+  { inference, moduleGraph }: BackendBootstrap
 }

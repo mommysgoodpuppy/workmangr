@@ -14,6 +14,7 @@ provide enum Stage {
   Parsing,
   Lowering,
   TypeInference,
+  Backend,
 }
 
 // Diagnostic severity (matches LSP DiagnosticSeverity values)
@@ -81,6 +82,7 @@ let stageToString = (stage: Stage) => {
     Parsing => "Parsing",
     Lowering => "Lowering",
     TypeInference => "Type Inference",
+    Backend => "Backend",
   }
 }
 

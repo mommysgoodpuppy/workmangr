@@ -9,13 +9,9 @@ from "wasi/process" include Process
 
 from "../module/module_system.gr" include ModuleSystem
 from "../backend/wmc/driver.gr" include WmcDriver
-from "../backend/wmc/mir_lower.gr" include WmcMirLower
-from "../backend/wmc/emit_zig.gr" include WmcEmitZig
 from "../backend/wmc/emit_zig_direct.gr" include WmcEmitZigDirect
 from "../backend/wmc/tcore.gr" include WmcTCore
 from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
-from "../backend/wmc/expr_inline.gr" include WmcExprInline
-from "../backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
 from "../core/types.gr" include Types
 from "../core/error.gr" include Error
 
@@ -42,11 +38,40 @@ let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
   }
 }
 
-let findCompilableMainExpr = (
+let rec zigTypeNameFromType = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNumber => "comptime_int",
+    Types.TString => "[]const u8",
+    Types.TChar => "u8",
+    Types.TByte => "u8",
+    Types.TBool => "bool",
+    Types.TVoid => "void",
+    Types.TTuple(items) => "struct { " ++ joinStrings(", ", List.map(zigTypeNameFromType, items)) ++ " }",
+    Types.TFun(_, _) => "comptime_int",
+    Types.TNominal(name, _) =>
+      if (name == "Int") {
+        "comptime_int"
+      } else if (name == "U8") {
+        "u8"
+      } else if (name == "List") {
+        "comptime_int"
+      } else if (name == "Result" || name == "IResult" || name == "Option" || name == "IOption") {
+        "comptime_int"
+      } else {
+        name
+      },
+    Types.THole(_) => "comptime_int",
+    Types.TVar(_) => "comptime_int",
+  }
+
+record MainPlan {
+  preparedExpr: WmcTCoreNorm.Expr,
+  resultTypeName: String,
+}
+
+let planCompilableMainExpr = (
   rawModule: WmcTCore.Module,
   normalizedModule: WmcTCoreNorm.Module,
-  optimize: Bool=false,
-  sourceText: Option<String>,
 ) => {
   let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
     match (rest) {
@@ -62,50 +87,11 @@ let findCompilableMainExpr = (
     None => None,
     Some(binding) => {
       let resultTypeName = match (binding.value.node.ty) {
-        Some(Types.TFun(_paramTy, returnTy)) => WmcEmitZig.zigTypeNameFromType(returnTy),
-        Some(ty) => WmcEmitZig.zigTypeNameFromType(ty),
+        Some(Types.TFun(_paramTy, returnTy)) => zigTypeNameFromType(returnTy),
+        Some(ty) => zigTypeNameFromType(ty),
         None => "comptime_int",
       }
-      let preparedExpr = if (optimize) {
-        let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
-        WmcTCoreSimplify.simplifyExpr(inlined)
-      } else {
-        binding.value
-      }
-      let executableExpr = match (preparedExpr.kind) {
-        WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
-          body,
-        _ => preparedExpr,
-      }
-      if (optimize) {
-        match (WmcMirLower.lowerModuleExprToCfgNoArg(normalizedModule, executableExpr)) {
-          None => None,
-          Some(cfg) =>
-            Some(
-              WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
-                cfg,
-                options={
-                  wmFunctionName: "__wm_main",
-                  zigMainName: "main",
-                  includeSourceComments: true,
-                  sourceText,
-                  resultType: Some(resultTypeName),
-                },
-              )
-            ),
-        }
-      } else {
-        Some(
-          WmcEmitZigDirect.emitProgramDirectNoOpt(
-            rawModule,
-            preparedExpr,
-            resultTypeName,
-            wmFunctionName="__wm_main",
-            zigMainName="main",
-            sourceText,
-          )
-        )
-      }
+      Some({ preparedExpr: binding.value, resultTypeName }: MainPlan)
     },
   }
 }
@@ -116,24 +102,34 @@ let jsonSuccess = (zigSource: String) =>
 let jsonFailure = (message: String) =>
   "{\"success\":false,\"error\":\"" ++ escapeJson(message) ++ "\"}"
 
-provide let compileFileToJson = (filePath: String, optimize: Bool=false) => {
+provide let compileFileToJson = (filePath: String) => {
   let options = ModuleSystem.defaultOptions()
   let sourceText = match (Fs.Utf8.readFile(Path.fromString(filePath))) {
     Ok(src) => Some(src),
     Err(_) => None,
   }
-  match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
+  match (WmcDriver.inferProgramPrototype(filePath, options=options)) {
     Err(msg) => jsonFailure(msg),
     Ok(proto) => {
-      if (!WmcDriver.isBackendReadyEntry(proto)) {
-        jsonFailure(fatalDiagnosticSummary(proto.entry.diagnostics))
+      if (!WmcDriver.isBackendReadyProgram(proto)) {
+        jsonFailure(fatalDiagnosticSummary(proto.entry.module_.diagnostics))
       } else {
-        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry, optimize=optimize, sourceText=sourceText)) {
+        match (planCompilableMainExpr(proto.entry.module_, proto.entry.normalized)) {
           None =>
             jsonFailure(
               "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"
             ),
-          Some(zigSource) => jsonSuccess(zigSource),
+          Some(plan) =>
+            jsonSuccess(
+              WmcEmitZigDirect.emitProgramDirectNoOptFromProgram(
+                proto,
+                plan.preparedExpr,
+                plan.resultTypeName,
+                wmFunctionName="__wm_main",
+                zigMainName="main",
+                sourceText,
+              )
+            ),
         }
       }
     },
@@ -148,14 +144,10 @@ let main = () => {
       if (argCount < 2) {
         print(jsonFailure("Usage: grain --include-dirs src src/api/wmc_api.gr -- <file.wm>"))
       } else {
-        let (optimize, filePath) = if (argCount >= 3 && (Array.get(1, args) == "-O" || Array.get(1, args) == "--optimize")) {
-          (true, Array.get(2, args))
-        } else {
-          (false, Array.get(1, args))
-        }
+        let filePath = Array.get(1, args)
         match (Fs.Utf8.readFile(Path.fromString(filePath))) {
           Err(_) => print(jsonFailure("Failed to read file: " ++ filePath)),
-          Ok(_source) => print(compileFileToJson(filePath, optimize=optimize)),
+          Ok(_source) => print(compileFileToJson(filePath)),
         }
       }
     },

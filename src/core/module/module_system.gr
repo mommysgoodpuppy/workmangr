@@ -7,10 +7,10 @@ from "map" include Map
 from "path" include Path
 from "string" include String
 
-from "../core/error.gr" include Error
-from "../core/source.gr" include Source
-from "../core/surface_ast.gr" include SurfaceAst
-from "../frontend/parser.gr" include Parser
+from "../error.gr" include Error
+from "../source.gr" include Source
+from "../surface_ast.gr" include SurfaceAst
+from "../../frontend/parser.gr" include Parser
 
 provide enum ModuleStatus {
   StatusOk,

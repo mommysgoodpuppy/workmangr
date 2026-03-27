@@ -1,0 +1,159 @@
+module WmcEmitTypeDefs
+
+from "char" include Char
+from "list" include List
+from "string" include String
+
+from "../../core/core_ast.gr" include CoreAst
+from "./driver.gr" include WmcDriver
+from "./tcore.gr" include WmcTCore
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let sanitizeIdentBase = (input: String) => {
+  let isAsciiLetter = (c: Char) => {
+    let code = Char.code(c)
+    (code >= Char.code('a') && code <= Char.code('z'))
+      || (code >= Char.code('A') && code <= Char.code('Z'))
+  }
+  let isAsciiDigit = (c: Char) => {
+    let code = Char.code(c)
+    code >= Char.code('0') && code <= Char.code('9')
+  }
+  let rec loop = (idx: Number, out: String) => {
+    if (idx >= String.length(input)) {
+      out
+    } else {
+      let ch = String.charAt(idx, input)
+      let keep = isAsciiLetter(ch) || isAsciiDigit(ch) || ch == '_'
+      let next = if (keep) { out ++ Char.toString(ch) } else { out ++ "_" }
+      loop(idx + 1, next)
+    }
+  }
+  if (String.length(input) == 0) {
+    "_wm"
+  } else {
+    let raw = loop(0, "")
+    if (raw == "") { "_wm" } else { raw }
+  }
+}
+
+provide let sanitizeLocalBase = (name: String) => sanitizeIdentBase(name)
+
+let rec zigTypeNameFromTypeExpr = (ty: CoreAst.TypeExpr) =>
+  match (ty.kind) {
+    CoreAst.Var(name) =>
+      if (name.text == "Number" || name.text == "Int") {
+        "comptime_int"
+      } else if (name.text == "Char" || name.text == "Byte" || name.text == "U8") {
+        "u8"
+      } else if (name.text == "String") {
+        "[]const u8"
+      } else if (name.text == "Bool") {
+        "bool"
+      } else if (name.text == "Void") {
+        "void"
+      } else {
+        sanitizeLocalBase(name.text)
+      },
+    CoreAst.Ref(name, _) =>
+      if (name.text == "Number" || name.text == "Int") {
+        "comptime_int"
+      } else if (name.text == "Char" || name.text == "Byte" || name.text == "U8") {
+        "u8"
+      } else if (name.text == "String") {
+        "[]const u8"
+      } else if (name.text == "Bool") {
+        "bool"
+      } else if (name.text == "Void") {
+        "void"
+      } else {
+        sanitizeLocalBase(name.text)
+      },
+    CoreAst.Tuple(items) =>
+      "struct { " ++ joinStrings(", ", List.map(zigTypeNameFromTypeExpr, items)) ++ " }",
+    CoreAst.UnitType => "void",
+    _ => "comptime_int",
+  }
+
+let renderRecordTypeDef = (typeInfo: WmcTCore.TypeInfo) =>
+  match (typeInfo.recordFields) {
+    None => None,
+    Some(fields) =>
+      if (typeInfo.typeParams != []) {
+        None
+      } else {
+        Some(
+          "const "
+            ++ sanitizeLocalBase(typeInfo.name)
+            ++ " = struct {\n"
+            ++ joinStrings(
+              "\n",
+              List.map(
+                ((fieldName, fieldTy): (String, CoreAst.TypeExpr)) =>
+                  "  " ++ fieldName ++ ": " ++ zigTypeNameFromTypeExpr(fieldTy) ++ ",",
+                fields,
+              ),
+            )
+            ++ "\n};",
+        )
+      },
+  }
+
+let renderVariantTypeDef = (typeInfo: WmcTCore.TypeInfo) =>
+  if (typeInfo.recordFields != None || typeInfo.typeParams != []) {
+    None
+  } else if (typeInfo.constructors == []) {
+    None
+  } else {
+    Some(
+      "const "
+        ++ sanitizeLocalBase(typeInfo.name)
+        ++ " = struct {\n"
+        ++ "  tag: []const u8,\n"
+        ++ "  payload: comptime_int,\n"
+        ++ "};",
+    )
+  }
+
+let dedupe = (items: List<String>) => {
+  let rec loop = (rest: List<String>, accRev: List<String>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [item, ...tail] =>
+        if (List.some((existing: String) => existing == item, accRev)) {
+          loop(tail, accRev)
+        } else {
+          loop(tail, [item, ...accRev])
+        },
+    }
+  loop(items, [])
+}
+
+provide let emitProgramTypeDefs = (programProto: WmcDriver.ProgramPrototype) => {
+  let rec loopModules = (modules: List<WmcDriver.BackendModule>, accRev: List<String>) =>
+    match (modules) {
+      [] => List.reverse(accRev),
+      [backendModule, ...tail] => {
+        let rec loopTypes = (types: List<WmcTCore.TypeInfo>, accTypesRev: List<String>) =>
+          match (types) {
+            [] => accTypesRev,
+            [typeInfo, ...rest] => {
+              let nextRev = match (renderRecordTypeDef(typeInfo)) {
+                Some(def) => [def, ...accTypesRev],
+                None => match (renderVariantTypeDef(typeInfo)) {
+                  Some(def) => [def, ...accTypesRev],
+                  None => accTypesRev,
+                },
+              }
+              loopTypes(rest, nextRev)
+            },
+          }
+        loopModules(tail, loopTypes(backendModule.module_.typeInfos, accRev))
+      },
+    }
+  dedupe(loopModules(programProto.modules, []))
+}

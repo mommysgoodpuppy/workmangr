@@ -1,0 +1,109 @@
+module WmcModuleStage
+
+from "list" include List
+from "map" include Map
+
+from "../../core/env.gr" include Env
+from "../../core/types.gr" include Types
+from "../../core/module/module_infer.gr" include ModuleInfer
+from "../../core/module/module_system.gr" include ModuleSystem
+from "../../core/module/module_ir.gr" include WmcModuleIr
+
+let moduleRoleFor = (
+  graph: ModuleSystem.ModuleGraph,
+  node: ModuleSystem.ModuleNode,
+) => if (node.id == graph.entry) {
+  WmcModuleIr.EntryModule
+} else {
+  WmcModuleIr.RegularModule
+}
+
+let emptyExports: WmcModuleIr.ModuleExports = { values: [], types: [] }
+
+let backendStatusFor = (status: ModuleSystem.ModuleStatus) => match (status) {
+  ModuleSystem.StatusOk => WmcModuleIr.StatusOk,
+  ModuleSystem.StatusPartial => WmcModuleIr.StatusPartial,
+  ModuleSystem.StatusFailed => WmcModuleIr.StatusFailed,
+}
+
+let moduleExportsFromSummary = (summary: ModuleInfer.ModuleSummary) => {
+  let values = List.map(
+    ((name, _scheme): (String, Types.Scheme)) => name,
+    Map.toList(summary.valueExports)
+  )
+  let types = List.map(
+    ((name, _info): (String, Env.TypeInfo)) => name,
+    Map.toList(summary.typeExports)
+  )
+  { values, types }: WmcModuleIr.ModuleExports
+}
+
+let moduleNodeFromNode = (
+  graph: ModuleSystem.ModuleGraph,
+  node: ModuleSystem.ModuleNode,
+  summaries: Map.Map<String, ModuleInfer.ModuleSummary>,
+) => {
+  let exports = match (Map.get(node.id, summaries)) {
+    Some(summary) => moduleExportsFromSummary(summary),
+    None => emptyExports,
+  }
+  {
+    id: node.id,
+    sourcePath: node.sourcePath,
+    imports: node.imports,
+    reexports: node.reexports,
+    status: backendStatusFor(node.status),
+    role: moduleRoleFor(graph, node),
+    exports,
+    diagnostics: node.diagnostics,
+  }: WmcModuleIr.ModuleNode
+}
+
+let edgesFromNode = (node: ModuleSystem.ModuleNode) => {
+  let importEdges = List.map(
+    (toModuleId: String) =>
+      { fromModuleId: node.id, toModuleId, kind: WmcModuleIr.ImportEdge }:
+        WmcModuleIr.ModuleEdge,
+    node.imports
+  )
+  let reexportEdges = List.map(
+    (toModuleId: String) =>
+      { fromModuleId: node.id, toModuleId, kind: WmcModuleIr.ReexportEdge }:
+        WmcModuleIr.ModuleEdge,
+    node.reexports
+  )
+  List.append(importEdges, reexportEdges)
+}
+
+provide let buildModuleGraph = (inference: ModuleInfer.InferenceResult) => {
+  let nodes: Map.Map<String, WmcModuleIr.ModuleNode> = Map.make()
+  let graph = inference.graph
+  let graphNodeMap = graph.nodes
+  let summaries = inference.modules
+
+  let rec collect = (
+    remaining: List<String>,
+    edgesRev: List<WmcModuleIr.ModuleEdge>,
+  ) => match (remaining) {
+    [] => List.reverse(edgesRev),
+    [moduleId, ...rest] => match (Map.get(moduleId, graphNodeMap)) {
+      Some(node) => {
+        let moduleNode = moduleNodeFromNode(graph, node, summaries)
+        Map.set(moduleId, moduleNode, nodes)
+        let nodeEdges = edgesFromNode(node)
+        collect(rest, List.append(List.reverse(nodeEdges), edgesRev))
+      },
+      None => collect(rest, edgesRev),
+    },
+  }
+
+  let topo = graph.topo
+  let edges = collect(topo, [])
+  {
+    backendMode: WmcModuleIr.Unified,
+    entry: graph.entry,
+    order: topo,
+    nodes,
+    edges,
+  }: WmcModuleIr.ModuleGraph
+}

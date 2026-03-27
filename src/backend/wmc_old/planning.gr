@@ -1,0 +1,249 @@
+module WmcEmitPlanning
+
+from "list" include List
+
+from "./common.gr" include WmcEmitCommon
+from "./driver.gr" include WmcDriver
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+from "./top_bindings.gr" include WmcEmitTopBindings
+
+provide let findNormalizedBinding = (backendModule: WmcDriver.BackendModule, name: String) => {
+  let rec loop = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [binding, ...tail] => if (binding.name == name) { Some(binding) } else { loop(tail) },
+    }
+  loop(backendModule.normalized.values)
+}
+
+let rec patternBoundNames = (pattern: WmcTCoreNorm.Pattern, accRev: List<String>) =>
+  match (pattern.kind) {
+    WmcTCoreNorm.NPVar(name) =>
+      if (WmcEmitCommon.containsName(accRev, name)) { accRev } else { [name, ...accRev] },
+    WmcTCoreNorm.NPConstructor(_, args) => patternBoundNamesList(args, accRev),
+    WmcTCoreNorm.NPTuple(items) => patternBoundNamesList(items, accRev),
+    _ => accRev,
+  }
+and patternBoundNamesList = (items: List<WmcTCoreNorm.Pattern>, accRev: List<String>) =>
+  match (items) {
+    [] => accRev,
+    [item, ...tail] => patternBoundNamesList(tail, patternBoundNames(item, accRev)),
+  }
+
+provide let collectGlobalRefsInExpr = (
+  ctx: WmcEmitCommon.ProgramEmitCtx,
+  rawModule: WmcTCore.Module,
+  expr: WmcTCoreNorm.Expr,
+  localsRev: List<String>,
+  resolveBackendBinding,
+  hasConstructorName,
+  hasRecordTypeName,
+  isIntrinsicName,
+) => {
+  let rec walk = (
+    current: WmcTCoreNorm.Expr,
+    locals: List<String>,
+    accRev: List<WmcEmitCommon.GlobalRef>,
+  ) =>
+    match (current.kind) {
+      WmcTCoreNorm.NELit(_) => accRev,
+      WmcTCoreNorm.NEUnknown(_) => accRev,
+      WmcTCoreNorm.NEIdent(name) =>
+        if (
+          WmcEmitCommon.containsName(locals, name)
+            || isIntrinsicName(name)
+            || hasConstructorName(ctx, name)
+            || hasRecordTypeName(ctx, name)
+        ) {
+          accRev
+        } else {
+          let resolvedOpt: Option<WmcEmitCommon.ResolvedBackendBinding> =
+            resolveBackendBinding(ctx, rawModule, name)
+          match (resolvedOpt) {
+            Some(resolved) =>
+              if (resolved.kind == "intrinsic") {
+                accRev
+              } else {
+                WmcEmitCommon.addGlobalRef(resolved.ref, accRev)
+              },
+            None => accRev,
+          }
+        },
+      WmcTCoreNorm.NEApply(callee, arg) => walk(arg, locals, walk(callee, locals, accRev)),
+      WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) => {
+        let acc1 = walk(valueExpr, locals, accRev)
+        let nextLocals = if (name == "_") { locals } else { [name, ...locals] }
+        walk(bodyExpr, nextLocals, acc1)
+      },
+      WmcTCoreNorm.NELambda(param, body) => walk(body, [param, ...locals], accRev),
+      WmcTCoreNorm.NETuple(items) => walkExprs(items, locals, accRev),
+      WmcTCoreNorm.NERecordLit(items) => walkRecordItems(items, locals, accRev),
+      WmcTCoreNorm.NEMatch(m) => {
+        let acc1 = walk(m.scrutinee, locals, accRev)
+        walkClauses(m.clauses, locals, acc1)
+      },
+    }
+  and walkExprs = (
+    items: List<WmcTCoreNorm.Expr>,
+    locals: List<String>,
+    accRev: List<WmcEmitCommon.GlobalRef>,
+  ) =>
+    match (items) {
+      [] => accRev,
+      [item, ...tail] => walkExprs(tail, locals, walk(item, locals, accRev)),
+    }
+  and walkRecordItems = (
+    items: List<WmcTCoreNorm.RecordItem>,
+    locals: List<String>,
+    accRev: List<WmcEmitCommon.GlobalRef>,
+  ) =>
+    match (items) {
+      [] => accRev,
+      [item, ...tail] => {
+        let nextAcc = match (item) {
+          WmcTCoreNorm.NRField(_, value) => walk(value, locals, accRev),
+          WmcTCoreNorm.NRSpread(value) => walk(value, locals, accRev),
+        }
+        walkRecordItems(tail, locals, nextAcc)
+      },
+    }
+  and walkClauses = (
+    clauses: List<WmcTCoreNorm.MatchClause>,
+    locals: List<String>,
+    accRev: List<WmcEmitCommon.GlobalRef>,
+  ) =>
+    match (clauses) {
+      [] => accRev,
+      [clause, ...tail] => {
+        let clauseLocals = patternBoundNames(clause.param, locals)
+        let acc1 = match (clause.guard) {
+          None => accRev,
+          Some(guardExpr) => walk(guardExpr, clauseLocals, accRev),
+        }
+        let acc2 = walk(clause.body, clauseLocals, acc1)
+        walkClauses(tail, locals, acc2)
+      },
+    }
+  List.reverse(walk(expr, localsRev, []))
+}
+
+provide let reachableProgramBindings = (
+  programProto: WmcDriver.ProgramPrototype,
+  mainExpr: WmcTCoreNorm.Expr,
+  findBackendModule,
+  resolveBackendBinding,
+  hasConstructorName,
+  hasRecordTypeName,
+  isIntrinsicName,
+) => {
+  let entryCtx: WmcEmitCommon.ProgramEmitCtx = {
+    currentModuleId: programProto.entry.moduleId,
+    modules: programProto.modules,
+    currentImports: programProto.entry.imports,
+  }
+  let seedRefs = collectGlobalRefsInExpr(
+    entryCtx,
+    programProto.entry.module_,
+    mainExpr,
+    [],
+    resolveBackendBinding,
+    hasConstructorName,
+    hasRecordTypeName,
+    isIntrinsicName,
+  )
+  let rec process = (
+    queue: List<WmcEmitCommon.GlobalRef>,
+    seenRev: List<WmcEmitCommon.GlobalRef>,
+  ) =>
+    match (queue) {
+      [] => List.reverse(seenRev),
+      [ref, ...tail] =>
+        if (WmcEmitCommon.containsGlobalRef(seenRev, ref)) {
+          process(tail, seenRev)
+        } else {
+          let nextRefs = match (findBackendModule(entryCtx, ref.moduleId)) {
+            None => [],
+            Some(backendModule) =>
+              match (findNormalizedBinding(backendModule, ref.name)) {
+                None => [],
+                Some(binding) => {
+                  let bindingCtx: WmcEmitCommon.ProgramEmitCtx = {
+                    currentModuleId: backendModule.moduleId,
+                    modules: programProto.modules,
+                    currentImports: backendModule.imports,
+                  }
+                  match (WmcEmitTopBindings.findRawTopBinding(backendModule.module_, ref.name)) {
+                    Some(rawBinding) =>
+                      match (WmcEmitTopBindings.rawFnBundleToCallable(rawBinding)) {
+                        Some((paramName, fnBody)) =>
+                          collectGlobalRefsInExpr(
+                            bindingCtx,
+                            backendModule.module_,
+                            fnBody,
+                            [paramName],
+                            resolveBackendBinding,
+                            hasConstructorName,
+                            hasRecordTypeName,
+                            isIntrinsicName,
+                          ),
+                        None =>
+                          match (binding.value.kind) {
+                            WmcTCoreNorm.NELambda(param, body) =>
+                              collectGlobalRefsInExpr(
+                                bindingCtx,
+                                backendModule.module_,
+                                body,
+                                [param],
+                                resolveBackendBinding,
+                                hasConstructorName,
+                                hasRecordTypeName,
+                                isIntrinsicName,
+                              ),
+                            _ =>
+                              collectGlobalRefsInExpr(
+                                bindingCtx,
+                                backendModule.module_,
+                                binding.value,
+                                [],
+                                resolveBackendBinding,
+                                hasConstructorName,
+                                hasRecordTypeName,
+                                isIntrinsicName,
+                              ),
+                          },
+                      },
+                    None =>
+                      match (binding.value.kind) {
+                        WmcTCoreNorm.NELambda(param, body) =>
+                          collectGlobalRefsInExpr(
+                            bindingCtx,
+                            backendModule.module_,
+                            body,
+                            [param],
+                            resolveBackendBinding,
+                            hasConstructorName,
+                            hasRecordTypeName,
+                            isIntrinsicName,
+                          ),
+                        _ =>
+                          collectGlobalRefsInExpr(
+                            bindingCtx,
+                            backendModule.module_,
+                            binding.value,
+                            [],
+                            resolveBackendBinding,
+                            hasConstructorName,
+                            hasRecordTypeName,
+                            isIntrinsicName,
+                          ),
+                      },
+                  }
+                },
+              },
+          }
+          process(List.append(nextRefs, tail), [ref, ...seenRev])
+        },
+    }
+  process(seedRefs, [])
+}

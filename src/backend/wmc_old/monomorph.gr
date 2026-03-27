@@ -1,0 +1,203 @@
+module WmcMonomorph
+
+from "list" include List
+
+from "../../core/types.gr" include Types
+from "./analysis.gr" include WmcEmitAnalysis
+from "./driver.gr" include WmcDriver
+from "./tcore.gr" include WmcTCore
+from "./tcore_norm.gr" include WmcTCoreNorm
+
+provide record CallableInstance {
+  moduleId: String,
+  name: String,
+  argKey: String,
+  resultKey: String,
+  key: String,
+}
+
+provide record MonomorphPlan {
+  entryModuleId: String,
+  concreteTypeKeys: List<String>,
+  nominalInstances: List<WmcEmitAnalysis.ConcreteNominalInstance>,
+  callableInstances: List<CallableInstance>,
+}
+
+let callableInstanceKey = (
+  moduleId: String,
+  name: String,
+  argKey: String,
+  resultKey: String,
+) => moduleId ++ "::" ++ name ++ "<" ++ argKey ++ " -> " ++ resultKey ++ ">"
+
+let insertCallableInstance = (item: CallableInstance, accRev: List<CallableInstance>) =>
+  if (List.some((existing: CallableInstance) => existing.key == item.key, accRev)) {
+    accRev
+  } else {
+    [item, ...accRev]
+  }
+
+let rec typeHasOpenVars = (ty) =>
+  match (ty) {
+    Types.THole(_) => true,
+    Types.TVar(_) => true,
+    Types.TTuple(items) => List.some(typeHasOpenVars, items),
+    Types.TFun(arg, result) => typeHasOpenVars(arg) || typeHasOpenVars(result),
+    Types.TNominal(_, args) => List.some(typeHasOpenVars, args),
+    _ => false,
+  }
+
+let closedTypeKeyOpt = (tyOpt) =>
+  match (tyOpt) {
+    Some(ty) when !typeHasOpenVars(ty) => Some(WmcEmitAnalysis.backendTypeKeyFromType(ty)),
+    _ => None,
+  }
+
+let lookupGlobalRef = (
+  imports: List<WmcDriver.ResolvedImportBinding>,
+  rawModule: WmcTCore.Module,
+  name: String,
+) => {
+  let rec findLocal = (rest: List<WmcTCore.TopValueBinding>) =>
+    match (rest) {
+      [] => None,
+      [binding, ...tail] =>
+        if (binding.name == name) {
+          Some((rawModule.moduleId, name))
+        } else {
+          findLocal(tail)
+        },
+    }
+  match (findLocal(rawModule.values)) {
+    Some(ref) => Some(ref),
+    None => {
+      let rec findImport = (rest: List<WmcDriver.ResolvedImportBinding>) =>
+        match (rest) {
+          [] => None,
+          [item, ...tail] =>
+            if (item.localName == name) {
+              Some((item.providerModuleId, item.importedName))
+            } else {
+              findImport(tail)
+            },
+        }
+      findImport(imports)
+    },
+  }
+}
+
+let rec collectCallableInstancesFromExpr = (
+  imports: List<WmcDriver.ResolvedImportBinding>,
+  rawModule: WmcTCore.Module,
+  expr: WmcTCoreNorm.Expr,
+  locals: List<String>,
+  accRev: List<CallableInstance>,
+) =>
+  match (expr.kind) {
+    WmcTCoreNorm.NELit(_) => accRev,
+    WmcTCoreNorm.NEIdent(_) => accRev,
+    WmcTCoreNorm.NEUnknown(_) => accRev,
+    WmcTCoreNorm.NEApply(callee, arg) =>
+      {
+        let acc1 = collectCallableInstancesFromExpr(imports, rawModule, callee, locals, accRev)
+        let acc2 = collectCallableInstancesFromExpr(imports, rawModule, arg, locals, acc1)
+        match (callee.kind) {
+          WmcTCoreNorm.NEIdent(name) =>
+            if (List.some((localName: String) => localName == name, locals)) {
+              acc2
+            } else {
+              match ((
+                lookupGlobalRef(imports, rawModule, name),
+                closedTypeKeyOpt(arg.node.ty),
+                closedTypeKeyOpt(expr.node.ty),
+              )) {
+                (Some((moduleId, resolvedName)), Some(argKey), Some(resultKey)) =>
+                  insertCallableInstance(
+                    {
+                      moduleId,
+                      name: resolvedName,
+                      argKey,
+                      resultKey,
+                      key: callableInstanceKey(moduleId, resolvedName, argKey, resultKey),
+                    }: CallableInstance,
+                    acc2,
+                  ),
+                _ => acc2,
+              }
+            },
+          _ => acc2,
+        }
+      },
+    WmcTCoreNorm.NELet(name, valueExpr, bodyExpr) =>
+      collectCallableInstancesFromExpr(
+        imports,
+        rawModule,
+        bodyExpr,
+        [name, ...locals],
+        collectCallableInstancesFromExpr(imports, rawModule, valueExpr, locals, accRev),
+      ),
+    WmcTCoreNorm.NELambda(param, body) =>
+      collectCallableInstancesFromExpr(imports, rawModule, body, [param, ...locals], accRev),
+    WmcTCoreNorm.NETuple(items) =>
+      List.reduce(
+        (accX: List<CallableInstance>, item: WmcTCoreNorm.Expr) =>
+          collectCallableInstancesFromExpr(imports, rawModule, item, locals, accX),
+        accRev,
+        items,
+      ),
+    WmcTCoreNorm.NERecordLit(items) =>
+      List.reduce(
+        (accX: List<CallableInstance>, item: WmcTCoreNorm.RecordItem) =>
+          match (item) {
+            WmcTCoreNorm.NRField(_, value) =>
+              collectCallableInstancesFromExpr(imports, rawModule, value, locals, accX),
+            WmcTCoreNorm.NRSpread(value) =>
+              collectCallableInstancesFromExpr(imports, rawModule, value, locals, accX),
+          },
+        accRev,
+        items,
+      ),
+    WmcTCoreNorm.NEMatch(m) =>
+      {
+        let acc1 = collectCallableInstancesFromExpr(imports, rawModule, m.scrutinee, locals, accRev)
+        List.reduce(
+          (accX: List<CallableInstance>, clause: WmcTCoreNorm.MatchClause) => {
+            let acc2 = match (clause.guard) {
+              None => accX,
+              Some(guardExpr) => collectCallableInstancesFromExpr(imports, rawModule, guardExpr, locals, accX),
+            }
+            collectCallableInstancesFromExpr(imports, rawModule, clause.body, locals, acc2)
+          },
+          acc1,
+          m.clauses,
+        )
+      },
+  }
+
+provide let collectCallableInstances = (programProto: WmcDriver.ProgramPrototype) => {
+  let rec loopModules = (
+    modules: List<WmcDriver.BackendModule>,
+    accRev: List<CallableInstance>,
+  ) =>
+    match (modules) {
+      [] => List.reverse(accRev),
+      [backendModule, ...tail] => {
+        let acc2 = List.reduce(
+          (accX: List<CallableInstance>, binding: WmcTCoreNorm.TopValueBinding) =>
+            collectCallableInstancesFromExpr(backendModule.imports, backendModule.module_, binding.value, [], accX),
+          accRev,
+          backendModule.normalized.values,
+        )
+        loopModules(tail, acc2)
+      },
+    }
+  loopModules(programProto.modules, [])
+}
+
+provide let collectMonomorphPlan = (programProto: WmcDriver.ProgramPrototype) =>
+  {
+    entryModuleId: programProto.entryModuleId,
+    concreteTypeKeys: WmcEmitAnalysis.collectProgramConcreteTypeKeys(programProto),
+    nominalInstances: WmcEmitAnalysis.collectProgramConcreteNominalInstances(programProto),
+    callableInstances: collectCallableInstances(programProto),
+  }: MonomorphPlan

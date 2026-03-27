@@ -110,12 +110,12 @@ let mut debugEnabled = match (envLookup("WORKMAN_LSP_DEBUG")) {
   None => false,
 }
 let mut workspaceRootPath: Option<String> = None
-let defaultV0StdRoot = "c:/GIT/workman/std"
+let defaultStdRoot = "std"
 let v0StdRoot = match (argValue("--std-root")) {
   Some(path) => path,
   None => match (envLookup("WORKMAN_STD_ROOT")) {
     Some(path) => path,
-    None => defaultV0StdRoot,
+    None => defaultStdRoot,
   },
 }
 let _ = logErr("[LSP] stdRoot=" ++ v0StdRoot)

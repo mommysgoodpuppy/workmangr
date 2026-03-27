@@ -1,21 +1,14 @@
 module CompileCli
 
-from "list" include List
 from "fs" include Fs
 from "path" include Path
 from "string" include String
+from "list" include List
+from "map" include Map
 
-from "../module/module_system.gr" include ModuleSystem
+from "../core/module/module_system.gr" include ModuleSystem
+from "../core/module/module_ir.gr" include WmcModuleIr
 from "../backend/wmc/driver.gr" include WmcDriver
-from "../backend/wmc/mir_lower.gr" include WmcMirLower
-from "../backend/wmc/emit_zig.gr" include WmcEmitZig
-from "../backend/wmc/emit_zig_direct.gr" include WmcEmitZigDirect
-from "../backend/wmc/tcore.gr" include WmcTCore
-from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
-from "../backend/wmc/expr_inline.gr" include WmcExprInline
-from "../backend/wmc/tcore_simplify.gr" include WmcTCoreSimplify
-from "../core/types.gr" include Types
-from "../core/error.gr" include Error
 
 let compileOutputPath = (filePath: String) =>
   if (String.endsWith(".wm", filePath)) {
@@ -24,125 +17,59 @@ let compileOutputPath = (filePath: String) =>
     filePath ++ ".zig"
   }
 
-let joinStrings = (sep: String, items: List<String>) => match (items) {
-  [] => "",
-  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
-}
+let renderBootstrapStub = (
+  sourceFile: String,
+  moduleCount: Number,
+  diagCount: Number,
+) =>
+  "// WMC backend reboot scaffold\n"
+    ++ "const std = @import(\"std\");\n\n"
+    ++ "pub fn main() void {\n"
+    ++ "  std.debug.print(\"WMC reboot scaffold active\\n\", .{});\n"
+    ++ "  std.debug.print(\"source: " ++ sourceFile ++ "\\n\", .{});\n"
+    ++ "  std.debug.print(\"modules: " ++ toString(moduleCount) ++ "\\n\", .{});\n"
+    ++ "  std.debug.print(\"diagnostics: " ++ toString(diagCount) ++ "\\n\", .{});\n"
+    ++ "}\n"
 
-let fatalDiagnosticSummary = (diagnostics: List<Error.CompilerError>) => {
-  let fatals = List.filter((diag: Error.CompilerError) => diag.severity == Error.SError, diagnostics)
-  if (fatals == []) {
-    "Backend compile aborted: fatal diagnostics present"
-  } else {
-    let lines = List.map((diag: Error.CompilerError) =>
-      Error.errorToString(diag), fatals)
-    "Backend compile aborted: fatal diagnostics present\n" ++ joinStrings("\n", lines)
-  }
-}
-
-let findCompilableMainExpr = (
-  rawModule: WmcTCore.Module,
-  normalizedModule: WmcTCoreNorm.Module,
-  optimize: Bool=false,
-  sourceText: Option<String>,
-) => {
-  let rec findMain = (rest: List<WmcTCoreNorm.TopValueBinding>) =>
-    match (rest) {
-      [] => None,
-      [binding, ...tail] => {
-        if (binding.name == "main") {
-          Some(binding)
-        } else {
-          findMain(tail)
-        }
-      },
-    }
-  match (findMain(normalizedModule.values)) {
-    None => None,
-    Some(binding) => {
-      let resultTypeName = match (binding.value.node.ty) {
-        Some(Types.TFun(_paramTy, returnTy)) => WmcEmitZig.zigTypeNameFromType(returnTy),
-        Some(ty) => WmcEmitZig.zigTypeNameFromType(ty),
-        None => "comptime_int",
-      }
-      let preparedExpr = if (optimize) {
-        let inlined = WmcExprInline.inlineSimpleTopCallsInModuleExpr(rawModule, binding.value)
-        WmcTCoreSimplify.simplifyExpr(inlined)
-      } else {
-        binding.value
-      }
-      let executableExpr = match (preparedExpr.kind) {
-        WmcTCoreNorm.NELambda(param, body) when param == WmcTCoreNorm.zeroArgThunkParamName =>
-          body,
-        _ => preparedExpr,
-      }
-      if (optimize) {
-        match (WmcMirLower.lowerModuleExprToCfgNoArg(normalizedModule, executableExpr)) {
-          None => None,
-          Some(cfg) =>
-            Some(
-              WmcEmitZig.emitUnifiedCfgProgramNoArgSpecializedInt(
-                cfg,
-                options={
-                  wmFunctionName: "__wm_main",
-                  zigMainName: "main",
-                  includeSourceComments: true,
-                  sourceText,
-                  resultType: Some(resultTypeName),
-                },
-              )
-            ),
-        }
-      } else {
-        Some(
-          WmcEmitZigDirect.emitProgramDirectNoOpt(
-            rawModule,
-            preparedExpr,
-            resultTypeName,
-            wmFunctionName="__wm_main",
-            zigMainName="main",
-            sourceText,
-          )
-        )
-      }
-    },
-  }
-}
-
-provide let compileFile = (filePath: String, stdRoot: Option<String>, optimize: Bool=false) => {
+provide let compileFile = (entryPath: String, stdRoot: Option<String>) => {
   let baseOptions = ModuleSystem.defaultOptions()
   let options = match (stdRoot) {
     Some(root) => { ...baseOptions, stdRoots: [root] },
     None => baseOptions,
   }
 
-  let sourceText = match (ModuleSystem.readTextFile(filePath, ".", None)) {
-    Ok(src) => Some(src),
-    Err(_) => None,
-  }
+  let compileResult = WmcDriver.compileWorkmanGraph(entryPath, options=options)
+  let moduleArtifacts = List.map(
+    ((_moduleId, artifact): (String, WmcDriver.BackendModuleArtifacts)) => artifact,
+    Map.toList(compileResult.modules),
+  )
+  let moduleCount = List.length(moduleArtifacts)
+  let diagCount = List.reduce(
+    (acc: Number, artifact: WmcDriver.BackendModuleArtifacts) =>
+      acc + List.length((artifact.backendNode: WmcModuleIr.ModuleNode).diagnostics),
+    0,
+    moduleArtifacts,
+  )
 
-  match (WmcDriver.inferEntryPrototype(filePath, options=options)) {
+  let outPath = compileOutputPath(entryPath)
+  let sourceText = renderBootstrapStub(entryPath, moduleCount, diagCount)
+
+  match (Fs.Utf8.writeFile(sync=false, Path.fromString(outPath), sourceText)) {
+    Ok(_) => Ok(outPath),
+    Err(fsErr) =>
+      Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),
+  }
+}
+
+provide let runFile = (entryPath: String, stdRoot: Option<String>) => {
+  match (compileFile(entryPath, stdRoot)) {
+    Ok(outPath) =>
+      Ok(
+        "Run scaffold compiled to "
+          ++ outPath
+          ++ ". Execute with: zig run "
+          ++ outPath
+      ),
     Err(msg) => Err(msg),
-    Ok(proto) => {
-      if (!WmcDriver.isBackendReadyEntry(proto)) {
-        Err(fatalDiagnosticSummary(proto.entry.diagnostics))
-      } else {
-        match (findCompilableMainExpr(proto.entry, proto.normalizedEntry, optimize=optimize, sourceText=sourceText)) {
-          None =>
-            Err(
-              "No compilable `main` binding found in executable subset (expected: `let main = => { ... }` with supported expressions)"
-            ),
-          Some(zigSource) => {
-            let outPath = compileOutputPath(filePath)
-            // Wasmtime on Windows rejects Grain's default sync file IO flags.
-            match (Fs.Utf8.writeFile(sync=false, Path.fromString(outPath), zigSource)) {
-              Ok(_) => Ok(outPath),
-              Err(fsErr) =>
-                Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),
-            }
-          },
-        }
-      }
-    },
   }
 }

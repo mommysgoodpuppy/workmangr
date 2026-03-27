@@ -34,7 +34,7 @@ let envLookup = (name: String) => {
   }
 }
 
-let defaultStdRoot = "/Users/profilence/git/workman/std"
+let defaultStdRoot = "std"
 
 test("real std prelude path no longer crashes inference", () => {
   let stdRoot = match (envLookup("WORKMAN_STD_ROOT")) {
@@ -59,7 +59,7 @@ test("aoc2016/1 module graph inference does not crash", () => {
     None => defaultStdRoot,
   }
   let result = ModuleInfer.inferEntry(
-    "/Users/profilence/git/workman/aoc2016/1",
+    "examples/aoc",
     options={
       ...ModuleSystem.defaultOptions(),
       rootDir: ".",

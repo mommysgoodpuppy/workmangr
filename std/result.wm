@@ -1,0 +1,33 @@
+from "std/coretypes" import { IOk, IErr };
+
+export from "std/coretypes" type IResult(..);
+
+export let map = match(f, result) => {
+  (f, IOk(value)) => { IOk(f(value)) },
+  (_, IErr(error)) => { IErr(error) }
+};
+
+export let mapError = match(f, result) => {
+  (f, IOk(value)) => { IOk(value) },
+  (f, IErr(error)) => { IErr(f(error)) }
+};
+
+export let andThen = match(f, result) => {
+  (f, IOk(value)) => { f(value) },
+  (_, IErr(error)) => { IErr(error) }
+};
+
+export let withDefault = match(defaultValue, result) => {
+  (defaultValue, IOk(value)) => { value },
+  (defaultValue, IErr(_)) => { defaultValue }
+};
+
+export let fold = match(onErr, onOk, result) => {
+  (onErr, onOk, IOk(value)) => { onOk(value) },
+  (onErr, _onOk, IErr(error)) => { onErr(error) }
+};
+
+export let stripErr = match(result) => {
+  IOk(value) => { value },
+  IErr(_) => { Panic("stripErr called on IErr") }
+};

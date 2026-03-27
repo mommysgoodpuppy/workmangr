@@ -599,6 +599,7 @@ let isNumericNominalName = (name: String) =>
 let isNumericType = (ty: Type) =>
   match (ty) {
     TNumber => true,
+    TChar => true,
     TNominal(name, []) => isNumericNominalName(name),
     _ => false,
   }

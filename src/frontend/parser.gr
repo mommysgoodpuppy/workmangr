@@ -1334,10 +1334,14 @@ and parsePostfix = (
         while (kindIs(currentToken(currentState).kind, Lexer.Comma)) {
           let before = currentState
           let (_, state_temp2) = expectSimple(Lexer.Comma, currentState)
-          let (nextArg, state_temp3) = parseExpr(state_temp2)
-          args = [nextArg, ...args]
-          currentState = state_temp3
-          currentState = ensureProgress(before, currentState, "call args")
+          if (kindIs(currentToken(state_temp2).kind, Lexer.RParen)) {
+            currentState = state_temp2
+          } else {
+            let (nextArg, state_temp3) = parseExpr(state_temp2)
+            args = [nextArg, ...args]
+            currentState = state_temp3
+            currentState = ensureProgress(before, currentState, "call args")
+          }
         }
       }
       let (rparenTok, state2) = expectSimpleOrRecover(

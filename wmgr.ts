@@ -105,9 +105,7 @@ const main = async () => {
   const stdRootCandidates = [
     Deno.env.get("WMGR_STD_ROOT") ?? "",
     Deno.env.get("WORKMAN_STD_ROOT") ?? "",
-    path.join(workmangrRoot, "..", "workman", "std"),
-    "c:/Git/workman/std",
-    "c:/GIT/workman/std",
+    "std",
   ].filter((x) => x.length > 0);
 
   let stdRoot: string | undefined;

@@ -1,0 +1,143 @@
+from "std/coretypes" import { Empty, Link, Ok, Err, Some, None };
+from "std/char" import * as Char;
+from "std/core/int" import {
+  intAdd,
+  intSub,
+};
+
+type ListErr =
+  | OutOfBounds;
+
+export let rec length = match(list) => {
+  Empty => { 0 },
+  Link(_, rest) => { intAdd(1, length(rest)) }
+};
+
+export let rec append = match(xs, ys) => {
+  (Empty, ys) => { ys },
+  (Link(x, rest), ys) => { Link(x, append(rest, ys)) }
+};
+
+export let rec map = match(f, list) => {
+  (f, Empty) => { Empty },
+  (f, Link(x, rest)) => { Link(f(x), map(f, rest)) }
+};
+
+export let rec filter = match(predicate, list) => {
+  (predicate, Empty) => { Empty },
+  (predicate, Link(x, rest)) => {
+    if (predicate(x)) {
+      Link(x, filter(predicate, rest))
+    } else {
+      filter(predicate, rest)
+    }
+  }
+};
+
+export let rec take = match(list, count) => {
+  (Empty, _) => { Empty },
+  (_, 0) => { Empty },
+  (Link(x, rest), count) => { Link(x, take(rest, intSub(count, 1))) }
+};
+
+export let rec drop = match(list, count) => {
+  (list, 0) => { list },
+  (Empty, _) => { Empty },
+  (Link(_, rest), count) => { drop(rest, intSub(count, 1)) }
+};
+
+export let slice = (list, start, finish) => {
+  take(drop(list, start), intSub(finish, start))
+};
+
+export let rec at = match(list, index) => {
+  (Empty, _) => { Err(OutOfBounds) },
+  (Link(x, _), 0) => { Ok(x) },
+  (Link(_, rest), index) => { at(rest, intSub(index, 1)) }
+};
+
+export let rec foldl = match(f, acc, list) => {
+  (f, acc, Empty) => { acc },
+  (f, acc, Link(x, rest)) => { foldl(f, f(acc, x), rest) }
+};
+
+export let rec foldr = match(f, acc, list) => {
+  (f, acc, Empty) => { acc },
+  (f, acc, Link(x, rest)) => { f(x, foldr(f, acc, rest)) }
+};
+
+let rec reverseAcc = match(list, acc) => {
+  (Empty, acc) => { acc },
+  (Link(x, rest), acc) => { reverseAcc(rest, Link(x, acc)) }
+};
+
+export let reverse = (list) => {
+  reverseAcc(list, Empty)
+};
+
+export let isEmpty = match(list) => {
+  Empty => { true },
+  _ => { false }
+};
+
+export let head = match(list) => {
+  Empty => { None },
+  Link(x, _) => { Some(x) }
+};
+
+export let tail = match(list) => {
+  Empty => { None },
+  Link(_, rest) => { Some(rest) }
+};
+
+export let singleton = (value) => {
+  Link(value, Empty)
+};
+
+export let rec flatten = match(lists) => {
+  Empty => { Empty },
+  Link(list, rest) => { append(list, flatten(rest)) }
+};
+
+export let rec any = match(predicate, list) => {
+  (predicate, Empty) => { false },
+  (predicate, Link(x, rest)) => {
+    if (predicate(x)) {
+      true
+    } else {
+      any(predicate, rest)
+    }
+  }
+};
+
+export let rec all = match(predicate, list) => {
+  (predicate, Empty) => { true },
+  (predicate, Link(x, rest)) => {
+    if (predicate(x)) {
+      all(predicate, rest)
+    } else {
+      false
+    }
+  }
+};
+
+export let fromString = (value) => {
+  nativeStringToList(value)
+};
+
+export let toString = (chars) => {
+  nativeListToString(chars)
+};
+
+export let rec charListEq = match(left, right) => {
+  (Empty, Empty) => { true },
+  (Empty, _) => { false },
+  (_, Empty) => { false },
+  (Link(x, xs), Link(y, ys)) => {
+    if (Char.eq(x, y)) {
+      charListEq(xs, ys)
+    } else {
+      false
+    }
+  }
+};

@@ -110,7 +110,7 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   let charType = Types.TChar
   let stringType = Types.TString
   let voidType = Types.TVoid
-  let listIntType = Types.TNominal("List", [intType])
+  let listCharType = Types.TNominal("List", [charType])
   let orderingType = Types.TNominal("Ordering", [])
   let tNum = Types.TVar(0)
   let binaryInt: Types.Scheme = {
@@ -120,6 +120,10 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   let binaryNumeric: Types.Scheme = {
     quantifiers: [0],
     ty: Types.TFun(Types.TTuple([tNum, tNum]), tNum),
+  }
+  let binaryEq: Types.Scheme = {
+    quantifiers: [0],
+    ty: Types.TFun(Types.TTuple([Types.TVar(0), Types.TVar(0)]), boolType),
   }
   let cmpNumeric: Types.Scheme = {
     quantifiers: [0],
@@ -139,15 +143,15 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   }
   let nativeStringToList: Types.Scheme = {
     quantifiers: [],
-    ty: Types.TFun(stringType, listIntType),
+    ty: Types.TFun(stringType, listCharType),
   }
   let nativeListToString: Types.Scheme = {
     quantifiers: [],
-    ty: Types.TFun(listIntType, stringType),
+    ty: Types.TFun(listCharType, stringType),
   }
   let nativeStrFromLiteral: Types.Scheme = {
     quantifiers: [],
-    ty: Types.TFun(stringType, listIntType),
+    ty: Types.TFun(stringType, listCharType),
   }
   let nativeCharEq: Types.Scheme = {
     quantifiers: [],
@@ -184,8 +188,8 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   define("*", binaryNumeric)
   define("/", binaryNumeric)
   define("%", binaryNumeric)
-  define("==", cmpNumeric)
-  define("!=", cmpNumeric)
+  define("==", binaryEq)
+  define("!=", binaryEq)
   define(">", cmpNumeric)
   define("<", cmpNumeric)
   define(">=", cmpNumeric)
@@ -567,6 +571,36 @@ let isInfectiousType = (ty: Types.Type, state: InferState) =>
     Some(_) => true,
     None => false,
   }
+
+let lookupInfectionDomain = (state: InferState, domain: String) =>
+  Map.get(domain, state.infectionRegistry.domains)
+
+let domainDetachesCarrierState = (domainDef: InfectionRegistry.DomainRuleDefinition) =>
+  match (domainDef.mergeRow) {
+    Some("union") => true,
+    Some("bagUnion") => true,
+    _ => false,
+  }
+
+let infectiousDomainDeclared = (state: InferState, domain: String) =>
+  match (lookupInfectionDomain(state, domain)) {
+    Some(_) => true,
+    None => false,
+  }
+
+let localInfectionDomainError = (
+  state: InferState,
+  node: CoreAst.Node,
+  typeName: String,
+  domain: String,
+) =>
+  addTypeMark(
+    state,
+    TypeMismatch,
+    originForNode(node.id, "infection domain"),
+    CoreAst.Inconsistent,
+    "Type error: infectious type " ++ typeName ++ " uses undefined infection domain " ++ domain
+  )
 
 let rec normalizeArgAgainstParam = (
   paramTy: Types.Type,
@@ -1344,6 +1378,29 @@ let rec unify = (
   origin: Constraints.Origin,
   state: InferState,
 ) => {
+  let detachedState = match ((classifyInfectiousNominal(left, state), classifyInfectiousNominal(right, state))) {
+    (
+      Some((leftValue, leftWrap)),
+      Some((rightValue, rightWrap)),
+    ) =>
+      if (leftWrap.typeName == rightWrap.typeName && leftWrap.domain == rightWrap.domain) {
+        match (lookupInfectionDomain(state, leftWrap.domain)) {
+          Some(domainDef) =>
+            if (domainDetachesCarrierState(domainDef)) {
+              Some(unify(leftValue, rightValue, origin, state))
+            } else {
+              None
+            },
+          None => None,
+        }
+      } else {
+        None
+      },
+    _ => None,
+  }
+  match (detachedState) {
+    Some(nextState) => nextState,
+    None => {
   let constraint = Constraints.Equality(left, right, origin)
   let state1 = recordConstraint(state, constraint)
   let l = apply(state1, left)
@@ -1353,6 +1410,10 @@ let rec unify = (
     (Types.TNumber, Types.TNumber) => state1,
     (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => state1,
     (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => state1,
+    (Types.TNumber, Types.TChar) => state1,
+    (Types.TChar, Types.TNumber) => state1,
+    (Types.TChar, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => state1,
+    (Types.TNominal(name, []), Types.TChar) when Types.isNumericNominalName(name) => state1,
     (Types.TBool, Types.TBool) => state1,
     (Types.TString, Types.TString) => state1,
     (Types.TByte, Types.TByte) => state1,
@@ -1476,6 +1537,8 @@ let rec unify = (
           ++ renderType(r, state1)
       ),
   }
+    },
+  }
 }
 
 let unifyForNode = (
@@ -1593,6 +1656,35 @@ let lookupEnv = (name: CoreAst.Name, state: InferState) => {
         marked,
       )
     },
+  }
+}
+
+let registerImportedTypeInfo = (
+  env: Env.TypingEnv,
+  typeName: String,
+  info: Env.TypeInfo,
+) => {
+  if (Env.lookupType(env, typeName) == None) {
+    Env.registerType(env, info)
+    let (paramTypes, paramMap, _nextVar) = Layer1Expr.instantiateTypeParams(
+      info.typeParams,
+      10000
+    )
+    let quantifiers = Layer1Expr.typeVarIdsFromTypes(paramTypes)
+    let resultType = Types.TNominal(typeName, paramTypes)
+    List.forEach((ctor: Env.ConstructorInfo) => {
+      let ctorType = match (ctor.payload) {
+        Some(payloadType) =>
+          Types.TFun(Layer1Expr.typeExprToType(payloadType, paramMap), resultType),
+        None => resultType,
+      }
+      let scheme: Types.Scheme = { quantifiers, ty: ctorType }
+      Env.defineValue(env, ctor.name, scheme)
+      void
+    }, info.constructors)
+    void
+  } else {
+    void
   }
 }
 
@@ -3173,7 +3265,16 @@ let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
     Env.defineValue(env1, name, scheme)
     void
   }, prepared.constructorSchemes)
-  { ...state, nextVar: prepared.nextVar, env: env1 }
+  let state1 = { ...state, nextVar: prepared.nextVar, env: env1 }
+  match (prepared.info.infection) {
+    Some(domain) =>
+      if (infectiousDomainDeclared(state1, domain)) {
+        state1
+      } else {
+        localInfectionDomainError(state1, decl.node, prepared.info.name, domain)
+      },
+    None => state1,
+  }
     }
   }
 }
@@ -3225,6 +3326,10 @@ let solveConstraints = (state: InferState) => {
         (Types.TNumber, Types.TNumber) => false,
         (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
         (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => false,
+        (Types.TNumber, Types.TChar) => false,
+        (Types.TChar, Types.TNumber) => false,
+        (Types.TChar, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
+        (Types.TNominal(name, []), Types.TChar) when Types.isNumericNominalName(name) => false,
         (Types.TBool, Types.TBool) => false,
         (Types.TString, Types.TString) => false,
         (Types.TByte, Types.TByte) => false,
@@ -3396,10 +3501,11 @@ provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) => 
   solveConstraints(inferred)
 }
 
-provide let inferProgramWithTypingEnv = (
+provide let inferProgramWithTypingEnvAndRegistry = (
   program: CoreAst.Program,
   env: Types.Env,
   importedTypes: Map.Map<String, Env.TypeInfo>,
+  importedRegistry: InfectionRegistry.Registry,
 ) => {
   let baseEnv = seedBuiltinValues(Env.empty())
   Map.forEach((name, scheme) => {
@@ -3407,17 +3513,24 @@ provide let inferProgramWithTypingEnv = (
     void
   }, env)
   List.forEach(((typeName, info): (String, Env.TypeInfo)) => {
-    if (Env.lookupType(baseEnv, typeName) == None) {
-      Env.registerType(baseEnv, info)
-      void
-    } else {
-      void
-    }
+    registerImportedTypeInfo(baseEnv, typeName, info)
   }, Map.toList(importedTypes))
-  let state = { ...makeInitialState(), env: baseEnv }
+  let state = { ...makeInitialState(), env: baseEnv, infectionRegistry: importedRegistry }
   let inferred = inferTopItems(program.items, state)
   solveConstraints(inferred)
 }
+
+provide let inferProgramWithTypingEnv = (
+  program: CoreAst.Program,
+  env: Types.Env,
+  importedTypes: Map.Map<String, Env.TypeInfo>,
+) =>
+  inferProgramWithTypingEnvAndRegistry(
+    program,
+    env,
+    importedTypes,
+    InfectionRegistry.empty()
+  )
 
 provide let inferProgramLayer1 = (program: CoreAst.Program) => {
   let state = makeInitialState()

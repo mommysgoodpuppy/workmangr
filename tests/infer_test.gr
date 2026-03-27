@@ -319,6 +319,45 @@ let ok = IOk(1);
   assertTrue(hasShortCircuitConstraint)
 })
 
+test("infectious type declaration requires a declared domain", () => {
+  let source =
+    "
+type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
+let ok = IOk(1);
+"
+  let state = inferSource(source)
+  let hasUndefinedDomain = List.some(
+    (mark: Infer.TypeMark) =>
+      mark.reason == Infer.TypeMismatch
+        && String.contains("uses undefined infection domain shortCircuit", mark.message),
+    state.marks
+  )
+
+  assertTrue(hasUndefinedDomain)
+})
+
+test("row-union infection domains do not force nominal state arg unification", () => {
+  let source =
+    "
+domain effect {
+  stateKind rowSet;
+  mergeRow union;
+};
+type A = | A;
+type B = | B;
+type infectious effect IResult<T, E> = | IOk(T) | IErr(E);
+let choose = (flag) => {
+  if (flag) {
+    IErr(A)
+  } else {
+    IErr(B)
+  }
+};
+"
+  let state = inferSource(source)
+  assertTrue(List.length(state.marks) == 0)
+})
+
 test("op rule adds emits domain constraint at call site", () => {
   let source =
     "
@@ -501,6 +540,7 @@ let out = strip(IOk(1));
 test("IResult-producing let binding generalizes and remains infectious", () => {
   let source =
     "
+domain shortCircuit { mergeRow union; };
 type infectious shortCircuit IResult<T, E> = | IOk(T) | IErr(E);
 let lift = (x) => { IOk(x) };
 let n = lift(1);

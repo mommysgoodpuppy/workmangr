@@ -1,0 +1,57 @@
+module WmcModuleIr
+
+from "list" include List
+from "map" include Map
+
+from "../error.gr" include Error
+
+provide enum BackendMode {
+  Unified,
+}
+
+provide enum ModuleRole {
+  EntryModule,
+  CoreModule,
+  RegularModule,
+}
+
+provide enum EdgeKind {
+  ImportEdge,
+  ReexportEdge,
+}
+
+provide enum ModuleStatus {
+  StatusOk,
+  StatusPartial,
+  StatusFailed,
+}
+
+provide record ModuleEdge {
+  fromModuleId: String,
+  toModuleId: String,
+  kind: EdgeKind,
+}
+
+provide record ModuleExports {
+  values: List<String>,
+  types: List<String>,
+}
+
+provide record ModuleNode {
+  id: String,
+  sourcePath: String,
+  imports: List<String>,
+  reexports: List<String>,
+  status: ModuleStatus,
+  role: ModuleRole,
+  exports: ModuleExports,
+  diagnostics: List<Error.CompilerError>,
+}
+
+provide record ModuleGraph {
+  backendMode: BackendMode,
+  entry: String,
+  order: List<String>,
+  nodes: Map.Map<String, ModuleNode>,
+  edges: List<ModuleEdge>,
+}

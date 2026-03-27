@@ -1,0 +1,135 @@
+module WmcEmitStdListSpecialization
+
+from "list" include List
+from "string" include String
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let indent = (s: String) => "  " ++ s
+
+let emitFn = (name: String, params: List<(String, String)>, resultTy: String, bodyLines: List<String>) => {
+  let paramSig = joinStrings(", ", List.map(((paramName, paramTy)) => paramName ++ ": " ++ paramTy, params))
+  "fn " ++ name ++ "(" ++ paramSig ++ ") " ++ resultTy ++ " {\n"
+    ++ joinStrings("\n", List.map(indent, bodyLines))
+    ++ "\n}"
+}
+
+provide let isSpecializedStdListBindingName = (bindingName: String) =>
+  bindingName == "append"
+    || bindingName == "toString"
+    || bindingName == "length"
+    || bindingName == "slice"
+    || bindingName == "take"
+    || bindingName == "drop"
+    || bindingName == "at"
+    || bindingName == "charListEq"
+
+provide let specializedStdListBindingSource = (bindingName: String) =>
+  match (bindingName) {
+    "append" =>
+      Some(
+        emitFn(
+          "__wm_g_std_list_wm__append",
+          [("xs", "[]const u8"), ("ys", "[]const u8")],
+          "[]const u8",
+          ["return __wm_char_list_append(xs, ys);"],
+        ),
+      ),
+    "toString" =>
+      Some(
+        emitFn("__wm_g_std_list_wm__toString", [("chars", "[]const u8")], "[]const u8", ["return chars;"]),
+      ),
+    "length" =>
+      Some(
+        emitFn("__wm_g_std_list_wm__length", [("list", "[]const u8")], "usize", ["return list.len;"]),
+      ),
+    "slice" =>
+      Some(
+        emitFn(
+          "__wm_g_std_list_wm__slice",
+          [("list", "[]const u8"), ("startArg", "comptime_int"), ("finishArg", "comptime_int")],
+          "[]const u8",
+          [
+            "const start = __wm_char_list_clamp_index(startArg, list.len);",
+            "const finish = __wm_char_list_clamp_index(finishArg, list.len);",
+            "if (finish <= start) {",
+            "  return \"\";",
+            "}",
+            "return list[start..finish];",
+          ],
+        ),
+      ),
+    "take" =>
+      Some(
+        emitFn(
+          "__wm_g_std_list_wm__take",
+          [("list", "[]const u8"), ("countArg", "comptime_int")],
+          "[]const u8",
+          [
+            "const count = __wm_char_list_clamp_index(countArg, list.len);",
+            "return list[0..count];",
+          ],
+        ),
+      ),
+    "drop" =>
+      Some(
+        emitFn(
+          "__wm_g_std_list_wm__drop",
+          [("list", "[]const u8"), ("countArg", "comptime_int")],
+          "[]const u8",
+          [
+            "const count = __wm_char_list_clamp_index(countArg, list.len);",
+            "return list[count..];",
+          ],
+        ),
+      ),
+    "at" =>
+      Some(
+        emitFn(
+          "__wm_g_std_list_wm__at",
+          [("list", "[]const u8"), ("index", "comptime_int")],
+          "struct { tag: []const u8, payload: comptime_int }",
+          [
+            "if (index < 0) {",
+            "  return .{ .tag = \"Err\", .payload = 0 };",
+            "}",
+            "const asIndex: usize = @intCast(index);",
+            "if (asIndex >= list.len) {",
+            "  return .{ .tag = \"Err\", .payload = 0 };",
+            "}",
+            "return .{ .tag = \"Ok\", .payload = list[asIndex] };",
+          ],
+        ),
+      ),
+    "charListEq" =>
+      Some(
+        emitFn(
+          "__wm_g_std_list_wm__charListEq",
+          [("left", "[]const u8"), ("right", "[]const u8")],
+          "bool",
+          ["return std.mem.eql(u8, left, right);"],
+        ),
+      ),
+    _ => None,
+  }
+
+provide let charListPrelude = () =>
+  "fn __wm_char_list_append(xs: []const u8, ys: []const u8) []const u8 {\n"
+    ++ "  return xs ++ ys;\n"
+    ++ "}\n\n"
+    ++ "fn __wm_char_list_cons(head: u8, tail: []const u8) []const u8 {\n"
+    ++ "  return &[_]u8{head} ++ tail;\n"
+    ++ "}\n\n"
+    ++ "fn __wm_char_list_clamp_index(index: comptime_int, len: usize) usize {\n"
+    ++ "  if (index <= 0) {\n"
+    ++ "    return 0;\n"
+    ++ "  }\n"
+    ++ "  const asIndex: usize = @intCast(index);\n"
+    ++ "  if (asIndex >= len) {\n"
+    ++ "    return len;\n"
+    ++ "  }\n"
+    ++ "  return asIndex;\n"
+    ++ "}\n\n"
