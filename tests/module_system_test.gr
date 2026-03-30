@@ -10,7 +10,7 @@ from "string" include String
 from "../src/core/surface_ast.gr" include SurfaceAst
 from "../src/core/error.gr" include Error
 from "../src/frontend/parser.gr" include Parser
-from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/module/module_system.gr" include ModuleSystem
 
 setSourceFile("./tests/module_system_test.gr")
 

@@ -7,7 +7,7 @@ from "map" include Map
 from "string" include String
 
 from "../src/cli/lsp/layer1/symbol_service.gr" include SymbolService
-from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/module/module_system.gr" include ModuleSystem
 from "../src/core/source.gr" include Source
 
 setSourceFile("./tests/lsp_symbol_service_test.gr")

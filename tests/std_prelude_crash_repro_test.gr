@@ -9,8 +9,8 @@ from "map" include Map
 from "string" include String
 from "wasi/process" include Process
 
-from "../src/core/module_infer.gr" include ModuleInfer
-from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/module/module_infer.gr" include ModuleInfer
+from "../src/core/module/module_system.gr" include ModuleSystem
 
 setSourceFile("./tests/std_prelude_crash_repro_test.gr")
 

@@ -1,6 +1,9 @@
 detailed docs for using grain can be found under c:/Git/grain-lang.org/src
 grain compiler source code c:/Git/grain
 workman v0 implementation c:/Git/workman
+equivalents on linux are under ~/git
+
+test stuff by using global "wm" cli command or the tests that already exist see deno.json (use unix)
 
 grain sometimes requires type annotation especially mutual rec
 

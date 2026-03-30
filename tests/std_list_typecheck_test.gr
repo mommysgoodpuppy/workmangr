@@ -7,8 +7,8 @@ from "list" include List
 from "map" include Map
 
 from "../src/core/error.gr" include Error
-from "../src/core/module_infer.gr" include ModuleInfer
-from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/module/module_infer.gr" include ModuleInfer
+from "../src/core/module/module_system.gr" include ModuleSystem
 
 setSourceFile("./tests/std_list_typecheck_test.gr")
 

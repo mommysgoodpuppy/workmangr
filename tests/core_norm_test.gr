@@ -1,0 +1,185 @@
+module CoreNormTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+
+from "../src/core/core_ast.gr" include CoreAst
+from "../src/core/source.gr" include Source
+from "../src/backend/wmc/core_ir.gr" include WmcCoreIr
+from "../src/backend/wmc/core_norm.gr" include WmcCoreNorm
+
+setSourceFile("./tests/core_norm_test.gr")
+
+let span = { line: 1, col: 1, start: 0, end: 0 }: Source.Span
+
+let typedNode = (id: Number) => { id, span, ty: None }: WmcCoreIr.TypedNode
+
+let pattern = (id: Number, kind: WmcCoreIr.PatternKind) =>
+  { node: typedNode(id), kind }: WmcCoreIr.Pattern
+
+let expr = (id: Number, kind: WmcCoreIr.ExprKind) =>
+  { node: typedNode(id), kind }: WmcCoreIr.Expr
+
+let clause = (
+  id: Number,
+  param: WmcCoreIr.Pattern,
+  guard: Option<WmcCoreIr.Expr>,
+  matchConstructor: Option<String>,
+  body: WmcCoreIr.Expr,
+) =>
+  {
+    node: typedNode(id),
+    param,
+    guard,
+    matchConstructor,
+    body,
+  }: WmcCoreIr.FnClause
+
+let topValue = (name: String, value: WmcCoreIr.Expr) =>
+  {
+    name,
+    exported: false,
+    groupKind: CoreAst.Plain,
+    binding: {
+      node: typedNode(1),
+      name: pattern(2, WmcCoreIr.PVar(name)),
+      annotation: None,
+      value,
+    }: WmcCoreIr.LetBinding,
+  }: WmcCoreIr.TopValueBinding
+
+let singleValueModule = (binding: WmcCoreIr.TopValueBinding) =>
+  {
+    id: "test",
+    sourcePath: "test.wm",
+    imports: [],
+    reexports: [],
+    valueNames: [binding.name],
+    typeNames: [],
+    values: [binding],
+    diagnostics: [],
+    status: WmcCoreIr.StatusOk,
+  }: WmcCoreIr.CoreModule
+
+test("core norm keeps simple single-clause lambda direct", () => {
+  let fnExpr = expr(
+    10,
+    WmcCoreIr.EFn({
+      node: typedNode(10),
+      items: [
+        {
+          node: typedNode(11),
+          kind: WmcCoreIr.FClause(
+            clause(
+              12,
+              pattern(13, WmcCoreIr.PVar("x")),
+              None,
+              None,
+              expr(14, WmcCoreIr.EIdent("x")),
+            )
+          ),
+        }: WmcCoreIr.FnItem,
+      ],
+    }: WmcCoreIr.FnExpr),
+  )
+  let result = WmcCoreNorm.normalizeModuleDetailed(singleValueModule(topValue("id", fnExpr)))
+  assertEquals(0, List.length(result.issues))
+  match (result.normalized.values) {
+    [binding] =>
+      match (binding.value.kind) {
+        WmcCoreNorm.NELambda("x", body) =>
+          match (body.kind) {
+            WmcCoreNorm.NEIdent("x") => assertTrue(true),
+            _ => fail "expected direct identifier body",
+          },
+        _ => fail "expected direct lambda normalization",
+      },
+    _ => fail "expected single normalized binding",
+  }
+})
+
+test("core norm rewrites guarded constructor clauses into lambda match", () => {
+  let fnExpr = expr(
+    20,
+    WmcCoreIr.EFn({
+      node: typedNode(20),
+      items: [
+        {
+          node: typedNode(21),
+          kind: WmcCoreIr.FClause(
+            clause(
+              22,
+              pattern(
+                23,
+                WmcCoreIr.PConstructor("Some", [pattern(24, WmcCoreIr.PVar("value"))]),
+              ),
+              Some(expr(25, WmcCoreIr.EIdent("cond"))),
+              Some("Some"),
+              expr(26, WmcCoreIr.EIdent("first")),
+            )
+          ),
+        }: WmcCoreIr.FnItem,
+        {
+          node: typedNode(27),
+          kind: WmcCoreIr.FClause(
+            clause(
+              28,
+              pattern(29, WmcCoreIr.PWildcard),
+              None,
+              None,
+              expr(30, WmcCoreIr.EIdent("fallback")),
+            )
+          ),
+        }: WmcCoreIr.FnItem,
+      ],
+    }: WmcCoreIr.FnExpr),
+  )
+  let result = WmcCoreNorm.normalizeModuleDetailed(singleValueModule(topValue("classify", fnExpr)))
+  assertEquals(0, List.length(result.issues))
+  match (result.normalized.values) {
+    [binding] =>
+      match (binding.value.kind) {
+        WmcCoreNorm.NELambda(paramName, body) =>
+          match (body.kind) {
+            WmcCoreNorm.NEMatch(matchExpr) => {
+              match (matchExpr.scrutinee.kind) {
+                WmcCoreNorm.NEIdent(name) => assertEquals(paramName, name),
+                _ => fail "expected match scrutinee to use generated parameter",
+              }
+              match (matchExpr.clauses) {
+                [firstClause, secondClause] => {
+                  assertEquals(0, firstClause.index)
+                  assertEquals(1, secondClause.index)
+                  match (firstClause.pattern.kind) {
+                    WmcCoreNorm.NPConstructor("Some", [arg]) =>
+                      match (arg.kind) {
+                        WmcCoreNorm.NPVar("value") => assertTrue(true),
+                        _ => fail "expected constructor binder to survive normalization",
+                      },
+                    _ => fail "expected constructor pattern in first clause",
+                  }
+                  match (firstClause.guard) {
+                    Some(guardExpr) =>
+                      match (guardExpr.kind) {
+                        WmcCoreNorm.NEIdent("cond") => assertTrue(true),
+                        _ => fail "expected normalized guard expression",
+                      },
+                    None => fail "expected guard on first clause",
+                  }
+                  match (secondClause.pattern.kind) {
+                    WmcCoreNorm.NPWildcard => assertTrue(true),
+                    _ => fail "expected wildcard fallback clause",
+                  }
+                },
+                _ => fail "expected two normalized match clauses",
+              }
+            },
+            _ => fail "expected lambda body to be a match",
+          },
+        _ => fail "expected function bundle to normalize into lambda",
+      },
+    _ => fail "expected single normalized binding",
+  }
+})

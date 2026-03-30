@@ -7,11 +7,11 @@ from "list" include List
 from "map" include Map
 from "string" include String
 
-from "../src/core/module_infer.gr" include ModuleInfer
+from "../src/core/module/module_infer.gr" include ModuleInfer
 from "../src/core/error.gr" include Error
 from "../src/core/source.gr" include Source
 from "../src/core/types.gr" include Types
-from "../src/module/module_system.gr" include ModuleSystem
+from "../src/core/module/module_system.gr" include ModuleSystem
 
 setSourceFile("./tests/module_infer_test.gr")
 
