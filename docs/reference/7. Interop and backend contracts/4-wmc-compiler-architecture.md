@@ -94,14 +94,5 @@ Future work:
 - Add a concrete list of fallback cases and a tracking policy once backend
   experiments identify the real pressure points.
 
-## 7. Relationship to Other Backend Docs
-
-- `/Users/profilence/git/workmangr/docs/backend/wmc_backend_input_contract.md`
-  defines the frontend/backend handoff.
-- `/Users/profilence/git/workmangr/docs/backend/wmc_conformance_matrix.md`
-  tracks semantic coverage requirements.
-- `/Users/profilence/git/workmangr/docs/backend/wmc_backend_readiness_*`
-  documents readiness and gating.
-
 This document only states architectural direction and non-goals for the
 experimentation phase.
