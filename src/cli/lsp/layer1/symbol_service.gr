@@ -6,7 +6,7 @@ from "string" include String
 
 from "../../../core/source.gr" include Source
 from "../../../core/surface_ast.gr" include SurfaceAst
-from "../../../module/module_system.gr" include ModuleSystem
+from "../../../core/module/module_system.gr" include ModuleSystem
 from "../../../frontend/lexer.gr" include Lexer
 
 provide record Definition {
