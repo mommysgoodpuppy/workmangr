@@ -3176,20 +3176,6 @@ must not be silently treated as canonical Workman behavior.
 
 ---
 
-## Required Compiler Architecture Implications
-
-To satisfy this profile, implementations should include:
-
-1. A typed core IR (`TCore`) that is independent of surface syntax details.
-2. A lowered optimization/codegen IR (`MIR`) with explicit control/data flow.
-3. An explicit match-lowering stage (decision-tree style), not ad hoc emitter
-   pattern expansion.
-4. A representation-planning stage that decides boxed vs unboxed data from
-   typing and escape/lifetime information, with boxed fallback treated as an
-   exceptional path rather than the default codegen strategy.
-
----
-
 ## Non-Goals
 
 1. Reintroducing a mandatory VM-like universal `Value` representation as the
@@ -3238,10 +3224,6 @@ Historical note:
 - v0 does not define the WMC compiler architecture.
 - WMC is not a "v0.1" or an incremental continuation of the v0 codebase.
 
-Implication:
-- Reuse from v0 is optional and opportunistic (ideas, tests, examples).
-- WMC does not need to preserve v0 internal runtime, IR, or codegen structure.
-
 ## 2. Stable Goals (Current)
 
 These goals are stable enough to guide backend bring-up:
@@ -3250,8 +3232,7 @@ These goals are stable enough to guide backend bring-up:
 2. Prefer compile-time specialization and concrete/unboxed representations.
 3. Use boxed/generic representations only as fallback.
 4. Keep runtime support minimal (helpers/diagnostics/panic), not a universal VM.
-5. Keep architecture explicit enough to support match lowering and
-   representation planning.
+5. Keep the compiler shape simple, direct, and executable-oriented.
 
 ## 3. What Is Intentionally Not Locked Yet
 
@@ -3259,26 +3240,23 @@ The following should be decided through implementation experiments before being
 documented as fixed architecture:
 
 - Exact `TCore` shape.
-- Exact `MIR` shape.
 - Closure representation details.
 - Monomorphization vs other specialization policies in borderline cases.
 - Infection lowering internal encoding.
-- Representation-planning heuristics (escape/lifetime strategy, thresholds).
 
 ## 4. Expected Compiler Shape (Minimal Direction)
 
-WMC should use a typed, multi-stage compiler pipeline rather than a runtime-VM
-execution model.
+WMC should use a typed compiler pipeline rather than a runtime-VM execution
+model.
 
 Minimal direction (subject to refinement):
 1. Parse / module resolution / type inference.
 2. Elaboration of specified surface sugar only.
-3. Typed core IR (retain enough structure for semantics-preserving lowering).
-4. Explicit match lowering (decision-tree style).
-5. Lowered codegen/optimization IR with explicit control flow.
-6. Representation planning (specialized/unboxed by default, boxed fallback when
-   required).
-7. Zig code generation plus small runtime support.
+3. Typed backend core IR retaining enough structure for semantics-preserving
+   lowering.
+4. Normalize/desugar to a smaller executable core.
+5. Monomorphize reachable polymorphic bindings.
+6. Lower directly to readable Zig plus small runtime support where needed.
 
 This is a direction, not a frozen pass list.
 
@@ -3305,15 +3283,6 @@ Boxed/generic lowering is allowed during bring-up, but only under this policy:
 Future work:
 - Add a concrete list of fallback cases and a tracking policy once backend
   experiments identify the real pressure points.
-
-## 7. Relationship to Other Backend Docs
-
-- `/Users/profilence/git/workmangr/docs/backend/wmc_backend_input_contract.md`
-  defines the frontend/backend handoff.
-- `/Users/profilence/git/workmangr/docs/backend/wmc_conformance_matrix.md`
-  tracks semantic coverage requirements.
-- `/Users/profilence/git/workmangr/docs/backend/wmc_backend_readiness_*`
-  documents readiness and gating.
 
 This document only states architectural direction and non-goals for the
 experimentation phase.

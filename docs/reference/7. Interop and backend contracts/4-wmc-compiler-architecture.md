@@ -26,10 +26,6 @@ Historical note:
 - v0 does not define the WMC compiler architecture.
 - WMC is not a "v0.1" or an incremental continuation of the v0 codebase.
 
-Implication:
-- Reuse from v0 is optional and opportunistic (ideas, tests, examples).
-- WMC does not need to preserve v0 internal runtime, IR, or codegen structure.
-
 ## 2. Stable Goals (Current)
 
 These goals are stable enough to guide backend bring-up:
@@ -38,8 +34,7 @@ These goals are stable enough to guide backend bring-up:
 2. Prefer compile-time specialization and concrete/unboxed representations.
 3. Use boxed/generic representations only as fallback.
 4. Keep runtime support minimal (helpers/diagnostics/panic), not a universal VM.
-5. Keep architecture explicit enough to support match lowering and
-   representation planning.
+5. Keep the compiler shape simple, direct, and executable-oriented.
 
 ## 3. What Is Intentionally Not Locked Yet
 
@@ -47,26 +42,23 @@ The following should be decided through implementation experiments before being
 documented as fixed architecture:
 
 - Exact `TCore` shape.
-- Exact `MIR` shape.
 - Closure representation details.
 - Monomorphization vs other specialization policies in borderline cases.
 - Infection lowering internal encoding.
-- Representation-planning heuristics (escape/lifetime strategy, thresholds).
 
 ## 4. Expected Compiler Shape (Minimal Direction)
 
-WMC should use a typed, multi-stage compiler pipeline rather than a runtime-VM
-execution model.
+WMC should use a typed compiler pipeline rather than a runtime-VM execution
+model.
 
 Minimal direction (subject to refinement):
 1. Parse / module resolution / type inference.
 2. Elaboration of specified surface sugar only.
-3. Typed core IR (retain enough structure for semantics-preserving lowering).
-4. Explicit match lowering (decision-tree style).
-5. Lowered codegen/optimization IR with explicit control flow.
-6. Representation planning (specialized/unboxed by default, boxed fallback when
-   required).
-7. Zig code generation plus small runtime support.
+3. Typed backend core IR retaining enough structure for semantics-preserving
+   lowering.
+4. Normalize/desugar to a smaller executable core.
+5. Monomorphize reachable polymorphic bindings.
+6. Lower directly to readable Zig plus small runtime support where needed.
 
 This is a direction, not a frozen pass list.
 

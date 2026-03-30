@@ -91,20 +91,6 @@ must not be silently treated as canonical Workman behavior.
 
 ---
 
-## Required Compiler Architecture Implications
-
-To satisfy this profile, implementations should include:
-
-1. A typed core IR (`TCore`) that is independent of surface syntax details.
-2. A lowered optimization/codegen IR (`MIR`) with explicit control/data flow.
-3. An explicit match-lowering stage (decision-tree style), not ad hoc emitter
-   pattern expansion.
-4. A representation-planning stage that decides boxed vs unboxed data from
-   typing and escape/lifetime information, with boxed fallback treated as an
-   exceptional path rather than the default codegen strategy.
-
----
-
 ## Non-Goals
 
 1. Reintroducing a mandatory VM-like universal `Value` representation as the
