@@ -4196,19 +4196,19 @@ and parseMatch = (state: ParseState) => {
     let span = spanFromTokens(matchTok.span, rbraceTok.span)
     mkMatchExpr(id, span, None, fnItems, false, [], state5)
   } else {
-    let (scrutinee, state3) = parseInfix(state2)
-    let scrutineeHasParens = match (scrutinee.kind) {
+    let (rawScrutinee, state3) = parseInfix(state2)
+    let scrutineeHasParens = match (rawScrutinee.kind) {
       SurfaceAst.Paren(_) => true,
       SurfaceAst.Tuple(_) => true,
       _ => false,
     }
-    let (matchItems, state3m) = if (scrutineeHasParens) {
-      ([], state3)
+    let (scrutinee, matchItems, state3m) = if (scrutineeHasParens) {
+      (rawScrutinee, [], state3)
     } else {
       let (pairId, s0) = freshId(state3)
       let (lpMarkId, s1) = freshId(s0)
       let lpMark: SurfaceAst.Mark = {
-        node: { id: lpMarkId, span: scrutinee.node.span },
+        node: { id: lpMarkId, span: rawScrutinee.node.span },
         kind: SurfaceAst.MissingToken("("),
         expected: SurfaceAst.ExpectToken,
         repairClass: SurfaceAst.AutoFix,
@@ -4227,7 +4227,7 @@ and parseMatch = (state: ParseState) => {
       )
       let (rpMarkId, s2) = freshId(s1)
       let rpMark: SurfaceAst.Mark = {
-        node: { id: rpMarkId, span: scrutinee.node.span },
+        node: { id: rpMarkId, span: rawScrutinee.node.span },
         kind: SurfaceAst.MissingToken(")"),
         expected: SurfaceAst.ExpectToken,
         repairClass: SurfaceAst.AutoFix,
@@ -4244,7 +4244,11 @@ and parseMatch = (state: ParseState) => {
         ],
         severity=Error.Warning
       )
-      ([lpItem, SurfaceAst.ExprItem(scrutinee), rpItem], s2)
+      (
+        makeExpr(rawScrutinee.node.id, rawScrutinee.node.span, Paren(rawScrutinee)),
+        [lpItem, SurfaceAst.ExprItem(rawScrutinee), rpItem],
+        s2
+      )
     }
     if (kindIs(currentToken(state3m).kind, Lexer.LBrace)) {
       let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state3m)
@@ -4366,4 +4370,3 @@ let parseWithRecovery = (source: String) => {
 provide let parseResult = (source: String) => parseWithRecovery(source)
 
 provide let parse = (source: String) => parseResult(source).program
-

@@ -11,8 +11,11 @@ from "../core/env.gr" include Env
 from "../core/error.gr" include Error
 from "../core/infer.gr" include Infer
 from "../core/layer1/expr.gr" include Layer1Expr
+from "../core/module/module_infer.gr" include ModuleInfer
+from "../core/semantic_index.gr" include SemanticIndex
 from "../core/source.gr" include Source
 from "../core/types.gr" include Types
+from "./lsp/layer1/type_display.gr" include TypeDisplay
 
 record NodeSummary {
   id: Number,
@@ -532,4 +535,93 @@ provide let reportWithLine = (
 
 provide let report = (source: String, analysis: Analysis.Analysis) => {
   reportWithLine(source, analysis, None)
+}
+
+provide let reportSummaryWithLine = (
+  source: String,
+  summary: ModuleInfer.ModuleSummary,
+  lineFilter: Option<Number>,
+) => {
+  let index = SemanticIndex.build(source, summary.surfaceProgram, summary.infer)
+  let lines = List.sort(compare=((a, b) => a - b), SemanticIndex.lineNumbers(index))
+
+  List.forEach(
+    (lineNum) => {
+      if (lineFilter != None && lineFilter != Some(lineNum)) {
+        void
+      } else {
+        let lineText = getLineText(source, lineNum)
+        print("Line " ++ toString(lineNum) ++ ": " ++ lineText)
+        let entries = List.sort(
+          compare=((a: SemanticIndex.SemanticEntry, b: SemanticIndex.SemanticEntry) =>
+            if (a.span.start == b.span.start) {
+              a.span.end - b.span.end
+            } else {
+              a.span.start - b.span.start
+            }
+          ),
+          SemanticIndex.entriesForLine(index, lineNum)
+        )
+        List.forEach(
+          (entry: SemanticIndex.SemanticEntry) => {
+            print(
+              " Col "
+                ++ toString(entry.span.col)
+                ++ ": "
+                ++ entry.excerpt
+                ++ "    //(nodeId:"
+                ++ toString(entry.nodeId)
+                ++ ")"
+            )
+            print("  type: " ++ TypeDisplay.renderWithEnv(entry.ty, summary.infer.env))
+            if (entry.effectNotes != []) {
+              print("    ?? " ++ Array.join("; ", Array.fromList(entry.effectNotes)))
+            } else {
+              void
+            }
+          },
+          entries,
+        )
+        print("")
+      }
+    },
+    lines,
+  )
+
+  List.forEach((diag: Error.CompilerError) => {
+    if (lineFilter == None || lineFilter == Some(diag.span.line)) {
+      let lineText = getLineText(source, diag.span.line)
+      print(
+        toString(diag.span.line)
+          ++ ":"
+          ++ toString(diag.span.col)
+          ++ " "
+          ++ diag.message
+      )
+      if (lineText != "") {
+        print("  " ++ lineText)
+      } else {
+        void
+      }
+    } else {
+      void
+    }
+  }, summary.diagnostics)
+
+  if (summary.diagnostics != [] && (lineFilter == None || List.some((diag: Error.CompilerError) => diag.span.line == match (lineFilter) { Some(lineNum) => lineNum, None => -1 }, summary.diagnostics))) {
+    print("")
+  } else {
+    void
+  }
+
+  match (lineFilter) {
+    Some(_) => void,
+    None => {
+      let analysis: Analysis.Analysis = {
+        program: summary.program,
+        infer: summary.infer,
+      }
+      printTopBindings(analysis)
+    },
+  }
 }

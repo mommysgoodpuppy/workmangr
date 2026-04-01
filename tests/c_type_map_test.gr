@@ -1,0 +1,92 @@
+module CTypeMapTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "map" include Map
+
+from "../src/core/foreign_types/c_type_map.gr" include CTypeMap
+from "../src/core/types.gr" include Types
+
+setSourceFile("./tests/c_type_map_test.gr")
+
+let expectValueType = (result: CTypeMap.ForeignTypeResult, name: String) =>
+  match (Map.get(name, result.values)) {
+    Some(scheme) => scheme.ty,
+    None => fail("missing foreign value: " ++ name),
+  }
+
+test("nullable C pointer maps to Option of Ptr", () => {
+  let json =
+    "{\"types\":[],\"fns\":[{\"name\":\"fopen\",\"params\":[{\"kind\":\"pointer\",\"isConst\":true,\"child\":{\"kind\":\"int\",\"name\":\"c_char\"}},{\"kind\":\"pointer\",\"isConst\":true,\"child\":{\"kind\":\"int\",\"name\":\"c_char\"}}],\"return\":{\"kind\":\"optional\",\"child\":{\"kind\":\"pointer\",\"isConst\":false,\"child\":{\"kind\":\"named\",\"name\":\"cimport.struct__IO_FILE\"}}}}],\"values\":[]}"
+
+  let result = match (CTypeMap.fromJson(json)) {
+    Ok(value) => value,
+    Err(msg) => fail(msg),
+  }
+  let ty = expectValueType(result, "fopen")
+
+  match (ty) {
+    Types.TFun(
+      Types.TTuple([
+        Types.TNominal("ManyPtr", [Types.TNominal("CChar", []), Types.TNominal("Const", [])]),
+        Types.TNominal("ManyPtr", [Types.TNominal("CChar", []), Types.TNominal("Const", [])]),
+      ]),
+      Types.TNominal("Option", [Types.TNominal("Ptr", [Types.TNominal("IO_FILE", []), Types.TNominal("Mut", [])])])
+    ) =>
+      assertTrue(true),
+    _ => fail("expected fopen return type Option<Ptr<IO_FILE, _>> but got " ++ Types.typeToString(ty)),
+  }
+})
+
+test("nullable many pointer maps to Option of ManyPtr", () => {
+  let json =
+    "{\"types\":[],\"fns\":[],\"values\":[{\"name\":\"argv\",\"type\":{\"kind\":\"optional\",\"child\":{\"kind\":\"pointer\",\"isConst\":false,\"child\":{\"kind\":\"int\",\"name\":\"u8\"}}}}]}"
+
+  let result = match (CTypeMap.fromJson(json)) {
+    Ok(value) => value,
+    Err(msg) => fail(msg),
+  }
+  let ty = expectValueType(result, "argv")
+
+  match (ty) {
+    Types.TNominal("Option", [Types.TNominal("ManyPtr", [Types.TNominal("U8", []), Types.TNominal("Mut", [])])]) =>
+      assertTrue(true),
+    _ => fail("expected argv : Option<ManyPtr<U8, _>> but got " ++ Types.typeToString(ty)),
+  }
+})
+
+test("missing pointer qualifier falls back to fresh state var", () => {
+  let json =
+    "{\"types\":[],\"fns\":[],\"values\":[{\"name\":\"legacy\",\"type\":{\"kind\":\"pointer\",\"child\":{\"kind\":\"named\",\"name\":\"cimport.struct__IO_FILE\"}}}]}"
+
+  let result = match (CTypeMap.fromJson(json)) {
+    Ok(value) => value,
+    Err(msg) => fail(msg),
+  }
+  let ty = expectValueType(result, "legacy")
+
+  match (ty) {
+    Types.TNominal("Ptr", [Types.TNominal("IO_FILE", []), Types.TVar(_)]) =>
+      assertTrue(true),
+    _ => fail("expected legacy : Ptr<IO_FILE, _> but got " ++ Types.typeToString(ty)),
+  }
+})
+
+test("non-pointer optional maps to Option", () => {
+  let json =
+    "{\"types\":[],\"fns\":[],\"values\":[{\"name\":\"maybe_count\",\"type\":{\"kind\":\"optional\",\"child\":{\"kind\":\"int\",\"name\":\"c_int\"}}}]}"
+
+  let result = match (CTypeMap.fromJson(json)) {
+    Ok(value) => value,
+    Err(msg) => fail(msg),
+  }
+  let ty = expectValueType(result, "maybe_count")
+
+  match (ty) {
+    Types.TNominal("Option", [Types.TNominal("CInt", [])]) =>
+      assertTrue(true),
+    _ => fail("expected maybe_count : Option<CInt> but got " ++ Types.typeToString(ty)),
+  }
+})

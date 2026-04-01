@@ -463,6 +463,53 @@ test("parser disambiguates match bundle literal vs scrutinee vs arrow sugar", ()
   ])
 })
 
+test("parser recovers bare match scrutinee into canonical parenthesized form", () => {
+  clearErrors()
+  let parsed = Parser.parse("let m = match input { Some(x) => { x }, None => { 0 } };")
+
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Match(m) => {
+            let scrutineeOk = match (m.scrutinee) {
+              Some({ kind: SurfaceAst.Paren({ kind: SurfaceAst.Ident({ text: "input", _ }), _ }), _ }) => true,
+              _ => false,
+            }
+            let recoveryItemsOk = match (m.items) {
+              [
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken("("), _ }),
+                SurfaceAst.ExprItem({ kind: SurfaceAst.Ident({ text: "input", _ }), _ }),
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(")"), _ }),
+              ] => true,
+              _ => false,
+            }
+            scrutineeOk && recoveryItemsOk
+          },
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+
+  let parenWarnings = List.length(List.filter(
+    (entry: Error.MarkedError) => match (entry.mark.kind) {
+      SurfaceAst.MissingToken("(") => true,
+      SurfaceAst.MissingToken(")") => true,
+      _ => false,
+    },
+    getMarkedErrors()
+  ))
+
+  all([
+    assertTrue(shapeOk),
+    assertEquals(2, parenWarnings),
+  ])
+})
+
 test("parser recovers match arrow clauses with non-block bodies", () => {
   clearErrors()
   let source =

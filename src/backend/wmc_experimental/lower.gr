@@ -102,6 +102,9 @@ let rec lowerExpr = (ctx: LowerCtx, expr: CoreAst.Expr) => {
 and lowerApplication = (ctx: LowerCtx, meta: IR.ExprMeta, callee: CoreAst.Expr, arg: CoreAst.Expr) => {
   // Collect the callee chain
   let (rootCallee, args) = collectApplyChain(callee, [arg])
+  // Flatten single-tuple arg: f(a, b, c) is Apply(f, Tuple(a, b, c))
+  // so args = [Tuple(a,b,c)]. Flatten to [a, b, c] for call emission.
+  let flatArgs = flattenTupleArgs(args)
 
   let rootExpr: CoreAst.Expr = rootCallee
   match (rootExpr.kind) {
@@ -118,12 +121,12 @@ and lowerApplication = (ctx: LowerCtx, meta: IR.ExprMeta, callee: CoreAst.Expr, 
             Some(result) => result,
             None =>
               // Check unary prim ops (e.g. print, !)
-              match (identToPrimOp(nameText, List.length(args))) {
+              match (identToPrimOp(nameText, List.length(flatArgs))) {
                 Some(op) =>
-                  IR.EPrim(meta, op, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args)),
+                  IR.EPrim(meta, op, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), flatArgs)),
                 None => {
                   let calleeLowered = lowerExpr(ctx, rootCallee)
-                  IR.ECall(meta, calleeLowered, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args))
+                  IR.ECall(meta, calleeLowered, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), flatArgs))
                 },
               },
           },
@@ -131,7 +134,7 @@ and lowerApplication = (ctx: LowerCtx, meta: IR.ExprMeta, callee: CoreAst.Expr, 
     },
     _ => {
       let calleeLowered = lowerExpr(ctx, rootCallee)
-      IR.ECall(meta, calleeLowered, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args))
+      IR.ECall(meta, calleeLowered, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), flatArgs))
     },
   }
 }
@@ -152,6 +155,21 @@ and tryLowerBinaryOp = (ctx: LowerCtx, meta: IR.ExprMeta, opName: String, args: 
       }
     },
     _ => None,
+  }
+
+// Flatten single-tuple args for call emission.
+// f(a, b, c) is parsed as Apply(f, Tuple(a, b, c)) → args = [Tuple(a,b,c)]
+// We flatten to [a, b, c] so Zig gets individual arguments.
+and flattenTupleArgs = (args: List<CoreAst.Expr>) =>
+  match (args) {
+    [singleArg] => {
+      let sa: CoreAst.Expr = singleArg
+      match (sa.kind) {
+        CoreAst.Tuple(items) => items,
+        _ => args,
+      }
+    },
+    _ => args,
   }
 
 and collectApplyChain = (expr: CoreAst.Expr, argsAcc: List<CoreAst.Expr>) =>

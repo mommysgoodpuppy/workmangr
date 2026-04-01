@@ -1,0 +1,14 @@
+domain ptr {
+  stateKind rowSet;
+  merge singleton;
+  mergeRow union;
+  boundary mustBeCarrier;
+  conflict none;
+};
+
+export type Const = Const;
+export type Mut = Mut;
+
+export type infectious ptr Ptr<T, S> = T;
+export type infectious ptr ManyPtr<T, S> = T;
+export type infectious ptr Slice<T, S> = T;

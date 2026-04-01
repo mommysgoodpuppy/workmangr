@@ -1,0 +1,804 @@
+module CTypeMap
+
+from "list" include List
+from "map" include Map
+from "json" include Json
+from "string" include String
+from "number" include Number
+
+from "../types.gr" include Types
+from "../env.gr" include Env
+from "../core_ast.gr" include CoreAst
+from "../source.gr" include Source
+
+// ---------------------------------------------------------------------------
+// Extracted result types — mirrors the JSON produced by the Zig extractor
+// ---------------------------------------------------------------------------
+
+provide record rec ExtractedTypeDesc {
+  kind: String,
+  name: Option<String>,
+  bits: Option<Number>,
+  signed: Option<Bool>,
+  isConst: Option<Bool>,
+  child: Option<ExtractedTypeDesc>,
+  length: Option<Number>,
+}
+
+provide record ExtractedField {
+  name: String,
+  ty: ExtractedTypeDesc,
+}
+
+provide record ExtractedStruct {
+  name: String,
+  fields: List<ExtractedField>,
+  opaque: Bool,
+}
+
+provide record ExtractedEnum {
+  name: String,
+  tags: List<String>,
+  backing: Option<ExtractedTypeDesc>,
+}
+
+provide record ExtractedAlias {
+  name: String,
+  target: ExtractedTypeDesc,
+}
+
+provide enum ExtractedTypeEntry {
+  Struct(ExtractedStruct),
+  Enum(ExtractedEnum),
+  Alias(ExtractedAlias),
+}
+
+provide record ExtractedFn {
+  name: String,
+  params: List<ExtractedTypeDesc>,
+  ret: Option<ExtractedTypeDesc>,
+}
+
+provide record ExtractedValue {
+  name: String,
+  ty: ExtractedTypeDesc,
+}
+
+provide record ExtractedResult {
+  types: List<ExtractedTypeEntry>,
+  fns: List<ExtractedFn>,
+  values: List<ExtractedValue>,
+}
+
+// ---------------------------------------------------------------------------
+// Result of mapping: values (name → Scheme) and types (name → TypeInfo)
+// ---------------------------------------------------------------------------
+
+provide record ForeignTypeResult {
+  values: Map.Map<String, Types.Scheme>,
+  types: Map.Map<String, Env.TypeInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// Fresh type variable counter — thread through mapping
+// ---------------------------------------------------------------------------
+
+let mut nextFreshVar = 900000
+
+let freshTypeVar = () => {
+  let id = nextFreshVar
+  nextFreshVar = id + 1
+  Types.TVar(id)
+}
+
+provide let resetFreshVars = (start: Number) => {
+  nextFreshVar = start
+}
+
+let pointerStateType = (isConst: Option<Bool>) =>
+  match (isConst) {
+    Some(true) => Types.TNominal("Const", []),
+    Some(false) => Types.TNominal("Mut", []),
+    None => freshTypeVar(),
+  }
+
+// ---------------------------------------------------------------------------
+// Name normalization
+// ---------------------------------------------------------------------------
+
+let normalizeZigPrimitiveName = (name: String) => {
+  if (name == "i8") { "I8" }
+  else if (name == "i16") { "I16" }
+  else if (name == "i32") { "I32" }
+  else if (name == "i64") { "I64" }
+  else if (name == "i128") { "I128" }
+  else if (name == "isize") { "Isize" }
+  else if (name == "u8") { "U8" }
+  else if (name == "u16") { "U16" }
+  else if (name == "u32") { "U32" }
+  else if (name == "u64") { "U64" }
+  else if (name == "u128") { "U128" }
+  else if (name == "usize") { "Usize" }
+  else if (name == "f16") { "F16" }
+  else if (name == "f32") { "F32" }
+  else if (name == "f64") { "F64" }
+  else if (name == "f128") { "F128" }
+  else if (name == "void") { "Void" }
+  else if (name == "noreturn") { "NoReturn" }
+  else if (name == "anyerror") { "Anyerror" }
+  else if (name == "comptime_int") { "ComptimeInt" }
+  else if (name == "comptime_float") { "ComptimeFloat" }
+  else if (name == "c_short") { "CShort" }
+  else if (name == "c_ushort") { "CUShort" }
+  else if (name == "c_int") { "CInt" }
+  else if (name == "c_uint") { "CUInt" }
+  else if (name == "c_long") { "CLong" }
+  else if (name == "c_ulong") { "CULong" }
+  else if (name == "c_longlong") { "CLongLong" }
+  else if (name == "c_ulonglong") { "CULongLong" }
+  else if (name == "c_char") { "CChar" }
+  else { name }
+}
+
+let normalizeCImportName = (name: String) => {
+  if (!String.startsWith("cimport.", name)) {
+    name
+  } else {
+    let suffix = String.slice(String.length("cimport."), name)
+    if (String.startsWith("struct_", suffix)) {
+      String.slice(String.length("struct_"), suffix)
+    } else if (String.startsWith("enum_", suffix)) {
+      String.slice(String.length("enum_"), suffix)
+    } else {
+      suffix
+    }
+  }
+}
+
+// Remove leading underscores if the stripped name exists in the types map
+let stripLeadingUnderscores = (name: String, types: Map.Map<String, Env.TypeInfo>) => {
+  let mut stripped = name
+  let mut i = 0
+  while (i < String.length(name) && String.charAt(i, name) == '_') {
+    i += 1
+  }
+  if (i > 0 && i < String.length(name)) {
+    stripped = String.slice(i, name)
+    match (Map.get(stripped, types)) {
+      Some(_) => stripped,
+      None => name,
+    }
+  } else {
+    name
+  }
+}
+
+let isCStringPointerTarget = (ty: Types.Type) => {
+  match (ty) {
+    Types.TNominal(name, []) =>
+      name == "CChar" || name == "U8" || name == "I8",
+    _ => false,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Type mapping — ExtractedTypeDesc → Types.Type
+// ---------------------------------------------------------------------------
+
+provide enum Position {
+  PosParam,
+  PosReturn,
+  PosField,
+  PosValue,
+  PosNone,
+}
+
+let rec mapTypeDesc = (
+  desc: ExtractedTypeDesc,
+  types: Map.Map<String, Env.TypeInfo>,
+  position: Position,
+) => {
+  let kind = desc.kind
+  if (kind == "void") {
+    Types.TVoid
+  } else if (kind == "bool") {
+    Types.TBool
+  } else if (kind == "int") {
+    mapIntType(desc, types)
+  } else if (kind == "float") {
+    mapFloatType(desc, types)
+  } else if (kind == "pointer") {
+    let childType = match (desc.child) {
+      Some(child) => mapTypeDesc(child, types, position),
+      None => unknownForeignType(),
+    }
+    let stateType = pointerStateType(desc.isConst)
+    if (isCStringPointerTarget(childType)) {
+      Types.TNominal("ManyPtr", [childType, stateType])
+    } else {
+      Types.TNominal("Ptr", [childType, stateType])
+    }
+  } else if (kind == "optional") {
+    mapOptionalType(desc, types, position)
+  } else if (kind == "named") {
+    let rawName = match (desc.name) {
+      Some(n) => n,
+      None => "Unknown",
+    }
+    mapNamedType(normalizeCImportName(rawName), types)
+  } else if (kind == "array") {
+    let childType = match (desc.child) {
+      Some(child) => mapTypeDesc(child, types, position),
+      None => unknownForeignType(),
+    }
+    // Arrays are represented as TNominal("Array", [element, length-as-nominal])
+    let len = match (desc.length) {
+      Some(n) => n,
+      None => 0,
+    }
+    Types.TNominal("Array", [childType, Types.TNominal(toString(len), [])])
+  } else if (kind == "unknown") {
+    match (desc.name) {
+      Some(rawName) => {
+        let name = normalizeCImportName(rawName)
+        if (name == "anyopaque") {
+          mapNamedType(name, types)
+        } else if (
+          String.startsWith("cimport.struct_", rawName)
+            || String.startsWith("cimport.union_", rawName)
+        ) {
+          Types.TNominal(name, [])
+        } else {
+          unknownForeignType()
+        }
+      },
+      None => unknownForeignType(),
+    }
+  } else {
+    unknownForeignType()
+  }
+}
+
+and mapOptionalType = (
+  desc: ExtractedTypeDesc,
+  types: Map.Map<String, Env.TypeInfo>,
+  position: Position,
+) => {
+  match (desc.child) {
+    Some(child) when child.kind == "pointer" => {
+      let childType = mapTypeDesc(child, types, position)
+      match (childType) {
+        Types.TNominal("Ptr", [innerTy, stateTy, ...extraArgs]) => {
+          Types.TNominal("Option", [Types.TNominal("Ptr", [innerTy, stateTy, ...extraArgs])])
+        },
+        Types.TNominal("ManyPtr", [innerTy, stateTy, ...extraArgs]) => {
+          Types.TNominal("Option", [Types.TNominal("ManyPtr", [innerTy, stateTy, ...extraArgs])])
+        },
+        _ =>
+          Types.TNominal(
+            "Option",
+            [childType],
+          ),
+      }
+    },
+    _ => {
+      let inner = match (desc.child) {
+        Some(child) => mapTypeDesc(child, types, position),
+        None => unknownForeignType(),
+      }
+      Types.TNominal("Option", [inner])
+    },
+  }
+}
+
+and mapIntType = (desc: ExtractedTypeDesc, types: Map.Map<String, Env.TypeInfo>) => {
+  match (desc.name) {
+    Some(name) => mapNamedType(name, types),
+    None => {
+      let bits = match (desc.bits) {
+        Some(b) => b,
+        None => 32,
+      }
+      let signed = match (desc.signed) {
+        Some(s) => s,
+        None => true,
+      }
+      let name = if (signed) {
+        "i" ++ toString(bits)
+      } else {
+        "u" ++ toString(bits)
+      }
+      mapNamedType(name, types)
+    },
+  }
+}
+
+and mapFloatType = (desc: ExtractedTypeDesc, types: Map.Map<String, Env.TypeInfo>) => {
+  match (desc.name) {
+    Some(name) => mapNamedType(name, types),
+    None => {
+      let bits = match (desc.bits) {
+        Some(b) => b,
+        None => 32,
+      }
+      mapNamedType("f" ++ toString(bits), types)
+    },
+  }
+}
+
+and mapNamedType = (rawName: String, types: Map.Map<String, Env.TypeInfo>) => {
+  let mut name = normalizeZigPrimitiveName(rawName)
+  name = stripLeadingUnderscores(name, types)
+  if (name == "bool") {
+    Types.TBool
+  } else if (name == "void" || name == "Void") {
+    Types.TVoid
+  } else if (name == "anyopaque" || name == "Anyopaque") {
+    Types.TNominal("Anyopaque", [])
+  } else {
+    buildNamedConstructorType(name, types)
+  }
+}
+
+and buildNamedConstructorType = (
+  name: String,
+  types: Map.Map<String, Env.TypeInfo>,
+) => {
+  match (Map.get(name, types)) {
+    Some(info) when List.length(info.typeParams) > 0 => {
+      let args = List.map(
+        (_param) => unknownForeignType(),
+        info.typeParams,
+      )
+      Types.TNominal(name, args)
+    },
+    _ => Types.TNominal(name, []),
+  }
+}
+
+and unknownForeignType = () => {
+  Types.THole(-1)
+}
+
+// ---------------------------------------------------------------------------
+// Build TypeInfo from extracted structs/enums
+// ---------------------------------------------------------------------------
+
+let dummySpan = Source.makeSpan(0, 0, 0, 0)
+let dummyNode = { id: 0, span: dummySpan }: CoreAst.Node
+let mkName = (text: String) => { node: dummyNode, text }: CoreAst.Name
+
+let buildStructInfo = (
+  entry: ExtractedStruct,
+  types: Map.Map<String, Env.TypeInfo>,
+) => {
+  let fields = if (entry.opaque) {
+    None
+  } else {
+    let fieldList = List.map(
+      (field: ExtractedField) => {
+        let name = mkName(field.name)
+        // Build a simple TypeExpr.Ref for the mapped type
+        let mappedType = mapTypeDesc(field.ty, types, PosField)
+        let typeExpr = {
+          node: dummyNode,
+          kind: CoreAst.UnitType,
+        }: CoreAst.TypeExpr
+        (name, typeExpr)
+      },
+      entry.fields,
+    )
+    Some(fieldList)
+  }
+  {
+    name: entry.name,
+    typeParams: [],
+    constructors: [],
+    recordFields: fields,
+    infection: None,
+  }: Env.TypeInfo
+}
+
+let buildEnumInfo = (entry: ExtractedEnum) => {
+  {
+    name: entry.name,
+    typeParams: [],
+    constructors: [],
+    recordFields: None,
+    infection: None,
+  }: Env.TypeInfo
+}
+
+// ---------------------------------------------------------------------------
+// Build function type — curried a -> b -> c -> result
+// ---------------------------------------------------------------------------
+
+let makeFunctionType = (params: List<Types.Type>, result: Types.Type) => {
+  if (params == []) {
+    Types.TFun(Types.TVoid, result)
+  } else if (List.length(params) == 1) {
+    match (params) {
+      [only] => Types.TFun(only, result),
+      _ => Types.TFun(Types.TTuple(params), result),
+    }
+  } else {
+    Types.TFun(Types.TTuple(params), result)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Collect free vars for quantification
+// ---------------------------------------------------------------------------
+
+let freeVarsForQuantify = (ty: Types.Type) => {
+  Types.freeVars(ty)
+}
+
+// ---------------------------------------------------------------------------
+// Main mapping: ExtractedResult → ForeignTypeResult
+// ---------------------------------------------------------------------------
+
+provide let mapExtractedResult = (extracted: ExtractedResult) => {
+  let values: Map.Map<String, Types.Scheme> = Map.make()
+  let types: Map.Map<String, Env.TypeInfo> = Map.make()
+
+  // Pass 1: register structs and enums
+  List.forEach((entry: ExtractedTypeEntry) => {
+    match (entry) {
+      Struct(s) => {
+        let info = buildStructInfo(s, types)
+        Map.set(s.name, info, types)
+      },
+      Enum(e) => {
+        let info = buildEnumInfo(e)
+        Map.set(e.name, info, types)
+      },
+      Alias(_) => void,
+    }
+  }, extracted.types)
+
+  // Pass 2: register aliases
+  List.forEach((entry: ExtractedTypeEntry) => {
+    match (entry) {
+      Alias(a) => {
+        let target = mapTypeDesc(a.target, types, PosValue)
+        let info: Env.TypeInfo = {
+          name: a.name,
+          typeParams: [],
+          constructors: [],
+          recordFields: None,
+          infection: None,
+        }
+        Map.set(a.name, info, types)
+        // Also register the alias as a value
+        let scheme: Types.Scheme = { quantifiers: [], ty: target }
+        Map.set(a.name, scheme, values)
+      },
+      _ => void,
+    }
+  }, extracted.types)
+
+  // Pass 3: register type names as constructor values
+  List.forEach((entry: ExtractedTypeEntry) => {
+    match (entry) {
+      Struct(s) => {
+        if (Map.get(s.name, values) == None) {
+          let scheme: Types.Scheme = {
+            quantifiers: [],
+            ty: Types.TNominal(s.name, []),
+          }
+          Map.set(s.name, scheme, values)
+        } else {
+          void
+        }
+      },
+      Enum(e) => {
+        if (Map.get(e.name, values) == None) {
+          let scheme: Types.Scheme = {
+            quantifiers: [],
+            ty: Types.TNominal(e.name, []),
+          }
+          Map.set(e.name, scheme, values)
+        } else {
+          void
+        }
+      },
+      _ => void,
+    }
+  }, extracted.types)
+
+  // Pass 4: map functions
+  List.forEach((fn: ExtractedFn) => {
+    let paramTypes = List.map(
+      (param: ExtractedTypeDesc) => mapTypeDesc(param, types, PosParam),
+      fn.params,
+    )
+    let returnType = match (fn.ret) {
+      Some(ret) => mapTypeDesc(ret, types, PosReturn),
+      None => Types.TVoid,
+    }
+    let fnType = makeFunctionType(paramTypes, returnType)
+    let quantifiers = freeVarsForQuantify(fnType)
+    let scheme: Types.Scheme = { quantifiers, ty: fnType }
+    Map.set(fn.name, scheme, values)
+  }, extracted.fns)
+
+  // Pass 5: map standalone values
+  List.forEach((v: ExtractedValue) => {
+    let ty = mapTypeDesc(v.ty, types, PosValue)
+    let scheme: Types.Scheme = { quantifiers: [], ty }
+    Map.set(v.name, scheme, values)
+  }, extracted.values)
+
+  { values, types }: ForeignTypeResult
+}
+
+// ---------------------------------------------------------------------------
+// JSON parsing — convert Grain Json tree → ExtractedResult
+// ---------------------------------------------------------------------------
+
+let jsonGetString = (key: String, pairs: List<(String, Json.Json)>) => {
+  let rec loop = (remaining: List<(String, Json.Json)>) => {
+    match (remaining) {
+      [] => None,
+      [(k, Json.JsonString(v)), ...rest] =>
+        if (k == key) { Some(v) } else { loop(rest) },
+      [_, ...rest] => loop(rest),
+    }
+  }
+  loop(pairs)
+}
+
+let jsonGetNumber = (key: String, pairs: List<(String, Json.Json)>) => {
+  let rec loop = (remaining: List<(String, Json.Json)>) => {
+    match (remaining) {
+      [] => None,
+      [(k, Json.JsonNumber(v)), ...rest] =>
+        if (k == key) { Some(v) } else { loop(rest) },
+      [_, ...rest] => loop(rest),
+    }
+  }
+  loop(pairs)
+}
+
+let jsonGetBool = (key: String, pairs: List<(String, Json.Json)>) => {
+  let rec loop = (remaining: List<(String, Json.Json)>) => {
+    match (remaining) {
+      [] => None,
+      [(k, Json.JsonBoolean(v)), ...rest] =>
+        if (k == key) { Some(v) } else { loop(rest) },
+      [_, ...rest] => loop(rest),
+    }
+  }
+  loop(pairs)
+}
+
+let jsonGetObject = (key: String, pairs: List<(String, Json.Json)>) => {
+  let rec loop = (remaining: List<(String, Json.Json)>) => {
+    match (remaining) {
+      [] => None,
+      [(k, Json.JsonObject(v)), ...rest] =>
+        if (k == key) { Some(v) } else { loop(rest) },
+      [_, ...rest] => loop(rest),
+    }
+  }
+  loop(pairs)
+}
+
+let jsonGetArray = (key: String, pairs: List<(String, Json.Json)>) => {
+  let rec loop = (remaining: List<(String, Json.Json)>) => {
+    match (remaining) {
+      [] => None,
+      [(k, Json.JsonArray(v)), ...rest] =>
+        if (k == key) { Some(v) } else { loop(rest) },
+      [_, ...rest] => loop(rest),
+    }
+  }
+  loop(pairs)
+}
+
+let rec parseTypeDesc = (json: Json.Json) => {
+  match (json) {
+    Json.JsonObject(pairs) => {
+      let kind = match (jsonGetString("kind", pairs)) {
+        Some(k) => k,
+        None => "unknown",
+      }
+      let name = jsonGetString("name", pairs)
+      let bits = jsonGetNumber("bits", pairs)
+      let signed = jsonGetBool("signed", pairs)
+      let isConst = match (jsonGetBool("isConst", pairs)) {
+        Some(v) => Some(v),
+        None => jsonGetBool("const", pairs),
+      }
+      let child = match (jsonGetObject("child", pairs)) {
+        Some(childPairs) => Some(parseTypeDesc(Json.JsonObject(childPairs))),
+        None => None,
+      }
+      let length = jsonGetNumber("length", pairs)
+      { kind, name, bits, signed, isConst, child, length }: ExtractedTypeDesc
+    },
+    _ => {
+      {
+        kind: "unknown",
+        name: None,
+        bits: None,
+        signed: None,
+        isConst: None,
+        child: None,
+        length: None,
+      }: ExtractedTypeDesc
+    },
+  }
+}
+
+let parseField = (json: Json.Json) => {
+  match (json) {
+    Json.JsonObject(pairs) => {
+      let name = match (jsonGetString("name", pairs)) {
+        Some(n) => n,
+        None => "_unknown",
+      }
+      let tyJson = match (jsonGetObject("type", pairs)) {
+        Some(tyPairs) => Json.JsonObject(tyPairs),
+        None => Json.JsonNull,
+      }
+      Some({ name, ty: parseTypeDesc(tyJson) }: ExtractedField)
+    },
+    _ => None,
+  }
+}
+
+let parseTypeEntry = (json: Json.Json) => {
+  match (json) {
+    Json.JsonObject(pairs) => {
+      let kind = match (jsonGetString("kind", pairs)) {
+        Some(k) => k,
+        None => "unknown",
+      }
+      let name = match (jsonGetString("name", pairs)) {
+        Some(n) => n,
+        None => "_Unknown",
+      }
+      if (kind == "struct") {
+        let fields = match (jsonGetArray("fields", pairs)) {
+          Some(items) => List.filterMap(parseField, items),
+          None => [],
+        }
+        let opaque = match (jsonGetBool("opaque", pairs)) {
+          Some(v) => v,
+          None => false,
+        }
+        Some(Struct({ name, fields, opaque }))
+      } else if (kind == "enum") {
+        let tags = match (jsonGetArray("tags", pairs)) {
+          Some(items) =>
+            List.filterMap(
+              (item: Json.Json) => match (item) {
+                Json.JsonString(s) => Some(s),
+                _ => None,
+              },
+              items
+            ),
+          None => [],
+        }
+        let backing = match (jsonGetObject("backing", pairs)) {
+          Some(backPairs) =>
+            Some(parseTypeDesc(Json.JsonObject(backPairs))),
+          None => None,
+        }
+        Some(Enum({ name, tags, backing }))
+      } else if (kind == "alias") {
+        let target = match (jsonGetObject("target", pairs)) {
+          Some(targetPairs) =>
+            parseTypeDesc(Json.JsonObject(targetPairs)),
+          None =>
+            {
+              kind: "unknown",
+              name: None,
+              bits: None,
+              signed: None,
+              isConst: None,
+              child: None,
+              length: None,
+            },
+        }
+        Some(Alias({ name, target }))
+      } else {
+        None
+      }
+    },
+    _ => None,
+  }
+}
+
+let parseFnEntry = (json: Json.Json) => {
+  match (json) {
+    Json.JsonObject(pairs) => {
+      let name = match (jsonGetString("name", pairs)) {
+        Some(n) => n,
+        None => "_unknown_fn",
+      }
+      let params = match (jsonGetArray("params", pairs)) {
+        Some(items) => List.map(parseTypeDesc, items),
+        None => [],
+      }
+      let ret = match (jsonGetObject("return", pairs)) {
+        Some(retPairs) =>
+          Some(parseTypeDesc(Json.JsonObject(retPairs))),
+        None => None,
+      }
+      Some({ name, params, ret }: ExtractedFn)
+    },
+    _ => None,
+  }
+}
+
+let parseValueEntry = (json: Json.Json) => {
+  match (json) {
+    Json.JsonObject(pairs) => {
+      let name = match (jsonGetString("name", pairs)) {
+        Some(n) => n,
+        None => "_unknown_val",
+      }
+      let ty = match (jsonGetObject("type", pairs)) {
+        Some(tyPairs) =>
+          parseTypeDesc(Json.JsonObject(tyPairs)),
+        None =>
+          {
+            kind: "unknown",
+            name: None,
+            bits: None,
+            signed: None,
+            isConst: None,
+            child: None,
+            length: None,
+          },
+      }
+      Some({ name, ty }: ExtractedValue)
+    },
+    _ => None,
+  }
+}
+
+provide let parseExtractedJson = (jsonStr: String) => {
+  match (Json.parse(jsonStr)) {
+    Ok(Json.JsonObject(pairs)) => {
+      let types = match (jsonGetArray("types", pairs)) {
+        Some(items) => List.filterMap(parseTypeEntry, items),
+        None => [],
+      }
+      let fns = match (jsonGetArray("fns", pairs)) {
+        Some(items) => List.filterMap(parseFnEntry, items),
+        None => [],
+      }
+      let values = match (jsonGetArray("values", pairs)) {
+        Some(items) => List.filterMap(parseValueEntry, items),
+        None => [],
+      }
+      Ok({ types, fns, values }: ExtractedResult)
+    },
+    Ok(_) => Err("Expected JSON object at top level"),
+    Err(_) => Err("Failed to parse JSON"),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// High-level entry: JSON string → ForeignTypeResult
+// ---------------------------------------------------------------------------
+
+provide let fromJson = (jsonStr: String) => {
+  match (parseExtractedJson(jsonStr)) {
+    Ok(extracted) => Ok(mapExtractedResult(extracted)),
+    Err(msg) => Err(msg),
+  }
+}
+
+provide {
+  mapTypeDesc,
+  mapNamedType,
+  normalizeZigPrimitiveName,
+  normalizeCImportName,
+  makeFunctionType,
+  unknownForeignType,
+}

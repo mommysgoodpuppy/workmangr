@@ -327,11 +327,17 @@ and emitCall = (state: EmitState, callee: IR.Expr, args: List<IR.Expr>) => {
 }
 
 and emitLet = (state: EmitState, binding: IR.LetBinding, body: IR.Expr) => {
-  let name = sanitizeLocal(binding.name)
   let (valueLines, valueText) = emitExpr(state, binding.value)
   let (bodyLines, bodyText) = emitExpr(state, body)
-  let allLines = List.append(valueLines, ["const " ++ name ++ " = " ++ valueText ++ ";", ...bodyLines])
-  (allLines, bodyText)
+  if (binding.name == "_") {
+    // Discard binding: use Zig's _ which can be assigned multiple times
+    let allLines = List.append(valueLines, ["_ = " ++ valueText ++ ";", ...bodyLines])
+    (allLines, bodyText)
+  } else {
+    let name = sanitizeLocal(binding.name)
+    let allLines = List.append(valueLines, ["const " ++ name ++ " = " ++ valueText ++ ";", ...bodyLines])
+    (allLines, bodyText)
+  }
 }
 
 and emitLetRec = (state: EmitState, bindings: List<IR.RecLetBinding>, body: IR.Expr) => {

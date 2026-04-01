@@ -4,6 +4,7 @@ from "../submodules/graintest/lib/test.gr" include Test
 use Test.*
 
 from "../src/cli/lsp/layer1/type_display.gr" include TypeDisplay
+from "../src/core/env.gr" include Env
 from "../src/core/types.gr" include Types
 
 setSourceFile("./tests/lsp_type_display_test.gr")
@@ -19,6 +20,27 @@ test("display renders tuple-arg function as curried chain", () => {
     Types.TVar(166)
   )
   assertEquals("List<T> -> Int -> U", TypeDisplay.render(t))
+})
+
+test("display renders infectious carriers in T[Carrier:S] form", () => {
+  let env = Env.empty()
+  Env.registerType(
+    env,
+    {
+      name: "Ptr",
+      typeParams: ["T", "S"],
+      constructors: [],
+      recordFields: None,
+      infection: Some("ptr"),
+    }: Env.TypeInfo,
+  )
+  let t = Types.TNominal("Option", [Types.TNominal("Ptr", [Types.TNominal("_IO_FILE", []), Types.TVar(42)])])
+  assertEquals("Option<_IO_FILE[Ptr:T]>", TypeDisplay.renderWithEnv(t, env))
+})
+
+test("display keeps non-infectious two-arg nominals in angle-bracket form", () => {
+  let t = Types.TNominal("Pair", [Types.TNumber, Types.TVar(42)])
+  assertEquals("Pair<Int, T>", TypeDisplay.render(t))
 })
 
 let results = runTests()

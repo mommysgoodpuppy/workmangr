@@ -133,18 +133,33 @@ let normalizePath = (rawPath: String) => {
       },
   }
   let parts = String.split("/", pathWithoutPrefix)
-  let folded = Array.reduce((acc: List<String>, part: String) => {
+  let foldedRev = Array.reduce((accRev: List<String>, part: String) => {
     if (part == "" || part == ".") {
-      acc
+      accRev
     } else if (part == "..") {
-      match (acc) {
-        [] => [],
-        [_last, ...restRev] => List.reverse(restRev),
+      match (accRev) {
+        [] =>
+          if (drivePrefix != None || isUnixAbs) {
+            []
+          } else {
+            [".."]
+          },
+        [last, ...restRev] =>
+          if (last == "..") {
+            if (drivePrefix != None || isUnixAbs) {
+              accRev
+            } else {
+              ["..", last, ...restRev]
+            }
+          } else {
+            restRev
+          },
       }
     } else {
-      List.append(acc, [part])
+      [part, ...accRev]
     }
   }, [], parts)
+  let folded = List.reverse(foldedRev)
   let body = joinSegments(folded)
   match (drivePrefix) {
     Some(drive) =>

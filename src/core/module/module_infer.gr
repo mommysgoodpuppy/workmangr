@@ -5,6 +5,10 @@ from "map" include Map
 from "array" include Array
 from "char" include Char
 from "string" include String
+from "json" include Json
+from "fs" include Fs
+from "path" include Path
+from "wasi/process" include Process
 
 from "../analysis.gr" include Analysis
 from "../core_ast.gr" include CoreAst
@@ -13,10 +17,12 @@ from "../error.gr" include Error
 from "../infer.gr" include Infer
 from "../infection_registry.gr" include InfectionRegistry
 from "../source.gr" include Source
+from "../surface_ast.gr" include SurfaceAst
 from "../types.gr" include Types
 from "../../frontend/lower.gr" include Lower
 from "../module/module_system.gr" include ModuleSystem
 from "../layer1/expr.gr" include Layer1Expr
+from "../foreign_types/c_type_map.gr" include CTypeMap
 
 provide record TypeAtOffset {
   nodeId: Number,
@@ -26,6 +32,7 @@ provide record TypeAtOffset {
 
 provide record ModuleSummary {
   moduleId: String,
+  surfaceProgram: SurfaceAst.Program,
   program: CoreAst.Program,
   infer: Infer.InferState,
   typeEntries: List<TypeAtOffset>,
@@ -116,6 +123,138 @@ let typeDiagnosticsForProgram = (
 ) => {
   let nodeSpans = Analysis.buildNodeSpans(program)
   Analysis.typeInferenceDiagnostics(infer.marks, nodeSpans)
+}
+
+// ---------------------------------------------------------------------------
+// C header type loading — reads extracted JSON from cache file
+// ---------------------------------------------------------------------------
+
+let mut cHeaderCacheLoaded = false
+let cHeaderCache: Map.Map<String, String> = Map.make()
+let mut cHeadersFileOverride: Option<String> = None
+let mut loadedCHeadersFile: Option<String> = None
+
+provide let setCHeadersFile = (filePath: String) => {
+  cHeadersFileOverride = Some(filePath)
+  cHeaderCacheLoaded = false
+  loadedCHeadersFile = None
+}
+
+provide let clearCHeadersFile = () => {
+  cHeadersFileOverride = None
+  cHeaderCacheLoaded = false
+  loadedCHeadersFile = None
+}
+
+let envLookup = (name: String) => {
+  match (Process.env()) {
+    Err(_) => None,
+    Ok(vars) => {
+      let prefix = name ++ "="
+      let prefixLen = String.length(prefix)
+      Array.reduce((acc, entry) => {
+        match (acc) {
+          Some(_) => acc,
+          None =>
+            if (String.startsWith(prefix, entry)) {
+              Some(String.slice(prefixLen, entry))
+            } else {
+              None
+            },
+        }
+      }, None, vars)
+    },
+  }
+}
+
+let clearCHeaderCache = () => {
+  List.forEach(((header, _): (String, String)) => {
+    Map.remove(header, cHeaderCache)
+  }, Map.toList(cHeaderCache))
+}
+
+let normalizePathForCacheLookup = (filePath: String) =>
+  String.replaceAll("\\", "/", filePath)
+
+let parentDir = (filePath: String) => {
+  let normalized = normalizePathForCacheLookup(filePath)
+  match (String.lastIndexOf("/", normalized)) {
+    Some(0) => "/",
+    Some(idx) => String.slice(0, end=idx, normalized),
+    None => ".",
+  }
+}
+
+let findNearbyCHeadersFile = (moduleSourcePath: String) => {
+  let rec search = (dir: String) => {
+    let baseDir = normalizePathForCacheLookup(dir)
+    let candidate = if (baseDir == "/") {
+      "/.wm_cache/c_headers/_combined.json"
+    } else {
+      baseDir ++ "/.wm_cache/c_headers/_combined.json"
+    }
+    match (ModuleSystem.readTextFile(candidate, ".", None)) {
+      Ok(_) => Some(candidate),
+      Err(_) => {
+        let parent = parentDir(baseDir)
+        if (parent == dir) {
+          None
+        } else {
+          search(parent)
+        }
+      },
+    }
+  }
+  search(parentDir(moduleSourcePath))
+}
+
+let ensureCHeaderCacheLoaded = (moduleSourcePath: String) => {
+  let cacheFileOpt = match (cHeadersFileOverride) {
+    Some(filePath) => Some(filePath),
+    None => match (envLookup("WM_C_HEADERS_FILE")) {
+      Some(filePath) => Some(filePath),
+      None => findNearbyCHeadersFile(moduleSourcePath),
+    },
+  }
+  if (loadedCHeadersFile != cacheFileOpt || !cHeaderCacheLoaded) {
+    clearCHeaderCache()
+    cHeaderCacheLoaded = true
+    loadedCHeadersFile = cacheFileOpt
+    match (cacheFileOpt) {
+      None => void,
+      Some(filePath) => {
+        match (ModuleSystem.readTextFile(filePath, ".", None)) {
+          Err(_) => void,
+          Ok(contents) => {
+            match (Json.parse(contents)) {
+              Ok(Json.JsonObject(pairs)) => {
+                List.forEach(((header, jsonValue): (String, Json.Json)) => {
+                  match (Json.toString(format=Json.Compact, jsonValue)) {
+                    Ok(jsonStr) => Map.set(header, jsonStr, cHeaderCache),
+                    Err(_) => void,
+                  }
+                }, pairs)
+              },
+              _ => void,
+            }
+          },
+        }
+      },
+    }
+  }
+}
+
+let loadCHeaderTypes = (moduleSourcePath: String, headerPath: String) => {
+  ensureCHeaderCacheLoaded(moduleSourcePath)
+  match (Map.get(headerPath, cHeaderCache)) {
+    None => None,
+    Some(jsonStr) => {
+      match (CTypeMap.fromJson(jsonStr)) {
+        Ok(result) => Some(result),
+        Err(_) => None,
+      }
+    },
+  }
 }
 
 let collectImportedEnv = (
@@ -226,18 +365,71 @@ let collectImportedEnv = (
           loop(remainingImports, pathRest)
         } else {
           if (ModuleSystem.isCHeader(providerPath)) {
-            match (importDecl.alias) {
-              Some(alias) => {
-                let holeScheme = freshHoleScheme()
-                let capAlias = capitalizeHead(alias.text)
-                Map.set(alias.text, holeScheme, env)
-                if (capAlias != alias.text) {
-                  Map.set(capAlias, holeScheme, env)
-                } else {
-                  void
+            let cHeaderResult = loadCHeaderTypes(node.sourcePath, providerPath)
+            match (cHeaderResult) {
+              Some(foreignResult) => {
+                // Register foreign types into imported types
+                List.forEach(
+                  ((typeName, typeInfo): (String, Env.TypeInfo)) => {
+                    Map.set(typeName, typeInfo, importedTypes)
+                  },
+                  Map.toList(foreignResult.types)
+                )
+                // Register foreign values with qualified names
+                let foreignValues = Map.toList(foreignResult.values)
+                match (importDecl.alias) {
+                  Some(alias) => {
+                    let capAlias = capitalizeHead(alias.text)
+                    let aliases = if (capAlias == alias.text) {
+                      [alias.text]
+                    } else {
+                      [alias.text, capAlias]
+                    }
+                    List.forEach(((name, scheme)) => {
+                      List.forEach((aliasName: String) => {
+                        let qualified = aliasName ++ "." ++ name
+                        Map.set(qualified, scheme, env)
+                      }, aliases)
+                    }, foreignValues)
+                  },
+                  None => {
+                    // Named imports
+                    if (importDecl.names != []) {
+                      List.forEach((item: CoreAst.ImportName) => {
+                        let exportedName = item.name.text
+                        let localName = match (item.alias) {
+                          Some(aliasName) => aliasName.text,
+                          None => exportedName,
+                        }
+                        match (Map.get(exportedName, foreignResult.values)) {
+                          Some(scheme) => Map.set(localName, scheme, env),
+                          None => void,
+                        }
+                      }, importDecl.names)
+                    } else {
+                      List.forEach(((name, scheme)) => {
+                        Map.set(name, scheme, env)
+                      }, foreignValues)
+                    }
+                  },
                 }
               },
-              None => void,
+              None => {
+                // Fallback to hole schemes if no extraction data available
+                match (importDecl.alias) {
+                  Some(alias) => {
+                    let holeScheme = freshHoleScheme()
+                    let capAlias = capitalizeHead(alias.text)
+                    Map.set(alias.text, holeScheme, env)
+                    if (capAlias != alias.text) {
+                      Map.set(capAlias, holeScheme, env)
+                    } else {
+                      void
+                    }
+                  },
+                  None => void,
+                }
+              },
             }
           } else {
             match (Map.get(providerPath, summaries)) {
@@ -528,6 +720,7 @@ provide let inferGraphWithCache = (
             applyReexports(node, summaries, ownValues, ownTypes)
             let summary: ModuleSummary = {
               moduleId,
+              surfaceProgram: node.program,
               program: lowered,
               infer,
               typeEntries,

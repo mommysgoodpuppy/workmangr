@@ -15,7 +15,10 @@ from "json" include Json
 
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
+from "../../core/env.gr" include Env
+from "../../core/infer.gr" include Infer
 from "../../core/module/module_infer.gr" include ModuleInfer
+from "../../core/semantic_index.gr" include SemanticIndex
 from "../../core/types.gr" include Types
 from "../../core/module/module_system.gr" include ModuleSystem
 from "../../frontend/lexer.gr" include Lexer
@@ -492,6 +495,17 @@ let toRootRelativePath = (path: String, root: String) => {
   }
 }
 
+let pathIsWithinRoot = (path: String, root: String) => {
+  let normPath = String.replaceAll("\\", "/", path)
+  let normRoot = String.replaceAll("\\", "/", root)
+  let rootWithSlash = if (String.endsWith("/", normRoot)) {
+    normRoot
+  } else {
+    normRoot ++ "/"
+  }
+  normPath == normRoot || String.startsWith(rootWithSlash, normPath)
+}
+
 let pathToUri = (path: String) => {
   let normalized = String.replaceAll("\\", "/", path)
   let step1 = String.replaceAll(" ", "%20", normalized)
@@ -500,6 +514,19 @@ let pathToUri = (path: String) => {
     "file:///" ++ encoded
   } else {
     "file://" ++ encoded
+  }
+}
+
+let rootDirForEntry = (entryUri: String) => {
+  let absEntryPath = uriToPath(entryUri)
+  match (workspaceRootPath) {
+    Some(root) =>
+      if (pathIsWithinRoot(absEntryPath, root)) {
+        (absEntryPath, root, "workspaceRoot")
+      } else {
+        (absEntryPath, dirname(absEntryPath), "entryDirFallback")
+      },
+    None => (absEntryPath, dirname(absEntryPath), "entryDirNoWorkspaceRoot"),
   }
 }
 
@@ -594,9 +621,10 @@ let hoverJsonForTypeValue = (
   source: String,
   span: Source.Span,
   ty: Types.Type,
+  env: Env.TypingEnv,
   effectNotes: List<String>,
 ) => {
-  let renderedType = TypeDisplay.render(ty)
+  let renderedType = TypeDisplay.renderWithEnv(ty, env)
   let effectSuffix = if (effectNotes == []) {
     ""
   } else {
@@ -793,14 +821,28 @@ let buildGraphForEntry = (
   entryUri: String,
   docs: Map.Map<String, String>,
 ) => {
-  let absEntryPath = uriToPath(entryUri)
-  let rootDir = match (workspaceRootPath) {
-    Some(root) => root,
-    None => dirname(absEntryPath),
-  }
-  let entryPath = toWorkspacePath(uriToPath(entryUri))
+  let (absEntryPath, rootDir, rootStrategy) = rootDirForEntry(entryUri)
+  let entryPath = toWorkspacePath(absEntryPath)
   let stdRootForGraph = toRootRelativePath(v0StdRoot, rootDir)
   let overrides = docsToOverrides(docs)
+  debug(
+    "[LSP graph] entryUri="
+      ++ entryUri
+      ++ " absEntryPath="
+      ++ absEntryPath
+      ++ " rootDir="
+      ++ rootDir
+      ++ " rootStrategy="
+      ++ rootStrategy
+      ++ " entryPath="
+      ++ entryPath
+      ++ " stdRootRaw="
+      ++ v0StdRoot
+      ++ " stdRootForGraph="
+      ++ stdRootForGraph
+      ++ " openDocs="
+      ++ toString(List.length(Map.toList(docs)))
+  )
   let graph = ModuleSystem.buildGraph(
     entryPath,
     options={
@@ -924,13 +966,15 @@ let computeInlayHints = (
         caller="inlay",
       )
       match (summaryOpt) {
-        Some(summary) =>
-          Inlay.typeInlayHintsFromLoweredProgram(
-            summary.program,
-            summary.infer,
+        Some(summary) => {
+          let inferState: Infer.InferState = summary.infer
+          Inlay.typeInlayHintsFromSemanticIndex(
+            SemanticIndex.build(source, summary.surfaceProgram, summary.infer),
+            inferState.env,
             0,
             sourceLen
-          ),
+          )
+        },
         None => "[]",
       }
     }
@@ -979,6 +1023,20 @@ let publishGraphDiagnostics = (
   publishedUris: Map.Map<String, Bool>,
 ) => {
   let publishStart = nowNs()
+  let (_absEntryPath, selectedRootDir, rootStrategy) = rootDirForEntry(entryUri)
+  debug(
+    "[LSP diag] publish start entryUri="
+      ++ entryUri
+      ++ " selectedRootDir="
+      ++ selectedRootDir
+      ++ " rootStrategy="
+      ++ rootStrategy
+      ++ " workspaceRoot="
+      ++ match (workspaceRootPath) {
+        Some(root) => root,
+        None => "<none>",
+      }
+  )
   let (entryPath, graph, inferred) = buildInferenceForEntry(entryUri, docs, caller="diag")
   let graphNodeIds = List.map(((moduleId, _node)) => moduleId, Map.toList(graph.nodes))
   Map.set(entryUri, graphNodeIds, openEntryDependencies)
@@ -1169,13 +1227,23 @@ let handleHover = (
           match (summaryOpt) {
             Some(summary) => {
               let lookupStart = nowNs()
-              match (ModuleInfer.typeAtOffsetInSummary(summary, offset)) {
+              let index = SemanticIndex.build(source, summary.surfaceProgram, summary.infer)
+              match (SemanticIndex.entryAtOffset(index, offset)) {
                 Some(found) => {
                   let selectedType = match (SymbolService.findDefinitionNearOffset(graph, modulePath, source, offset)) {
                     Some(definition) =>
                       match (Map.get(definition.modulePath, inferred.modules)) {
                         Some(defSummary) =>
-                          match (ModuleInfer.typeAtOffsetInSummary(defSummary, definition.span.start)) {
+                          match (
+                            SemanticIndex.entryAtOffset(
+                              SemanticIndex.build(
+                                source,
+                                defSummary.surfaceProgram,
+                                defSummary.infer
+                              ),
+                              definition.span.start
+                            )
+                          ) {
                             Some(defTypeAt) => match ((found.ty, defTypeAt.ty)) {
                               (Types.TVoid, replacementTy) => replacementTy,
                               (_currentTy, Types.TFun(_, _)) => defTypeAt.ty,
@@ -1190,17 +1258,22 @@ let handleHover = (
                   let lookupEnd = nowNs()
                   timing("hover.lookup", lookupStart, lookupEnd)
                   timing("hover.total", hoverStart, lookupEnd)
-                  let effectNotes = ModuleInfer.effectNotesAtNodeInSummary(
-                    summary,
-                    found.nodeId
-                  )
                   let hoverSpan = match (tokenSpanNearOffset(source, offset)) {
                     Some(tokenSpan) => tokenSpan,
                     None => found.span,
                   }
                   sendResponse(
                     idText,
-                    hoverJsonForTypeValue(source, hoverSpan, selectedType, effectNotes)
+                    {
+                      let inferState: Infer.InferState = summary.infer
+                      hoverJsonForTypeValue(
+                        source,
+                        hoverSpan,
+                        selectedType,
+                        inferState.env,
+                        found.effectNotes
+                      )
+                    }
                   )
                 },
                 None => {
@@ -1373,6 +1446,18 @@ let handleMessage = (
               Some(rootUri) => Some(uriToPath(rootUri)),
               None => workspaceRootPath,
             }
+            debug(
+              "[LSP init] rootUri="
+                ++ match (jsonGetString("rootUri", params)) {
+                  Some(rootUri) => rootUri,
+                  None => "<none>",
+                }
+                ++ " workspaceRoot="
+                ++ match (workspaceRootPath) {
+                  Some(root) => root,
+                  None => "<none>",
+                }
+            )
             debug("[LSP init] workspaceRoot=" ++ match (workspaceRootPath) {
               Some(root) => root,
               None => "<none>",
@@ -1395,6 +1480,16 @@ let handleMessage = (
                   Some(uri) => match (jsonGetString("text", doc)) {
                     Some(text) => {
                       Map.set(uri, text, docs)
+                      debug(
+                        "[LSP open] uri="
+                          ++ uri
+                          ++ " absPath="
+                          ++ uriToPath(uri)
+                          ++ " workspacePath="
+                          ++ toWorkspacePath(uriToPath(uri))
+                          ++ " chars="
+                          ++ toString(String.length(text))
+                      )
                       let version = match (jsonGetNumber("version", doc)) {
                         Some(v) => v,
                         None => 1,
@@ -1451,6 +1546,16 @@ let handleMessage = (
                       match (jsonGetString("text", Json.JsonObject(first))) {
                         Some(text) => {
                           Map.set(uri, text, docs)
+                          debug(
+                            "[LSP change] uri="
+                              ++ uri
+                              ++ " absPath="
+                              ++ uriToPath(uri)
+                              ++ " workspacePath="
+                              ++ toWorkspacePath(uriToPath(uri))
+                              ++ " chars="
+                              ++ toString(String.length(text))
+                          )
                           let nextVersion = match (versionOpt) {
                             Some(v) => v,
                             None => match (Map.get(uri, docVersions)) {

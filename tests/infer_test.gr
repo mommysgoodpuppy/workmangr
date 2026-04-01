@@ -213,6 +213,46 @@ let x = 1 + 1: U8;
   ])
 })
 
+test("string literals coerce to C string pointer params in function application", () => {
+  let env = Map.make()
+  Map.set(
+    "fopen",
+    ({
+      quantifiers: [0],
+      ty: Types.TFun(
+        Types.TTuple([
+          Types.TNominal("ManyPtr", [Types.TNominal("U8", []), Types.TVar(0)]),
+          Types.TNominal("ManyPtr", [Types.TNominal("U8", []), Types.TVar(0)]),
+        ]),
+        Types.TNominal(
+          "Option",
+          [Types.TNominal("Ptr", [Types.TNominal("IO_FILE", []), Types.TVar(0)])],
+        )
+      ),
+    }: Types.Scheme),
+    env
+  )
+
+  let state = inferSourceWithEnv(
+    "
+let file = fopen(\"simple.wm\", \"rb\");
+",
+    env
+  )
+  let scheme = expectTopBinding(state, "file")
+  let hasHardMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("cannot unify", entry.message),
+    state.marks
+  )
+
+  all([
+    assertFalse(hasHardMismatch),
+    assertEquals("Option<Ptr<IO_FILE, T>>", Types.typeToString(scheme.ty)),
+  ])
+})
+
 test("literal patterns use their literal type", () => {
   let source =
     "

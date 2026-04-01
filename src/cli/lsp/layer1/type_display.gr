@@ -5,6 +5,7 @@ from "list" include List
 from "map" include Map
 from "string" include String
 
+from "../../../core/env.gr" include Env
 from "../../../core/types.gr" include Types
 
 let varLabel = (id: Number) => {
@@ -65,7 +66,17 @@ let rec collectCurried = (t: Types.Type, argsAcc: List<Types.Type>) =>
     _ => (argsAcc, t),
   }
 
-let rec prettyAtomic = (t: Types.Type) =>
+let isInfectiousCarrier = (envOpt: Option<Env.TypingEnv>, name: String) =>
+  match (envOpt) {
+    Some(env) =>
+      match (Map.get(name, env.types)) {
+        Some(typeInfo) => typeInfo.infection != None,
+        None => false,
+      },
+    None => false,
+  }
+
+let rec prettyAtomicWithEnv = (t: Types.Type, envOpt: Option<Env.TypingEnv>) =>
   match (t) {
     Types.TNumber => "Int",
     Types.TBool => "Bool",
@@ -76,28 +87,49 @@ let rec prettyAtomic = (t: Types.Type) =>
     Types.THole(_id) => "?",
     Types.TVar(id) => varLabel(id),
     Types.TTuple(items) =>
-      "(" ++ Array.join(", ", Array.fromList(List.map(prettyType, items))) ++ ")",
+      "("
+        ++ Array.join(", ", Array.fromList(List.map((item) => prettyTypeWithEnv(item, envOpt), items)))
+        ++ ")",
+    Types.TNominal(name, [valueArg, stateArg]) =>
+      if (isInfectiousCarrier(envOpt, name)) {
+        prettyAtomicWithEnv(valueArg, envOpt)
+          ++ "["
+          ++ name
+          ++ ":"
+          ++ prettyTypeWithEnv(stateArg, envOpt)
+          ++ "]"
+      } else {
+        name
+          ++ "<"
+          ++ prettyTypeWithEnv(valueArg, envOpt)
+          ++ ", "
+          ++ prettyTypeWithEnv(stateArg, envOpt)
+          ++ ">"
+      },
     Types.TNominal(name, args) =>
       if (args == []) {
         name
       } else {
         name
           ++ "<"
-          ++ Array.join(", ", Array.fromList(List.map(prettyType, args)))
+          ++ Array.join(", ", Array.fromList(List.map((arg) => prettyTypeWithEnv(arg, envOpt), args)))
           ++ ">"
       },
-    Types.TFun(_, _) => "(" ++ prettyType(t) ++ ")",
+    Types.TFun(_, _) => "(" ++ prettyTypeWithEnv(t, envOpt) ++ ")",
   }
 
-and prettyType = (t: Types.Type) =>
+and prettyTypeWithEnv = (t: Types.Type, envOpt: Option<Env.TypingEnv>) =>
   match (t) {
     Types.TFun(_, _) => {
       let (args, result) = collectCurried(t, [])
-      let argStrings = List.map(prettyAtomic, args)
-      let resultString = prettyAtomic(result)
+      let argStrings = List.map((arg) => prettyAtomicWithEnv(arg, envOpt), args)
+      let resultString = prettyAtomicWithEnv(result, envOpt)
       Array.join(" -> ", Array.fromList(List.append(argStrings, [resultString])))
     },
-    _ => prettyAtomic(t),
+    _ => prettyAtomicWithEnv(t, envOpt),
   }
 
-provide let render = (t: Types.Type) => prettyType(normalizeTypeVars(t))
+provide let render = (t: Types.Type) => prettyTypeWithEnv(normalizeTypeVars(t), None)
+
+provide let renderWithEnv = (t: Types.Type, env: Env.TypingEnv) =>
+  prettyTypeWithEnv(normalizeTypeVars(t), Some(env))

@@ -549,3 +549,64 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name: "LSP didOpen should not crash when initialize rootUri is an unrelated workspace folder",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    if (Deno.build.os === "windows") return;
+
+    const cwd = Deno.cwd().replaceAll("\\", "/");
+    const unrelatedRoot = `${cwd}/../workman`;
+    const rootUri = `file://${unrelatedRoot}`;
+    const stdRoot = `${cwd}/std`;
+    const target = `${cwd}/simple.wm`;
+    const source = await Deno.readTextFile(target);
+    const targetUri = `file://${target}`;
+
+    const proc = new Deno.Command("grain", {
+      args: [
+        "--dir", ".",
+        "--dir", stdRoot,
+        "--dir", unrelatedRoot,
+        "--include-dirs", `${cwd}/src`,
+        `${cwd}/src/cli/lsp/lsp.gr`,
+        "--",
+        "--std-root", stdRoot,
+      ],
+      cwd,
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+
+    const client = new LspClient(proc);
+    await client.request("initialize", {
+      processId: null,
+      rootUri,
+      capabilities: {},
+    });
+    await client.notify("initialized", {});
+    await client.notify("textDocument/didOpen", {
+      textDocument: {
+        uri: targetUri,
+        languageId: "wm",
+        version: 1,
+        text: source,
+      },
+    });
+
+    await new Promise((r) => setTimeout(r, 1500));
+    const runtimeError = client.runtimeError;
+    const sawTargetPublish = client.publishedUris.has(targetUri);
+    await client.close();
+
+    if (runtimeError) {
+      throw new Error(`unexpected LSP runtime error: ${runtimeError}`);
+    }
+    if (!sawTargetPublish) {
+      throw new Error("expected publishDiagnostics notification for opened file, got none");
+    }
+  },
+});

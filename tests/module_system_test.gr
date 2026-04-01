@@ -305,5 +305,33 @@ test("module identity is shared across equivalent import spellings", () => {
   ])
 })
 
+test("module graph with absolute std root does not crash prelude injection", () => {
+  let overrides = Map.make()
+  Map.set("/repo/simple.wm", "let main = Empty;", overrides)
+  Map.set("/repo/std/prelude.wm", "let Empty = 1;", overrides)
+
+  let graph = ModuleSystem.buildGraph(
+    "/repo/simple",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      rootDir: "/repo",
+      stdRoots: ["/repo/std"],
+      sourceOverrides: overrides,
+    }
+  )
+
+  let entryNodeOpt = Map.get("/repo/simple.wm", graph.nodes)
+  let hasPreludeDep = match (entryNodeOpt) {
+    Some(node) => List.some(path => path == "/repo/std/prelude.wm", node.imports),
+    None => false,
+  }
+
+  all([
+    assertTrue(Map.get("/repo/simple.wm", graph.nodes) != None),
+    assertTrue(Map.get("/repo/std/prelude.wm", graph.nodes) != None),
+    assertTrue(hasPreludeDep),
+  ])
+})
+
 let results = runTests()
 printResultsAndExit(results)

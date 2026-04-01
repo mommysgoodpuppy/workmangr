@@ -51,6 +51,12 @@ test("format inlays do not synthesize legacy import artifacts", () => {
   assertTrue(!String.contains("import std/list;", hints))
 })
 
+test("format inlays do not inject semicolon into wildcard C import prefix", () => {
+  let source = "from \"errno.h\" import * as Errno;\nlet x = 1;"
+  let preview = Inlay.previewForSource(source, false, true)
+  assertTrue(!String.contains("from*;*", preview))
+})
+
 test("format inlays recover match arrow bare clause bodies", () => {
   let source =
     "let xample = match(in) => {\n"

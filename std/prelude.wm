@@ -1,5 +1,6 @@
 from "std/list" import * as List;
 from "std/coretypes" import { Empty, Link };
+from "std/ptr" import {};
 from "std/core/int" import {
   intAdd,
   intSub,
@@ -20,6 +21,9 @@ export from "std/coretypes" type Result(..);
 export from "std/coretypes" type IOption(..);
 export from "std/coretypes" type IResult(..);
 export from "std/coretypes" type List(..);
+export from "std/ptr" type Ptr;
+export from "std/ptr" type ManyPtr;
+export from "std/ptr" type Slice;
 
 export let add = (left, right) => {
   intAdd(left, right)

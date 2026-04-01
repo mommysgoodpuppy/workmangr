@@ -1,0 +1,459 @@
+module SemanticIndex
+
+from "list" include List
+from "map" include Map
+from "number" include Number
+from "string" include String
+
+from "./infer.gr" include Infer
+from "./source.gr" include Source
+from "./surface_ast.gr" include SurfaceAst
+from "./types.gr" include Types
+
+provide enum SemanticEntryKind {
+  BindingName,
+  Pattern,
+  Expr,
+}
+
+provide record SemanticEntry {
+  nodeId: Number,
+  span: Source.Span,
+  kind: SemanticEntryKind,
+  excerpt: String,
+  ty: Types.Type,
+  effectNotes: List<String>,
+  showTypeInlay: Bool,
+}
+
+provide record SemanticIndex {
+  entries: List<SemanticEntry>,
+}
+
+let flatten = (items) => List.reduce((acc, item) => List.append(acc, item), [], items)
+
+let optionToList = (opt) => match (opt) {
+  Some(value) => [value],
+  None => [],
+}
+
+let safeSourceSlice = (source: String, span: Source.Span) => {
+  let len = String.length(source)
+  let start = Number.max(0, Number.min(span.start, len))
+  let end_ = Number.max(start, Number.min(span.end, len))
+  String.slice(start, end=end_, source)
+}
+
+let effectNotesForNode = (infer: Infer.InferState, nodeId: Number) =>
+  match (Map.get(nodeId, infer.effectEventsByNode)) {
+    Some(events) =>
+      List.map((event: Infer.EffectEvent) => event.message, List.reverse(events)),
+    None => [],
+  }
+
+let rec candidateFromNode = (
+  source: String,
+  infer: Infer.InferState,
+  node: SurfaceAst.Node,
+) =>
+  candidateFromTypeNode(source, infer, node, node.id)
+
+and candidateFromTypeNode = (
+  source: String,
+  infer: Infer.InferState,
+  spanNode: SurfaceAst.Node,
+  typeNodeId: Number,
+) =>
+  match (Map.get(typeNodeId, infer.nodeTypes)) {
+    Some(inferredType) =>
+      Some({
+        nodeId: spanNode.id,
+        span: spanNode.span,
+        kind: Expr,
+        excerpt: safeSourceSlice(source, spanNode.span),
+        ty: Types.applySubstType(infer.subst, inferredType),
+        effectNotes: effectNotesForNode(infer, typeNodeId),
+        showTypeInlay: false,
+      }: SemanticEntry),
+    None => None,
+  }
+
+let bindingNameCandidate = (
+  source: String,
+  infer: Infer.InferState,
+  binding: SurfaceAst.LetBinding,
+) =>
+  match (Map.get(binding.value.node.id, infer.nodeTypes)) {
+    Some(inferredType) =>
+      Some({
+        nodeId: binding.name.node.id,
+        span: binding.name.node.span,
+        kind: BindingName,
+        excerpt: safeSourceSlice(source, binding.name.node.span),
+        ty: Types.applySubstType(infer.subst, inferredType),
+        effectNotes: effectNotesForNode(infer, binding.value.node.id),
+        showTypeInlay: binding.annotation == None,
+      }: SemanticEntry),
+    None => None,
+  }
+
+let rec collectPatternEntries = (
+  source: String,
+  infer: Infer.InferState,
+  pattern: SurfaceAst.Pattern,
+) => {
+  let self =
+    match (pattern.kind) {
+      SurfaceAst.Wildcard |
+      SurfaceAst.Var(_) |
+      SurfaceAst.Pin(_) |
+      SurfaceAst.Lit(_) |
+      SurfaceAst.Constructor(_, _) |
+      SurfaceAst.Tuple(_) |
+      SurfaceAst.List(_, _) |
+      SurfaceAst.Hole(_) |
+      SurfaceAst.AllErrors =>
+        List.map(
+          (entry: SemanticEntry) => { ...entry, kind: Pattern }: SemanticEntry,
+          optionToList(candidateFromNode(source, infer, pattern.node))
+        ),
+    }
+
+  let children = match (pattern.kind) {
+    SurfaceAst.Constructor(_, args) =>
+      flatten(List.map((arg) => collectPatternEntries(source, infer, arg), args)),
+    SurfaceAst.Tuple(items) =>
+      flatten(List.map((item) => collectPatternEntries(source, infer, item), items)),
+    SurfaceAst.List(items, restOpt) => {
+      let itemEntries = flatten(
+        List.map((item) => collectPatternEntries(source, infer, item), items)
+      )
+      match (restOpt) {
+        Some(rest) => List.append(itemEntries, collectPatternEntries(source, infer, rest)),
+        None => itemEntries,
+      }
+    },
+    _ => [],
+  }
+
+  List.append(self, children)
+}
+
+let rec collectBlockItemEntries = (
+  source: String,
+  infer: Infer.InferState,
+  item: SurfaceAst.BlockItem,
+) =>
+  match (item) {
+    SurfaceAst.ExprItem(expr) => collectExprEntries(source, infer, expr),
+    SurfaceAst.LetItem(binding) => collectLetBindingEntries(source, infer, binding),
+    SurfaceAst.DeclGroup(group) => collectDeclGroupEntries(source, infer, group),
+    _ => [],
+  }
+
+and collectFnClauseEntries = (
+  source: String,
+  infer: Infer.InferState,
+  clause: SurfaceAst.FnClause,
+) =>
+  List.append(
+    collectPatternEntries(source, infer, clause.param),
+    List.append(
+      match (clause.guard) {
+        Some(guardExpr) => collectExprEntries(source, infer, guardExpr),
+        None => [],
+      },
+      collectBlockEntries(source, infer, clause.body)
+    )
+  )
+
+and collectFnEntries = (
+  source: String,
+  infer: Infer.InferState,
+  fnExpr: SurfaceAst.FnExpr,
+) =>
+  flatten(
+    List.map((item: SurfaceAst.FnItem) =>
+      match (item.kind) {
+        SurfaceAst.Clause(clause) => collectFnClauseEntries(source, infer, clause),
+        _ => [],
+      }, fnExpr.items)
+  )
+
+and collectBlockEntries = (
+  source: String,
+  infer: Infer.InferState,
+  block: SurfaceAst.Block,
+) =>
+  List.append(
+    flatten(List.map((item) => collectBlockItemEntries(source, infer, item), block.items)),
+    collectExprEntries(source, infer, block.body)
+  )
+
+and collectExprEntries = (
+  source: String,
+  infer: Infer.InferState,
+  expr: SurfaceAst.Expr,
+) => {
+  let self = match (expr.kind) {
+    SurfaceAst.Lit(_) |
+    SurfaceAst.Ident(_) |
+    SurfaceAst.Annotate(_, _) |
+    SurfaceAst.Apply(_, _) |
+    SurfaceAst.InfixChain(_) |
+    SurfaceAst.Postfix(_) |
+    SurfaceAst.Tuple(_) |
+    SurfaceAst.List(_) |
+    SurfaceAst.RecordLit(_) |
+    SurfaceAst.Hole(_) |
+    SurfaceAst.Assign(_) => optionToList(candidateFromNode(source, infer, expr.node)),
+    _ => [],
+  }
+
+  let children = match (expr.kind) {
+    SurfaceAst.Annotate(valueExpr, _) => collectExprEntries(source, infer, valueExpr),
+    SurfaceAst.Fn(fnExpr) => collectFnEntries(source, infer, fnExpr),
+    SurfaceAst.Match(matchExpr) => {
+      let scrutineeEntries = match (matchExpr.scrutinee) {
+        Some(scrutinee) => collectExprEntries(source, infer, scrutinee),
+        None => [],
+      }
+      List.append(scrutineeEntries, collectFnEntries(source, infer, matchExpr.bundle))
+    },
+    SurfaceAst.Apply(callee, arg) =>
+      List.append(collectExprEntries(source, infer, callee), collectExprEntries(source, infer, arg)),
+    SurfaceAst.ArrowPrefix(ap) => collectExprEntries(source, infer, ap.body),
+    SurfaceAst.InfixChain(chain) => {
+      let restEntries = flatten(
+        List.map(((_op, rhs)) => collectExprEntries(source, infer, rhs), chain.rest)
+      )
+      List.append(collectExprEntries(source, infer, chain.first), restEntries)
+    },
+    SurfaceAst.Postfix(postfix) => {
+      let segmentEntries = flatten(
+        List.map((segment) =>
+          match (segment) {
+            SurfaceAst.Call(args) =>
+              flatten(List.map((arg) => collectExprEntries(source, infer, arg), args)),
+            SurfaceAst.Index(ix) => collectExprEntries(source, infer, ix),
+            SurfaceAst.Project(_) => [],
+          }, postfix.segments)
+      )
+      List.append(collectExprEntries(source, infer, postfix.target), segmentEntries)
+    },
+    SurfaceAst.Block(block) => collectBlockEntries(source, infer, block),
+    SurfaceAst.Paren(inner) => collectExprEntries(source, infer, inner),
+    SurfaceAst.Tuple(items) =>
+      flatten(List.map((item) => collectExprEntries(source, infer, item), items)),
+    SurfaceAst.List(items) =>
+      flatten(
+        List.map((item) => match (item) {
+          SurfaceAst.Elem(value) => collectExprEntries(source, infer, value),
+          SurfaceAst.Spread(value) => collectExprEntries(source, infer, value),
+        }, items)
+      ),
+    SurfaceAst.RecordLit(items) =>
+      flatten(
+        List.map((item) => match (item) {
+          SurfaceAst.Field(_, value) => collectExprEntries(source, infer, value),
+          SurfaceAst.Spread(value) => collectExprEntries(source, infer, value),
+        }, items)
+      ),
+    SurfaceAst.Seq(items) =>
+      flatten(List.map((item) => collectExprEntries(source, infer, item), items)),
+    SurfaceAst.If(ifExpr) => {
+      let elseEntries = match (ifExpr.elseExpr) {
+        Some(elseExpr) => collectExprEntries(source, infer, elseExpr),
+        None => [],
+      }
+      List.append(
+        collectExprEntries(source, infer, ifExpr.cond),
+        List.append(
+          flatten(
+            List.map((item) => collectBlockItemEntries(source, infer, item), ifExpr.items)
+          ),
+          List.append(collectExprEntries(source, infer, ifExpr.thenExpr), elseEntries)
+        )
+      )
+    },
+    SurfaceAst.Let(binding, body) =>
+      List.append(
+        collectLetBindingEntries(source, infer, binding),
+        collectExprEntries(source, infer, body)
+      ),
+    SurfaceAst.Assign(assignExpr) =>
+      List.append(
+        collectExprEntries(source, infer, assignExpr.target),
+        collectExprEntries(source, infer, assignExpr.value)
+      ),
+    _ => [],
+  }
+
+  List.append(self, children)
+}
+
+and collectLetBindingEntries = (
+  source: String,
+  infer: Infer.InferState,
+  binding: SurfaceAst.LetBinding,
+) =>
+  List.append(
+    List.append(
+      optionToList(bindingNameCandidate(source, infer, binding)),
+      collectPatternEntries(source, infer, binding.name)
+    ),
+    collectExprEntries(source, infer, binding.value)
+  )
+
+and collectDeclEntries = (
+  source: String,
+  infer: Infer.InferState,
+  decl: SurfaceAst.Decl,
+) =>
+  match (decl) {
+    SurfaceAst.LetDecl(letDecl) =>
+      flatten(
+        List.map((binding) => collectLetBindingEntries(source, infer, binding), letDecl.bindings)
+      ),
+    _ => [],
+  }
+
+and collectDeclGroupEntries = (
+  source: String,
+  infer: Infer.InferState,
+  group: SurfaceAst.DeclGroup,
+) =>
+  flatten(List.map((decl) => collectDeclEntries(source, infer, decl), group.decls))
+
+let dedupeEntries = (entries: List<SemanticEntry>) => {
+  let seen: Map.Map<Number, Bool> = Map.make()
+  let rec loop = (remaining: List<SemanticEntry>, acc: List<SemanticEntry>) =>
+    match (remaining) {
+      [] => List.reverse(acc),
+      [entry, ...rest] =>
+        if (Map.get(entry.nodeId, seen) == None) {
+          Map.set(entry.nodeId, true, seen)
+          loop(rest, [entry, ...acc])
+        } else {
+          loop(rest, acc)
+        }
+    }
+  loop(entries, [])
+}
+
+let sortEntries = (entries: List<SemanticEntry>) =>
+  List.sort(compare=((a, b) =>
+    if (a.span.start == b.span.start) {
+      a.span.end - b.span.end
+    } else {
+      a.span.start - b.span.start
+    }
+  ), entries)
+
+provide let build = (
+  source: String,
+  surfaceProgram: SurfaceAst.Program,
+  infer: Infer.InferState,
+) => {
+  let entries = flatten(
+    List.map((item) =>
+      match (item) {
+        SurfaceAst.DeclGroup(group) => collectDeclGroupEntries(source, infer, group),
+        _ => [],
+      }, surfaceProgram.items)
+  )
+  { entries: sortEntries(dedupeEntries(entries)) }: SemanticIndex
+}
+
+provide let entriesForLine = (index: SemanticIndex, line: Number) =>
+  List.filter((entry: SemanticEntry) => entry.span.line == line, index.entries)
+
+let spanContainsOffset = (span: Source.Span, offset: Number) => {
+  if (span.end <= span.start) {
+    offset == span.start
+  } else {
+    offset >= span.start && offset < span.end
+  }
+}
+
+let spanWidth = (span: Source.Span) => {
+  if (span.end > span.start) {
+    span.end - span.start
+  } else {
+    0
+  }
+}
+
+let offsetPositionForSpan = (span: Source.Span) => {
+  if (span.end > span.start) {
+    span.end
+  } else {
+    span.start
+  }
+}
+
+let preferEntry = (candidate: SemanticEntry, current: SemanticEntry) => {
+  let candidateWidth = spanWidth(candidate.span)
+  let currentWidth = spanWidth(current.span)
+  if (candidateWidth == currentWidth) {
+    if (candidate.span.start == current.span.start) {
+      candidate.span.end >= current.span.end
+    } else {
+      candidate.span.start >= current.span.start
+    }
+  } else {
+    candidateWidth < currentWidth
+  }
+}
+
+provide let entryAtOffset = (index: SemanticIndex, offset: Number) => {
+  let rec choose = (entries: List<SemanticEntry>, best: Option<SemanticEntry>) =>
+    match (entries) {
+      [] => best,
+      [entry, ...rest] =>
+        if (spanContainsOffset(entry.span, offset)) {
+          let nextBest = match (best) {
+            Some(current) =>
+              if (preferEntry(entry, current)) {
+                Some(entry)
+              } else {
+                best
+              },
+            None => Some(entry),
+          }
+          choose(rest, nextBest)
+        } else {
+          choose(rest, best)
+        }
+    }
+  choose(index.entries, None)
+}
+
+provide let typeInlayEntriesInRange = (
+  index: SemanticIndex,
+  rangeStart: Number,
+  rangeEnd: Number,
+) =>
+  List.filter(
+    (entry: SemanticEntry) =>
+      entry.showTypeInlay
+        && offsetPositionForSpan(entry.span) >= rangeStart
+        && offsetPositionForSpan(entry.span) <= rangeEnd,
+    index.entries
+  )
+
+provide let lineNumbers = (index: SemanticIndex) => {
+  let seen: Map.Map<Number, Bool> = Map.make()
+  let rec loop = (remaining: List<SemanticEntry>, acc: List<Number>) =>
+    match (remaining) {
+      [] => List.reverse(acc),
+      [entry, ...rest] =>
+        if (Map.get(entry.span.line, seen) == None) {
+          Map.set(entry.span.line, true, seen)
+          loop(rest, [entry.span.line, ...acc])
+        } else {
+          loop(rest, acc)
+        }
+    }
+  loop(index.entries, [])
+}

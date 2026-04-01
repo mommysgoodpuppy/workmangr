@@ -1,11 +1,17 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { extractCHeaders, scanCHeaderImports } from "./src/core/foreign_types/c_header_extract.ts";
 
 type CliParse = {
   command: string;
   args: string[];
   fileArgIndex: number | null;
   hasStdRootArg: boolean;
+};
+
+type PendingLspExtraction = {
+  filePath: string;
+  source: string;
 };
 
 const fileExists = async (path: string): Promise<boolean> => {
@@ -50,7 +56,7 @@ const parseCli = (argv: string[]): CliParse => {
 
   const command = argv[0];
   const args = argv.slice(1);
-  const takesValue = new Set(["--line", "--std-root", "--std"]);
+  const takesValue = new Set(["--line", "--std-root", "--std", "--c-headers-file"]);
   let fileArgIndex: number | null = null;
   let hasStdRootArg = false;
 
@@ -71,6 +77,15 @@ const parseCli = (argv: string[]): CliParse => {
 };
 
 const toPosixPath = (value: string): string => value.replaceAll("\\", "/");
+
+const fileUriToPath = (uri: string): string | null => {
+  try {
+    if (!uri.startsWith("file://")) return null;
+    return path.normalize(fileURLToPath(uri));
+  } catch {
+    return null;
+  }
+};
 
 const toGrainInputPath = (absPath: string, rootDir: string): string => {
   // Grain/WASI on Windows is unreliable with drive-letter absolute paths.
@@ -93,7 +108,170 @@ Examples:
   deno run -A wmgr.ts ast /Users/profilence/git/workman/std/prelude.wm
   deno run -A wmgr.ts inlay ./simple.wm
   deno run -A wmgr.ts run ./simple.wm
+  deno run -A wmgr.ts lsp
 `;
+
+const readContentLength = (headerText: string): number | null => {
+  for (const line of headerText.split("\r\n")) {
+    const idx = line.indexOf(":");
+    if (idx < 0) continue;
+    const name = line.slice(0, idx).trim().toLowerCase();
+    const value = line.slice(idx + 1).trim();
+    if (name === "content-length") {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+  }
+  return null;
+};
+
+const maybeExtractFromLspPayload = async (payloadText: string) => {
+  let extraction: PendingLspExtraction | null = null;
+  try {
+    const payload = JSON.parse(payloadText);
+    const method = payload?.method;
+    if (method === "textDocument/didOpen") {
+      const uri = payload?.params?.textDocument?.uri;
+      const text = payload?.params?.textDocument?.text;
+      const filePath = typeof uri === "string" ? fileUriToPath(uri) : null;
+      if (filePath && typeof text === "string") {
+        extraction = { filePath, source: text };
+      }
+    } else if (method === "textDocument/didChange") {
+      const uri = payload?.params?.textDocument?.uri;
+      const filePath = typeof uri === "string" ? fileUriToPath(uri) : null;
+      const changes = payload?.params?.contentChanges;
+      const text = Array.isArray(changes) && changes.length > 0
+        ? changes[0]?.text
+        : undefined;
+      if (filePath && typeof text === "string") {
+        extraction = { filePath, source: text };
+      }
+    }
+  } catch {
+    extraction = null;
+  }
+
+  if (!extraction) return;
+  if (!(await fileExists(extraction.filePath))) return;
+  const headerImports = scanCHeaderImports(extraction.source);
+  if (headerImports.length === 0) return;
+  try {
+    await extractCHeaders(extraction.filePath, extraction.source);
+  } catch (err) {
+    console.error(
+      `[wmgr:lsp] C header extraction warning:`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+};
+
+const runLspProxy = async (
+  workmangrRoot: string,
+  grainBin: string,
+  stdRoot: string | undefined,
+) => {
+  const extraPreopenDirs = await uniqueExistingDirs([
+    ".",
+    Deno.cwd(),
+    workmangrRoot,
+    stdRoot ?? "",
+    stdRoot ? path.join(stdRoot, "..") : "",
+    stdRoot ? path.join(stdRoot, "..", "..") : "",
+  ]);
+
+  const args = [
+    ...extraPreopenDirs.flatMap((dir) => ["--dir", dir]),
+    "--include-dirs",
+    path.join(workmangrRoot, "src"),
+    path.join(workmangrRoot, "src", "cli", "lsp", "lsp.gr"),
+    "--",
+    ...(stdRoot ? ["--std-root", stdRoot] : []),
+  ];
+
+  const env = { ...Deno.env.toObject() };
+  if (stdRoot) env.WORKMAN_STD_ROOT = stdRoot;
+
+  const proc = new Deno.Command(grainBin, {
+    args,
+    cwd: workmangrRoot,
+    env,
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+
+  const stderrPump = proc.stderr.pipeTo(Deno.stderr.writable);
+  const stdoutPump = proc.stdout.pipeTo(Deno.stdout.writable);
+
+  const reader = Deno.stdin.readable.getReader();
+  const writer = proc.stdin.getWriter();
+  const decoder = new TextDecoder();
+  let buffer = new Uint8Array(0);
+
+  const appendBuffer = (current: Uint8Array, next: Uint8Array) => {
+    const merged = new Uint8Array(current.length + next.length);
+    merged.set(current, 0);
+    merged.set(next, current.length);
+    return merged;
+  };
+
+  const headerDelimiter = new TextEncoder().encode("\r\n\r\n");
+  const indexOfBytes = (haystack: Uint8Array, needle: Uint8Array) => {
+    outer:
+    for (let i = 0; i <= haystack.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) {
+        if (haystack[i + j] !== needle[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  };
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) buffer = appendBuffer(buffer, value);
+
+      for (;;) {
+        const headerEnd = indexOfBytes(buffer, headerDelimiter);
+        if (headerEnd < 0) break;
+        const headerBytes = buffer.slice(0, headerEnd);
+        const headerText = decoder.decode(headerBytes);
+        const contentLength = readContentLength(headerText);
+        if (contentLength == null) {
+          await writer.write(buffer);
+          buffer = new Uint8Array(0);
+          break;
+        }
+        const totalLength = headerEnd + 4 + contentLength;
+        if (buffer.length < totalLength) break;
+        const messageBytes = buffer.slice(0, totalLength);
+        const bodyBytes = buffer.slice(headerEnd + 4, totalLength);
+        const bodyText = decoder.decode(bodyBytes);
+        await maybeExtractFromLspPayload(bodyText);
+        await writer.write(messageBytes);
+        buffer = buffer.slice(totalLength);
+      }
+    }
+
+    if (buffer.length > 0) {
+      await writer.write(buffer);
+    }
+  } finally {
+    try {
+      await writer.close();
+    } catch {
+      // ignore shutdown races
+    }
+    reader.releaseLock();
+  }
+
+  const status = await proc.status;
+  await Promise.allSettled([stderrPump, stdoutPump]);
+  Deno.exit(status.code);
+};
 
 const main = async () => {
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -178,6 +356,33 @@ const main = async () => {
   const env = { ...Deno.env.toObject() };
   if (stdRoot) env.WORKMAN_STD_ROOT = stdRoot;
 
+  if (parsed.command === "lsp") {
+    await runLspProxy(workmangrRoot, grainBin, stdRoot);
+    return;
+  }
+
+  // Extract C header types for commands that feed module inference or LSP.
+  if (
+    absFileArg && await fileExists(absFileArg)
+    && (parsed.command === "type" || parsed.command === "compile" || parsed.command === "run")
+  ) {
+    try {
+      const entrySource = await Deno.readTextFile(absFileArg);
+      const headerImports = scanCHeaderImports(entrySource);
+      if (headerImports.length > 0) {
+        const result = await extractCHeaders(absFileArg, entrySource);
+        if (result.cacheFilePath) {
+          passArgs.unshift("--c-headers-file", result.cacheFilePath);
+        }
+      }
+    } catch (err) {
+      console.error(
+        `[wmgr] C header extraction warning:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+  }
+
   const runCommand = async (cmd: string, args: string[], cwd: string) =>
     await new Deno.Command(cmd, {
       args,
@@ -209,7 +414,7 @@ const main = async () => {
     const zigPath = absFileArg.endsWith(".wm")
       ? absFileArg.slice(0, absFileArg.length - 3) + ".zig"
       : absFileArg + ".zig";
-    const zigProc = await runCommand("zig", ["run", zigPath], invocationCwd);
+    const zigProc = await runCommand("zig", ["run", "-lc", zigPath], invocationCwd);
     if (zigProc.stdout.length > 0) await Deno.stdout.write(zigProc.stdout);
     if (zigProc.stderr.length > 0) await Deno.stderr.write(zigProc.stderr);
     Deno.exit(zigProc.code);

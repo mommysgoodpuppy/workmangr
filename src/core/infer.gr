@@ -50,7 +50,8 @@ provide record EffectEvent {
 record InfectionCarrierWrap {
   domain: String,
   typeName: String,
-  tailArgs: List<Types.Type>,
+  stateArg: Option<Types.Type>,
+  extraArgs: List<Types.Type>,
 }
 
 record LookupResult {
@@ -554,11 +555,20 @@ let containsLabel = (labels: List<String>, target: String) =>
 
 let classifyInfectiousNominal = (ty: Types.Type, state: InferState) =>
   match (apply(state, ty)) {
-    Types.TNominal(typeName, [valueArg, ...tailArgs]) =>
+    Types.TNominal(typeName, [valueArg, stateArg, ...extraArgs]) =>
       match (Env.lookupType(state.env, typeName)) {
         Some(typeInfo) => match (typeInfo.infection) {
           Some(domain) =>
-            Some((valueArg, { domain, typeName, tailArgs }: InfectionCarrierWrap)),
+            Some((valueArg, { domain, typeName, stateArg: Some(stateArg), extraArgs }: InfectionCarrierWrap)),
+          None => None,
+        },
+        None => None,
+      },
+    Types.TNominal(typeName, [valueArg]) =>
+      match (Env.lookupType(state.env, typeName)) {
+        Some(typeInfo) => match (typeInfo.infection) {
+          Some(domain) =>
+            Some((valueArg, { domain, typeName, stateArg: None, extraArgs: [] }: InfectionCarrierWrap)),
           None => None,
         },
         None => None,
@@ -606,8 +616,22 @@ let rec normalizeArgAgainstParam = (
   paramTy: Types.Type,
   argTy: Types.Type,
   state: InferState,
-) =>
+) => {
+  let isCStringElementType = (ty: Types.Type) =>
+    match (ty) {
+      Types.TNominal(name, []) =>
+        name == "CChar" || name == "U8" || name == "I8",
+      _ => false,
+    }
+  let stringCoercionTarget = (ty: Types.Type) =>
+    match (ty) {
+      Types.TNominal("Ptr", [elemTy, ..._]) => isCStringElementType(elemTy),
+      Types.TNominal("ManyPtr", [elemTy, ..._]) => isCStringElementType(elemTy),
+      Types.TNominal("Slice", [elemTy, ..._]) => isCStringElementType(elemTy),
+      _ => false,
+    }
   match ((apply(state, paramTy), apply(state, argTy))) {
+    (expected, Types.TString) when stringCoercionTarget(expected) => (expected, []),
     (expected, appliedArg) when isInfectiousType(expected, state) => (appliedArg, []),
     (_expected, appliedArg) =>
       match (classifyInfectiousNominal(appliedArg, state)) {
@@ -645,6 +669,7 @@ let rec normalizeArgAgainstParam = (
           },
       },
   }
+}
 
 let normalizeArgForCallee = (
   calleeTy: Types.Type,
@@ -686,7 +711,11 @@ let chooseCarrierWrap = (
     },
   }
 
-let wrapResultWithCarrier = (resultTy: Types.Type, wrap: InfectionCarrierWrap, state: InferState) =>
+let wrapResultWithCarrier = (resultTy: Types.Type, wrap: InfectionCarrierWrap, state: InferState) => {
+  let carrierArgs = match (wrap.stateArg) {
+    Some(stateArg) => [apply(state, resultTy), stateArg, ...wrap.extraArgs],
+    None => [apply(state, resultTy), ...wrap.extraArgs],
+  }
   match (apply(state, resultTy)) {
     Types.TNominal(typeName, _args) =>
       match (Env.lookupType(state.env, typeName)) {
@@ -695,14 +724,15 @@ let wrapResultWithCarrier = (resultTy: Types.Type, wrap: InfectionCarrierWrap, s
             if (existingDomain == wrap.domain) {
               apply(state, resultTy)
             } else {
-              Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs])
+              Types.TNominal(wrap.typeName, carrierArgs)
             },
-          None => Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs]),
+          None => Types.TNominal(wrap.typeName, carrierArgs),
         },
-        None => Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs]),
+        None => Types.TNominal(wrap.typeName, carrierArgs),
       },
-    _ => Types.TNominal(wrap.typeName, [apply(state, resultTy), ...wrap.tailArgs]),
+    _ => Types.TNominal(wrap.typeName, carrierArgs),
   }
+}
 
 let applyOpRuleAtCall = (
   callNodeId: Number,

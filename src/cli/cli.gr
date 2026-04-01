@@ -69,67 +69,81 @@ let main = () => {
         idx: Number,
         lineFilter: Option<Number>,
         stdRoot: Option<String>,
+        cHeadersFile: Option<String>,
         filePath: Option<String>,
       ) => if (idx >= argCount) {
-        (lineFilter, stdRoot, filePath)
+        (lineFilter, stdRoot, cHeadersFile, filePath)
       } else {
         let arg = Array.get(idx, args)
         if (arg == "-O" || arg == "--optimize") {
           exitWith(1, "The optimizing backend has been removed. Use `wmgr compile <file.wm>`.")
-          (lineFilter, stdRoot, filePath)
+          (lineFilter, stdRoot, cHeadersFile, filePath)
         } else if (arg == "--line") {
           if (idx + 1 >= argCount) {
             exitWith(1, "Missing value for --line")
-            (lineFilter, stdRoot, filePath)
+            (lineFilter, stdRoot, cHeadersFile, filePath)
           } else {
             let lineStr = Array.get(idx + 1, args)
             let parsed = Number.parseInt(lineStr, radix=10)
             match (parsed) {
               Ok(lineNum) when lineNum > 0 =>
-                parseTypeArgs(idx + 2, Some(lineNum), stdRoot, filePath),
+                parseTypeArgs(idx + 2, Some(lineNum), stdRoot, cHeadersFile, filePath),
               _ => {
                 exitWith(1, "Invalid line number, must be a positive integer")
-                (lineFilter, stdRoot, filePath)
+                (lineFilter, stdRoot, cHeadersFile, filePath)
               },
             }
           }
         } else if (arg == "--std-root") {
           if (idx + 1 >= argCount) {
             exitWith(1, "Missing value for --std-root")
-            (lineFilter, stdRoot, filePath)
+            (lineFilter, stdRoot, cHeadersFile, filePath)
           } else {
             let root = Array.get(idx + 1, args)
             if (root == "") {
               exitWith(1, "Invalid --std-root value")
-              (lineFilter, stdRoot, filePath)
+              (lineFilter, stdRoot, cHeadersFile, filePath)
             } else {
-              parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
+              parseTypeArgs(idx + 2, lineFilter, Some(root), cHeadersFile, filePath)
             }
           }
         } else if (arg == "--std") {
           if (idx + 1 >= argCount) {
             exitWith(1, "Missing value for --std")
-            (lineFilter, stdRoot, filePath)
+            (lineFilter, stdRoot, cHeadersFile, filePath)
           } else {
             let root = Array.get(idx + 1, args)
             if (root == "") {
               exitWith(1, "Invalid --std value")
-              (lineFilter, stdRoot, filePath)
+              (lineFilter, stdRoot, cHeadersFile, filePath)
             } else {
-              parseTypeArgs(idx + 2, lineFilter, Some(root), filePath)
+              parseTypeArgs(idx + 2, lineFilter, Some(root), cHeadersFile, filePath)
+            }
+          }
+        } else if (arg == "--c-headers-file") {
+          if (idx + 1 >= argCount) {
+            exitWith(1, "Missing value for --c-headers-file")
+            (lineFilter, stdRoot, cHeadersFile, filePath)
+          } else {
+            let cacheFile = Array.get(idx + 1, args)
+            if (cacheFile == "") {
+              exitWith(1, "Invalid --c-headers-file value")
+              (lineFilter, stdRoot, cHeadersFile, filePath)
+            } else {
+              parseTypeArgs(idx + 2, lineFilter, stdRoot, Some(cacheFile), filePath)
             }
           }
         } else if (String.startsWith("-", arg)) {
           let label = if (command == "compile") { "compile" } else { "type" }
           exitWith(1, "Unknown " ++ label ++ " option: " ++ arg)
-          (lineFilter, stdRoot, filePath)
+          (lineFilter, stdRoot, cHeadersFile, filePath)
         } else {
           match (filePath) {
             Some(_) => {
               exitWith(1, "Multiple input files provided")
-              (lineFilter, stdRoot, filePath)
+              (lineFilter, stdRoot, cHeadersFile, filePath)
             },
-            None => parseTypeArgs(idx + 1, lineFilter, stdRoot, Some(arg)),
+            None => parseTypeArgs(idx + 1, lineFilter, stdRoot, cHeadersFile, Some(arg)),
           }
         }
       }
@@ -158,38 +172,40 @@ let main = () => {
         }
       }
 
-      let (lineFilter, stdRootArg, fileFromArg, includeTypeInlays) = if (
+      let (lineFilter, stdRootArg, cHeadersFileArg, fileFromArg, includeTypeInlays) = if (
         command == "type"
       ) {
-        let (lineFilter, stdRootArg, fileFromArg) = parseTypeArgs(
+        let (lineFilter, stdRootArg, cHeadersFileArg, fileFromArg) = parseTypeArgs(
           2,
           None,
           None,
           None,
+          None,
         )
-        (lineFilter, stdRootArg, fileFromArg, true)
+        (lineFilter, stdRootArg, cHeadersFileArg, fileFromArg, true)
       } else if (command == "compile" || command == "run") {
-        let (lineFilter, stdRootArg, fileFromArg) = parseTypeArgs(
+        let (lineFilter, stdRootArg, cHeadersFileArg, fileFromArg) = parseTypeArgs(
           2,
           None,
           None,
           None,
+          None,
         )
-        (lineFilter, stdRootArg, fileFromArg, true)
+        (lineFilter, stdRootArg, cHeadersFileArg, fileFromArg, true)
       } else if (command == "ast") {
         if (argCount > 2) {
-          (None, None, Some(Array.get(2, args)), true)
+          (None, None, None, Some(Array.get(2, args)), true)
         } else {
-          (None, None, None, true)
+          (None, None, None, None, true)
         }
       } else if (command == "inlay") {
         let (includeType, filePath) = parseInlayArgs(2, true, None)
-        (None, None, filePath, includeType)
+        (None, None, None, filePath, includeType)
       } else {
         if (argCount > 1) {
-          (None, None, Some(Array.get(1, args)), true)
+          (None, None, None, Some(Array.get(1, args)), true)
         } else {
-          (None, None, None, true)
+          (None, None, None, None, true)
         }
       }
       let stdRoot = match (
@@ -252,6 +268,10 @@ let main = () => {
                 print(preview)
               } else {
                 let baseOptions = ModuleSystem.defaultOptions()
+                match (cHeadersFileArg) {
+                  Some(cacheFile) => ModuleInfer.setCHeadersFile(cacheFile),
+                  None => ModuleInfer.clearCHeadersFile(),
+                }
                 let options = match (stdRoot) {
                   Some(root) => { ...baseOptions, stdRoots: [root] },
                   None => baseOptions,
@@ -259,11 +279,7 @@ let main = () => {
                 let inferred = ModuleInfer.inferEntry(filePath, options=options)
                 match (Map.get(inferred.graph.entry, inferred.modules)) {
                   Some(summary) => {
-                    let analysis: Analysis.Analysis = {
-                      program: summary.program,
-                      infer: summary.infer,
-                    }
-                    Report.reportWithLine(source, analysis, lineFilter)
+                    Report.reportSummaryWithLine(source, summary, lineFilter)
                   },
                   None =>
                     exitWith(
