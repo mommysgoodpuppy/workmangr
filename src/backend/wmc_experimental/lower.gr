@@ -1,0 +1,562 @@
+module WmcExpLower
+
+from "list" include List
+from "map" include Map
+from "string" include String
+
+from "../../core/source.gr" include Source
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/types.gr" include Types
+from "../../core/infer.gr" include Infer
+from "../../core/env.gr" include Env
+from "../../core/flow.gr" include Flow
+from "../../core/module/module_system.gr" include ModuleSystem
+from "../../core/module/module_infer.gr" include ModuleInfer
+from "../../core/layer1/expr.gr" include Layer1Expr
+from "./core_ir.gr" include WmcExpCoreIR as IR
+
+// ── Lowering context ──────────────────────────────────────────────
+
+record LowerCtx {
+  infer: Infer.InferState,
+  moduleId: String,
+}
+
+// ── Resolve type for a node ───────────────────────────────────────
+
+let resolveNodeType = (ctx: LowerCtx, nodeId: Number) =>
+  match (Map.get(nodeId, ctx.infer.nodeTypes)) {
+    Some(t) => Types.applySubstType(ctx.infer.subst, t),
+    None => Types.TVoid,
+  }
+
+let metaFor = (ctx: LowerCtx, node: CoreAst.Node) => {
+  let ty = resolveNodeType(ctx, node.id)
+  { ty, span: Some(node.span) }: IR.ExprMeta
+}
+
+let metaWithType = (ty: Types.Type, span: Option<Source.Span>) =>
+  { ty, span }: IR.ExprMeta
+
+let voidMeta = { ty: Types.TVoid, span: None }: IR.ExprMeta
+
+// ── Resolve constructor owner ─────────────────────────────────────
+
+let resolveConstructorOwner = (ctx: LowerCtx, name: String) =>
+  match (Map.get(name, ctx.infer.env.constructorOwners)) {
+    Some(owner) => owner,
+    None => "?",
+  }
+
+// ── Lower expressions ─────────────────────────────────────────────
+
+let rec lowerExpr = (ctx: LowerCtx, expr: CoreAst.Expr) => {
+  let meta = metaFor(ctx, expr.node)
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => lowerExpr(ctx, inner),
+    CoreAst.Hole(_) => IR.ELiteral(meta, IR.LUnit),
+    CoreAst.Lit(lit) => IR.ELiteral(meta, lowerLiteral(lit)),
+
+    CoreAst.Ident(name) => {
+      let nameText = name.text
+      // Check if this is a nullary constructor
+      match (Map.get(nameText, ctx.infer.env.constructorOwners)) {
+        Some(owner) => IR.EData(meta, owner, nameText, []),
+        None => IR.EVar(meta, nameText),
+      }
+    },
+
+    CoreAst.Annotate(inner, _) => lowerExpr(ctx, inner),
+
+    CoreAst.Apply(callee, arg) =>
+      lowerApplication(ctx, meta, callee, arg),
+
+    CoreAst.Fn(fnExpr) =>
+      lowerFnExpr(ctx, meta, fnExpr),
+
+    CoreAst.Let(binding, body) =>
+      lowerLetExpr(ctx, meta, binding, body),
+
+    CoreAst.If(cond, thenExpr, elseOpt) => {
+      let condLowered = lowerExpr(ctx, cond)
+      let thenLowered = lowerExpr(ctx, thenExpr)
+      let elseLowered = match (elseOpt) {
+        Some(e) => lowerExpr(ctx, e),
+        None => IR.ELiteral(voidMeta, IR.LUnit),
+      }
+      IR.EIf(meta, condLowered, thenLowered, elseLowered)
+    },
+
+    CoreAst.Tuple(items) =>
+      IR.ETuple(meta, List.map((item: CoreAst.Expr) => lowerExpr(ctx, item), items)),
+
+    CoreAst.RecordLit(items) =>
+      IR.ERecord(meta, List.map((item: CoreAst.RecordItem) => lowerRecordItem(ctx, item), items)),
+  }
+}
+
+// ── Application lowering ──────────────────────────────────────────
+// Flatten curried application: f(a)(b)(c) → ECall(f, [a, b, c])
+// Also detect constructor application and primitive operators.
+
+and lowerApplication = (ctx: LowerCtx, meta: IR.ExprMeta, callee: CoreAst.Expr, arg: CoreAst.Expr) => {
+  // Collect the callee chain
+  let (rootCallee, args) = collectApplyChain(callee, [arg])
+
+  let rootExpr: CoreAst.Expr = rootCallee
+  match (rootExpr.kind) {
+    CoreAst.Ident(name) => {
+      let nameText = name.text
+      // Check if constructor
+      match (Map.get(nameText, ctx.infer.env.constructorOwners)) {
+        Some(owner) =>
+          IR.EData(meta, owner, nameText, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args)),
+        None =>
+          // In workmangr, binary ops are Apply(Ident(op), Tuple(a, b))
+          // So args is [Tuple(a, b)] with arity 1. Detect and destructure.
+          match (tryLowerBinaryOp(ctx, meta, nameText, args)) {
+            Some(result) => result,
+            None =>
+              // Check unary prim ops (e.g. print, !)
+              match (identToPrimOp(nameText, List.length(args))) {
+                Some(op) =>
+                  IR.EPrim(meta, op, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args)),
+                None => {
+                  let calleeLowered = lowerExpr(ctx, rootCallee)
+                  IR.ECall(meta, calleeLowered, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args))
+                },
+              },
+          },
+      }
+    },
+    _ => {
+      let calleeLowered = lowerExpr(ctx, rootCallee)
+      IR.ECall(meta, calleeLowered, List.map((a: CoreAst.Expr) => lowerExpr(ctx, a), args))
+    },
+  }
+}
+
+// Try to match Apply(Ident(op), Tuple(a, b)) as a binary prim op
+and tryLowerBinaryOp = (ctx: LowerCtx, meta: IR.ExprMeta, opName: String, args: List<CoreAst.Expr>) =>
+  match (args) {
+    [singleArg] => {
+      let sa: CoreAst.Expr = singleArg
+      match (sa.kind) {
+        CoreAst.Tuple([left, right]) =>
+          match (identToBinaryOp(opName)) {
+            Some(op) =>
+              Some(IR.EPrim(meta, op, [lowerExpr(ctx, left), lowerExpr(ctx, right)])),
+            None => None,
+          },
+        _ => None,
+      }
+    },
+    _ => None,
+  }
+
+and collectApplyChain = (expr: CoreAst.Expr, argsAcc: List<CoreAst.Expr>) =>
+  match (expr.kind) {
+    CoreAst.Apply(callee, arg) =>
+      collectApplyChain(callee, [arg, ...argsAcc]),
+    CoreAst.Mark(_, inner) =>
+      collectApplyChain(inner, argsAcc),
+    CoreAst.Annotate(inner, _) =>
+      collectApplyChain(inner, argsAcc),
+    _ => (expr, argsAcc),
+  }
+
+// ── Primitive op detection ────────────────────────────────────────
+
+// Detect binary operator names (these take a single tuple arg in workmangr)
+and identToBinaryOp = (name: String) =>
+  if (name == "+" || name == "intAdd" || name == "__op_+") { Some(IR.IntAdd) }
+  else if (name == "-" || name == "intSub" || name == "__op_-") { Some(IR.IntSub) }
+  else if (name == "*" || name == "intMul" || name == "__op_*") { Some(IR.IntMul) }
+  else if (name == "/" || name == "intDiv" || name == "__op_/") { Some(IR.IntDiv) }
+  else if (name == "==" || name == "intEq" || name == "__op_==") { Some(IR.IntEq) }
+  else if (name == "!=" || name == "intNeq" || name == "__op_!=") { Some(IR.IntNeq) }
+  else if (name == "<" || name == "intLt" || name == "__op_<") { Some(IR.IntLt) }
+  else if (name == ">" || name == "intGt" || name == "__op_>") { Some(IR.IntGt) }
+  else if (name == "<=" || name == "intLte" || name == "__op_<=") { Some(IR.IntLe) }
+  else if (name == ">=" || name == "intGte" || name == "__op_>=") { Some(IR.IntGe) }
+  else if (name == "&&" || name == "__op_&&") { Some(IR.BoolAnd) }
+  else if (name == "||" || name == "__op_||") { Some(IR.BoolOr) }
+  else { None }
+
+// Detect unary prim ops (these take a single non-tuple arg)
+and identToPrimOp = (name: String, arity: Number) =>
+  if (arity == 1) {
+    if (name == "nativePrint" || name == "print") { Some(IR.NativePrint) }
+    else if (name == "!" || name == "__prefix_!") { Some(IR.BoolNot) }
+    else { None }
+  } else {
+    None
+  }
+
+// ── Function expression lowering ──────────────────────────────────
+// Multi-clause fn → lambda wrapping a match expression
+// Single-clause fn with simple param → lambda
+
+and lowerFnExpr = (ctx: LowerCtx, meta: IR.ExprMeta, fnExpr: CoreAst.FnExpr) => {
+  let clauses = collectFnClauses(fnExpr.items)
+  match (clauses) {
+    [] => IR.ELiteral(meta, IR.LUnit),
+    [clause] => lowerSingleClause(ctx, meta, clause),
+    _ => lowerMultiClauseFn(ctx, meta, clauses),
+  }
+}
+
+and collectFnClauses = (items: List<CoreAst.FnItem>) =>
+  List.filterMap((item: CoreAst.FnItem) =>
+    match (item.kind) {
+      CoreAst.Clause(clause) => Some(clause),
+      _ => None,
+    },
+  items)
+
+and lowerSingleClause = (ctx: LowerCtx, meta: IR.ExprMeta, clause: CoreAst.FnClause) => {
+  // Check if the parameter is a simple variable
+  let param: CoreAst.Pattern = clause.param
+  match (param.kind) {
+    CoreAst.Var(name) => {
+      let bodyLowered = lowerExpr(ctx, clause.body)
+      IR.ELambda(meta, [name.text], bodyLowered)
+    },
+    CoreAst.Wildcard => {
+      let bodyLowered = lowerExpr(ctx, clause.body)
+      IR.ELambda(meta, ["_"], bodyLowered)
+    },
+    CoreAst.Lit(CoreAst.Unit) => {
+      // Thunk: => body (zero-arg function)
+      let bodyLowered = lowerExpr(ctx, clause.body)
+      IR.ELambda(meta, ["_"], bodyLowered)
+    },
+    CoreAst.Tuple(items) => {
+      // Tuple param → generate a param name, destructure via let bindings
+      let paramNames = extractTupleParamNames(items)
+      let bodyLowered = lowerExpr(ctx, clause.body)
+      IR.ELambda(meta, paramNames, bodyLowered)
+    },
+    _ => {
+      // Complex pattern → wrap in a match
+      let paramName = "__wm_arg"
+      let matchCase = lowerMatchCase(ctx, clause.param, clause.guard, clause.body)
+      let scrutinee = IR.EVar(metaWithType(meta.ty, None), paramName)
+      let matchExpr = IR.EMatch(meta, scrutinee, [matchCase], None)
+      IR.ELambda(meta, [paramName], matchExpr)
+    },
+  }
+}
+
+and extractTupleParamNames = (items: List<CoreAst.Pattern>) =>
+  List.mapi((pattern: CoreAst.Pattern, idx: Number) =>
+    match (pattern.kind) {
+      CoreAst.Var(name) => name.text,
+      CoreAst.Wildcard => "_",
+      _ => "__wm_p" ++ toString(idx),
+    },
+  items)
+
+and lowerMultiClauseFn = (ctx: LowerCtx, meta: IR.ExprMeta, clauses: List<CoreAst.FnClause>) => {
+  // Multi-clause → lambda with match on the parameter
+  // For multi-param (tuple) clauses, we figure out the arity from the first clause
+  let paramName = "__wm_arg"
+  let cases = List.map((clause: CoreAst.FnClause) =>
+    lowerMatchCase(ctx, clause.param, clause.guard, clause.body),
+  clauses)
+  let scrutinee = IR.EVar(metaWithType(meta.ty, None), paramName)
+  let matchExpr = IR.EMatch(meta, scrutinee, cases, None)
+  IR.ELambda(meta, [paramName], matchExpr)
+}
+
+// ── Match case lowering ───────────────────────────────────────────
+
+and lowerMatchCase = (ctx: LowerCtx, param: CoreAst.Pattern, guard: Option<CoreAst.Expr>, body: CoreAst.Expr) => {
+  let patternLowered = lowerPattern(ctx, param)
+  let guardLowered = match (guard) {
+    Some(g) => Some(lowerExpr(ctx, g)),
+    None => None,
+  }
+  let bodyLowered = lowerExpr(ctx, body)
+  { pattern: patternLowered, guard: guardLowered, body: bodyLowered }: IR.MatchCase
+}
+
+// ── Pattern lowering ──────────────────────────────────────────────
+
+and lowerPattern = (ctx: LowerCtx, pattern: CoreAst.Pattern) => {
+  let ty = resolveNodeType(ctx, pattern.node.id)
+  match (pattern.kind) {
+    CoreAst.Mark(_, inner) => lowerPattern(ctx, inner),
+    CoreAst.Hole(_) => IR.PWildcard(ty),
+    CoreAst.Wildcard => IR.PWildcard(ty),
+    CoreAst.Var(name) => IR.PBinding(ty, name.text),
+    CoreAst.Pin(name) => IR.PPinned(ty, name.text),
+    CoreAst.Lit(lit) => IR.PLiteral(ty, lowerLiteral(lit)),
+    CoreAst.Constructor(name, args) => {
+      let owner = resolveConstructorOwner(ctx, name.text)
+      IR.PConstructor(ty, owner, name.text, List.map((p: CoreAst.Pattern) => lowerPattern(ctx, p), args))
+    },
+    CoreAst.Tuple(items) =>
+      IR.PTuple(ty, List.map((p: CoreAst.Pattern) => lowerPattern(ctx, p), items)),
+    CoreAst.List(_, _) =>
+      // List patterns desugar to constructor patterns (Link/Empty)
+      // TODO: implement list pattern desugaring
+      IR.PWildcard(ty),
+    CoreAst.AllErrors => IR.PWildcard(ty),
+  }
+}
+
+// ── Let expression lowering ───────────────────────────────────────
+
+and lowerLetExpr = (ctx: LowerCtx, meta: IR.ExprMeta, binding: CoreAst.LetBinding, body: CoreAst.Expr) => {
+  let namePat: CoreAst.Pattern = binding.name
+  let name = match (namePat.kind) {
+    CoreAst.Var(n) => n.text,
+    CoreAst.Wildcard => "_",
+    _ => "_",
+  }
+  let valueLowered = lowerExpr(ctx, binding.value)
+  let bodyLowered = lowerExpr(ctx, body)
+  IR.ELet(meta, { name, value: valueLowered }: IR.LetBinding, bodyLowered)
+}
+
+// ── Record item lowering ──────────────────────────────────────────
+
+and lowerRecordItem = (ctx: LowerCtx, item: CoreAst.RecordItem) =>
+  match (item) {
+    CoreAst.Field(name, value) =>
+      { name: name.text, value: lowerExpr(ctx, value) }: IR.RecordField,
+    CoreAst.Spread(value) =>
+      // Spread not yet supported in Core IR — emit as placeholder
+      { name: "__spread", value: lowerExpr(ctx, value) }: IR.RecordField,
+  }
+
+// ── Literal lowering ──────────────────────────────────────────────
+
+and lowerLiteral = (lit: CoreAst.AtomLiteral) =>
+  match (lit) {
+    CoreAst.Int(n) => IR.LInt(n),
+    CoreAst.Bool(b) => IR.LBool(b),
+    CoreAst.Char(c) => IR.LChar(c),
+    CoreAst.Str(s) => IR.LString(s),
+    CoreAst.Byte(n) => IR.LByte(n),
+    CoreAst.Unit => IR.LUnit,
+  }
+
+// ── TypeExpr → Types.Type conversion ─────────────────────────────
+// Converts surface type expressions to Types.Type for emission.
+// Type param names (e.g. "T") become TNominal("T", []) so the emitter
+// outputs them as-is — which references the Zig comptime param.
+
+let rec typeExprToType = (texpr: CoreAst.TypeExpr) => {
+  let te: CoreAst.TypeExpr = texpr
+  match (te.kind) {
+    CoreAst.Mark(_, inner) => typeExprToType(inner),
+    CoreAst.Hole(_) => Types.TVoid,
+    CoreAst.Var(name) => Types.TNominal(name.text, []),
+    CoreAst.Ref(name, args) =>
+      Types.TNominal(name.text, List.map(typeExprToType, args)),
+    CoreAst.Tuple(items) =>
+      Types.TTuple(List.map(typeExprToType, items)),
+    CoreAst.Arrow(params, ret) => {
+      let paramTypes = List.map(typeExprToType, params)
+      let retType = typeExprToType(ret)
+      List.reduceRight((p, acc) => Types.TFun(p, acc), retType, paramTypes)
+    },
+    CoreAst.UnitType => Types.TVoid,
+    _ => Types.TVoid,
+  }
+}
+
+// ── Module lowering ───────────────────────────────────────────────
+
+let lowerTypeDeclaration = (ctx: LowerCtx, info: Env.TypeInfo) => {
+  let constructors = List.map((ctor: Env.ConstructorInfo) => {
+    let (arity, fields) = match (ctor.payload) {
+      None => (0, []),
+      Some(payloadTy) => {
+        let payloadExpr: CoreAst.TypeExpr = payloadTy
+        match (payloadExpr.kind) {
+          CoreAst.Tuple(items) =>
+            (List.length(items), List.map(typeExprToType, items)),
+          _ =>
+            (1, [typeExprToType(payloadTy)]),
+        }
+      },
+    }
+    {
+      name: ctor.name,
+      arity,
+      exported: true,
+      fields,
+    }: IR.TypeConstructor
+  }, info.constructors)
+
+  let recordFields = match (info.recordFields) {
+    None => None,
+    Some(fields) =>
+      Some(List.map(((name, ty): (CoreAst.Name, CoreAst.TypeExpr)) =>
+        (name.text, typeExprToType(ty)),
+      fields)),
+  }
+
+  {
+    name: info.name,
+    typeParams: info.typeParams,
+    constructors,
+    exported: true,
+    recordFields,
+    aliasType: None,
+  }: IR.TypeDeclaration
+}
+
+let lowerImports = (
+  node: ModuleInfer.ModuleSummary,
+  graph: Map.Map<String, ModuleInfer.ModuleSummary>,
+) => {
+  // Collect import declarations from the program
+  let importDecls = List.filterMap((item: CoreAst.TopItem) =>
+    match (item) {
+      CoreAst.Import(importDecl) => Some(importDecl),
+      _ => None,
+    },
+  node.program.items)
+
+  List.filterMap((decl: CoreAst.ImportDecl) => {
+    let specifiers = List.map((name: CoreAst.ImportName) => {
+      let importedName = name.name.text
+      let localName = match (name.alias) {
+        Some(alias) => alias.text,
+        None => importedName,
+      }
+      { imported: importedName, local: localName }: IR.ImportSpecifier
+    }, decl.names)
+    if (specifiers == []) {
+      match (decl.alias) {
+        Some(alias) =>
+          Some({ source: decl.modulePath, specifiers: [], alias: Some(alias.text) }: IR.Import),
+        None => None,
+      }
+    } else {
+      Some({ source: decl.modulePath, specifiers, alias: None }: IR.Import)
+    }
+  }, importDecls)
+}
+
+let lowerExports = (summary: ModuleInfer.ModuleSummary) => {
+  // Export all values that are in valueExports
+  List.map(((name, _scheme): (String, Types.Scheme)) =>
+    IR.ValueExport(name, name),
+  Map.toList(summary.valueExports))
+}
+
+let collectTopBindings = (ctx: LowerCtx, program: CoreAst.Program) => {
+  let rec collectItems = (items: List<CoreAst.TopItem>, accRev: List<IR.ValueBinding>) =>
+    match (items) {
+      [] => List.reverse(accRev),
+      [item, ...rest] =>
+        match (item) {
+          CoreAst.DeclGroup(group) =>
+            collectItems(rest, collectDecls(ctx, group, group.decls, accRev)),
+          _ => collectItems(rest, accRev),
+        },
+    }
+
+  and collectDecls = (
+    ctx: LowerCtx,
+    group: CoreAst.DeclGroup,
+    decls: List<CoreAst.Decl>,
+    accRev: List<IR.ValueBinding>,
+  ) =>
+    match (decls) {
+      [] => accRev,
+      [decl, ...rest] =>
+        match (decl) {
+          CoreAst.LetDecl(letDecl) =>
+            collectDecls(ctx, group, rest, collectBindings(ctx, group, letDecl.bindings, accRev)),
+          _ => collectDecls(ctx, group, rest, accRev),
+        },
+    }
+
+  and collectBindings = (
+    ctx: LowerCtx,
+    group: CoreAst.DeclGroup,
+    bindings: List<CoreAst.LetBinding>,
+    accRev: List<IR.ValueBinding>,
+  ) =>
+    match (bindings) {
+      [] => accRev,
+      [binding, ...rest] => {
+        let name = Layer1Expr.bindingName(binding)
+        if (name == "_") {
+          collectBindings(ctx, group, rest, accRev)
+        } else {
+          let isExported = group.exported && name != "_"
+          let isRecursive = match (group.kind) {
+            CoreAst.LetGroup(CoreAst.Rec) => true,
+            _ => false,
+          }
+          let valueLowered = lowerExpr(ctx, binding.value)
+          let vb = {
+            name,
+            value: valueLowered,
+            exported: isExported,
+            isRecursive,
+          }: IR.ValueBinding
+          collectBindings(ctx, group, rest, [vb, ...accRev])
+        }
+      },
+    }
+
+  collectItems(program.items, [])
+}
+
+// ── Main entry point ──────────────────────────────────────────────
+
+provide let lowerModuleSummary = (summary: ModuleInfer.ModuleSummary) => {
+  let ctx: LowerCtx = {
+    infer: summary.infer,
+    moduleId: summary.moduleId,
+  }
+
+  // Lower type declarations from the environment
+  let typeDeclarations = List.map(
+    ((_name, info): (String, Env.TypeInfo)) => lowerTypeDeclaration(ctx, info),
+    Map.toList(Env.snapshotTypes(summary.infer.env)),
+  )
+
+  let imports = lowerImports(summary, Map.make())
+  let values = collectTopBindings(ctx, summary.program)
+  let exports = lowerExports(summary)
+
+  {
+    path: summary.moduleId,
+    imports,
+    typeDeclarations,
+    values,
+    exports,
+  }: IR.Module
+}
+
+provide let lowerProgram = (result: ModuleInfer.InferenceResult) => {
+  let rec lowerModules = (moduleIds: List<String>, accRev: List<(String, IR.Module)>) =>
+    match (moduleIds) {
+      [] => List.reverse(accRev),
+      [moduleId, ...rest] =>
+        match (Map.get(moduleId, result.modules)) {
+          Some(summary) => {
+            let module_ = lowerModuleSummary(summary)
+            lowerModules(rest, [(moduleId, module_), ...accRev])
+          },
+          None => lowerModules(rest, accRev),
+        },
+    }
+
+  let g: ModuleSystem.ModuleGraph = result.graph
+  {
+    entry: g.entry,
+    order: g.topo,
+    modules: lowerModules(g.topo, []),
+    prelude: None,
+  }: IR.ModuleGraph
+}

@@ -651,14 +651,14 @@ and lowerExpr = (expr: SurfaceAst.Expr) => {
     SurfaceAst.Seq(items) => lowerSeqExpr(expr.node, items),
     SurfaceAst.Apply(callee, arg) =>
       makeExpr(expr.node, CoreAst.Apply(lowerExpr(callee), lowerExpr(arg))),
-    SurfaceAst.If(cond, thenExpr, elseOpt) => {
-      let loweredElse = match (elseOpt) {
+    SurfaceAst.If(ifExpr) => {
+      let loweredElse = match (ifExpr.elseExpr) {
         None => None,
         Some(e) => Some(lowerExpr(e)),
       }
       makeExpr(
         expr.node,
-        CoreAst.If(lowerExpr(cond), lowerExpr(thenExpr), loweredElse)
+        CoreAst.If(lowerExpr(ifExpr.cond), lowerExpr(ifExpr.thenExpr), loweredElse)
       )
     },
     SurfaceAst.Let(binding, body) => {

@@ -344,12 +344,17 @@ let addDiagnostic = (
   diagnosticsById
 }
 
+provide let isCHeader = (specifier: String) =>
+  hasSuffix(specifier, ".h")
+
 let resolveSpecifier = (
   importerPath: String,
   specifier: String,
   options: BuildOptions,
 ) => {
-  if (String.startsWith("./", specifier) || String.startsWith("../", specifier)) {
+  if (isCHeader(specifier)) {
+    Some(specifier)
+  } else if (String.startsWith("./", specifier) || String.startsWith("../", specifier)) {
     let base = dirname(importerPath)
     Some(normalizePath(ensureWmExtension(base ++ "/" ++ specifier)))
   } else if (isAbsolutePath(specifier)) {
@@ -510,6 +515,21 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
       { ...ctx, diagnosticsById }
     },
     _ => {
+      if (isCHeader(moduleId)) {
+        Map.set(moduleId, 2, ctx.visitState)
+        let syntheticProgram: SurfaceAst.Program = { items: [], core: true }
+        let node: ModuleNode = {
+          id: moduleId,
+          sourcePath: moduleId,
+          imports: [],
+          reexports: [],
+          program: syntheticProgram,
+          diagnostics: [],
+          status: StatusOk,
+        }
+        Map.set(moduleId, node, ctx.nodes)
+        { ...ctx, topoRev: [moduleId, ...ctx.topoRev] }
+      } else {
       let hasOverride = Map.get(moduleId, ctx.options.sourceOverrides) != None
       let cachedNode = Map.get(moduleId, ctx.options.cachedNodes)
       let useCache = !hasOverride && cachedNode != None
@@ -672,6 +692,7 @@ let rec visit = (moduleId: String, ctx: BuildContext) => {
             },
           }
         },
+      }
       }
     },
   }

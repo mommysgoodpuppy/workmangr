@@ -873,9 +873,11 @@ let makeWildcardPattern = (state: ParseState, span: Source.Span) => {
   (pat, state1)
 }
 
-let recoverArrowExprAsBlock = (
+let recoverExprAsBlock = (
   state: ParseState,
   bodyExpr: SurfaceAst.Expr,
+  message: String,
+  note: String,
 ) => match (bodyExpr.kind) {
   Block(b) => (b, state),
   _ => {
@@ -891,9 +893,9 @@ let recoverArrowExprAsBlock = (
     let lbraceItem: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
       lbraceMark,
-      "Expected block after =>",
+      message,
       SurfaceAst.MarkItem(lbraceMark),
-      clues=[Error.Note("accepted `=> expr` for recovery; formatter can rewrite to `=> { expr }`")],
+      clues=[Error.Note(note)],
       severity=Error.Warning
     )
     let (rbraceMarkId, state2) = freshId(state1)
@@ -907,9 +909,9 @@ let recoverArrowExprAsBlock = (
     let rbraceItem: SurfaceAst.BlockItem = Error.createMarkedError(
       Error.Parsing,
       rbraceMark,
-      "Expected block after =>",
+      message,
       SurfaceAst.MarkItem(rbraceMark),
-      clues=[Error.Note("accepted `=> expr` for recovery; formatter can rewrite to `=> { expr }`")],
+      clues=[Error.Note(note)],
       severity=Error.Warning
     )
     let (blockId, state3) = freshId(state2)
@@ -923,6 +925,16 @@ let recoverArrowExprAsBlock = (
     )
   },
 }
+
+let recoverArrowExprAsBlock = (
+  state: ParseState,
+  bodyExpr: SurfaceAst.Expr,
+) => recoverExprAsBlock(
+  state,
+  bodyExpr,
+  "Expected block after =>",
+  "accepted `=> expr` for recovery; formatter can rewrite to `=> { expr }`"
+)
 
 let makeLetExpr = (
   state: ParseState,
@@ -961,7 +973,7 @@ let expectSimpleOrRecover = (expected, state: ParseState, context: String) => {
       node: { id: markId, span: tok.span },
       kind: SurfaceAst.MissingToken(Lexer.tokenKindToString(expected)),
       expected: SurfaceAst.ExpectToken,
-    repairClass: SurfaceAst.RecoveryOnly,
+    repairClass: SurfaceAst.AutoFix,
     repairPairId: None,
     }
     let recoveryTok = Error.createMarkedError(
@@ -973,7 +985,7 @@ let expectSimpleOrRecover = (expected, state: ParseState, context: String) => {
         Error.Expected(Lexer.tokenKindToString(expected)),
         Error.Received(Lexer.tokenKindToString(tok.kind)),
       ],
-      severity=Error.SError
+      severity=Error.Warning
     )
     (recoveryTok, state1)
   }
@@ -1767,7 +1779,7 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
             let before = currentState
             let (_, state_temp) = expectSimple(Lexer.SemiColon, currentState)
             let nextTok = currentToken(state_temp)
-            if (isValueBoundary(nextTok) || isOpaqueLineStart(state_temp)) {
+            if (isValueBoundary(nextTok)) {
               let (holeExpr, state_after) = makeInferredExprHole(
                 state_temp,
                 nextTok.span,
@@ -1995,23 +2007,108 @@ and parsePrimary: Parser<SurfaceAst.Expr> = state => {
 and parseIf = (state: ParseState) => {
   let (id, state1) = freshId(state)
   let (ifTok, state2) = expectKeyword("if", state)
-  let (cond, state3) = parseExpr(state2)
-  let (thenExpr, state4) = parseExpr(state3)
-  let (elseExpr, state5) = if (
-    kindIs(currentToken(state4).kind, Lexer.LitName("else"))
-  ) {
-    let (_, state_temp) = expectKeyword("else", state4)
-    let (expr, state_temp2) = parseExpr(state_temp)
-    (Some(expr), state_temp2)
+  let (pairId, state2p) = freshId(state2)
+  let tok = currentToken(state2p)
+  let (lparenItems, state2a) = if (kindIs(tok.kind, Lexer.LParen)) {
+    let (_, s) = expectSimple(Lexer.LParen, state2p)
+    ([], s)
   } else {
-    (None, state4)
+    let (markId, s1) = freshId(state2p)
+    let mark: SurfaceAst.Mark = {
+      node: { id: markId, span: tok.span },
+      kind: SurfaceAst.MissingToken("("),
+      expected: SurfaceAst.ExpectToken,
+      repairClass: SurfaceAst.AutoFix,
+      repairPairId: Some(pairId),
+    }
+    let item: SurfaceAst.BlockItem = Error.createMarkedError(
+      Error.Parsing,
+      mark,
+      "Expected ( after 'if'",
+      SurfaceAst.MarkItem(mark),
+      clues=[
+        Error.Expected("("),
+        Error.Received(Lexer.tokenKindToString(tok.kind)),
+      ],
+      severity=Error.Warning
+    )
+    ([item], s1)
+  }
+  let (cond, state3) = parseExpr(state2a)
+  let tok2 = currentToken(state3)
+  let (rparenItems, state3a) = if (kindIs(tok2.kind, Lexer.RParen)) {
+    let (_, s) = expectSimple(Lexer.RParen, state3)
+    ([], s)
+  } else {
+    let (markId, s1) = freshId(state3)
+    let mark: SurfaceAst.Mark = {
+      node: { id: markId, span: tok2.span },
+      kind: SurfaceAst.MissingToken(")"),
+      expected: SurfaceAst.ExpectToken,
+      repairClass: SurfaceAst.AutoFix,
+      repairPairId: Some(pairId),
+    }
+    let item: SurfaceAst.BlockItem = Error.createMarkedError(
+      Error.Parsing,
+      mark,
+      "Expected ) after if condition",
+      SurfaceAst.MarkItem(mark),
+      clues=[
+        Error.Expected(")"),
+        Error.Received(Lexer.tokenKindToString(tok2.kind)),
+      ],
+      severity=Error.Warning
+    )
+    ([item], s1)
+  }
+  let items = List.append(
+    lparenItems,
+    List.append([SurfaceAst.ExprItem(cond)], rparenItems)
+  )
+  let (thenRaw, state4) = parseExpr(state3a)
+  let (thenBlock, state4a) = recoverExprAsBlock(
+    state4,
+    thenRaw,
+    "Expected block in if branch",
+    "accepted `if (cond) expr` for recovery"
+  )
+  let thenExpr: SurfaceAst.Expr = {
+    node: thenBlock.node,
+    kind: SurfaceAst.Block(thenBlock),
+    attach: thenRaw.attach,
+  }
+  let (elseExpr, state5) = if (
+    kindIs(currentToken(state4a).kind, Lexer.LitName("else"))
+  ) {
+    let (_, state_temp) = expectKeyword("else", state4a)
+    let (elseRaw, state_temp2) = parseExpr(state_temp)
+    let (elseBlock, state_temp3) = recoverExprAsBlock(
+      state_temp2,
+      elseRaw,
+      "Expected block in else branch",
+      "accepted `else expr` for recovery"
+    )
+    let elseBlockExpr: SurfaceAst.Expr = {
+      node: elseBlock.node,
+      kind: SurfaceAst.Block(elseBlock),
+      attach: elseRaw.attach,
+    }
+    (Some(elseBlockExpr), state_temp3)
+  } else {
+    (None, state4a)
   }
   let endSpan = match (elseExpr) {
     Some(e) => e.node.span,
     None => thenExpr.node.span,
   }
   let span = spanFromTokens(ifTok.span, endSpan)
-  let expr = makeExpr(id, span, SurfaceAst.If(cond, thenExpr, elseExpr))
+  let ifExpr: SurfaceAst.IfExpr = {
+    cond,
+    thenExpr,
+    elseExpr,
+    items,
+  }
+  let expr = makeExpr(id, span, SurfaceAst.If(ifExpr))
   (expr, state5)
 }
 and expectStringLiteral = (state: ParseState) => {
@@ -2233,12 +2330,7 @@ and parseTopLevels = (state: ParseState) => {
   }
   let tok = currentToken(state)
   //print(tok)
-  if (isOpaqueTopLevelStart(state)) {
-    let (trivia, state1) = consumeOpaqueLine(state)
-    let topTrivia: SurfaceAst.TopItem = SurfaceAst.Trivia(trivia)
-    let (rest, state2) = continueTopLevels(state1)
-    ([topTrivia, ...rest], state2)
-  } else {
+  {
     match (tok.kind) {
       Lexer.EOF => ([], state),
       Lexer.SemiColon => {
@@ -2439,7 +2531,7 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
   ) {
     let (_, nextState) = expectSimple(Lexer.Eq, state3)
     (nextState, true)
-  } else if (isValueBoundary(currentToken(state3)) || isOpaqueLineStart(state3)) {
+  } else if (isValueBoundary(currentToken(state3))) {
     let errSpan = Source.makeSpan(
       pattern.node.span.line,
       pattern.node.span.col,
@@ -2487,7 +2579,7 @@ and parseBinding = (state: ParseState, startSpanOpt: Option<Source.Span>) => {
   }
   let (value, state5): (SurfaceAst.Expr, ParseState) = if (
     hasEq
-    && (isValueBoundary(currentToken(state4)) || isOpaqueLineStart(state4))
+    && isValueBoundary(currentToken(state4))
   ) {
     makeInferredExprHole(
       state4,
@@ -3253,12 +3345,7 @@ and parseBlockItems = (state: ParseState) => {
     let safe = ensureProgress(state, nextState, "block item parsing")
     parseBlockItems(safe)
   }
-  if (isOpaqueLineStart(state)) {
-    let (trivia, state1) = consumeOpaqueLine(state)
-    let item = SurfaceAst.TriviaItem(trivia)
-    let (restItems, state2) = continueBlockItems(state1)
-    ([item, ...restItems], state2)
-  } else {
+  {
     let makeMissingSemicolonItem = (stateX: ParseState, anchorSpan: Source.Span) => {
       let atTok = currentToken(stateX)
       let (id, state1) = freshId(stateX)
@@ -3282,8 +3369,14 @@ and parseBlockItems = (state: ParseState) => {
           (item, state1)
         },
         _ => {
+          let errSpan = Source.makeSpan(
+            anchorSpan.line,
+            anchorSpan.col,
+            anchorSpan.end,
+            anchorSpan.end
+          )
           let mark: SurfaceAst.Mark = {
-            node: { id, span: atTok.span },
+            node: { id, span: errSpan },
             kind: SurfaceAst.MissingSemicolon,
             expected: SurfaceAst.ExpectToken,
             repairClass: SurfaceAst.AutoFix,
@@ -4077,6 +4170,7 @@ and parseMatch = (state: ParseState) => {
     scrutineeOpt: Option<SurfaceAst.Expr>,
     fnItems: List<SurfaceAst.FnItem>,
     arrowSugar: Bool,
+    matchItems: List<SurfaceAst.BlockItem>,
     stateX: ParseState,
   ) => {
     let (fnExprId, stateY) = freshId(stateX)
@@ -4091,6 +4185,7 @@ and parseMatch = (state: ParseState) => {
       bundle: fnExpr,
       arrowSugar,
       attach: { leading: [], trailing: [], dangling: [] },
+      items: matchItems,
     }
     let expr = makeExpr(exprId, endSpan, Match(matchExpr))
     (expr, stateY)
@@ -4099,15 +4194,64 @@ and parseMatch = (state: ParseState) => {
   if (kindIs(currentToken(state2).kind, Lexer.LBrace)) {
     let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state2)
     let span = spanFromTokens(matchTok.span, rbraceTok.span)
-    mkMatchExpr(id, span, None, fnItems, false, state5)
+    mkMatchExpr(id, span, None, fnItems, false, [], state5)
   } else {
     let (scrutinee, state3) = parseInfix(state2)
-    if (kindIs(currentToken(state3).kind, Lexer.LBrace)) {
-      let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state3)
+    let scrutineeHasParens = match (scrutinee.kind) {
+      SurfaceAst.Paren(_) => true,
+      SurfaceAst.Tuple(_) => true,
+      _ => false,
+    }
+    let (matchItems, state3m) = if (scrutineeHasParens) {
+      ([], state3)
+    } else {
+      let (pairId, s0) = freshId(state3)
+      let (lpMarkId, s1) = freshId(s0)
+      let lpMark: SurfaceAst.Mark = {
+        node: { id: lpMarkId, span: scrutinee.node.span },
+        kind: SurfaceAst.MissingToken("("),
+        expected: SurfaceAst.ExpectToken,
+        repairClass: SurfaceAst.AutoFix,
+        repairPairId: Some(pairId),
+      }
+      let lpItem: SurfaceAst.BlockItem = Error.createMarkedError(
+        Error.Parsing,
+        lpMark,
+        "Expected ( after 'match'",
+        SurfaceAst.MarkItem(lpMark),
+        clues=[
+          Error.Expected("("),
+          Error.Received(Lexer.tokenKindToString(currentToken(state3).kind)),
+        ],
+        severity=Error.Warning
+      )
+      let (rpMarkId, s2) = freshId(s1)
+      let rpMark: SurfaceAst.Mark = {
+        node: { id: rpMarkId, span: scrutinee.node.span },
+        kind: SurfaceAst.MissingToken(")"),
+        expected: SurfaceAst.ExpectToken,
+        repairClass: SurfaceAst.AutoFix,
+        repairPairId: Some(pairId),
+      }
+      let rpItem: SurfaceAst.BlockItem = Error.createMarkedError(
+        Error.Parsing,
+        rpMark,
+        "Expected ) after match scrutinee",
+        SurfaceAst.MarkItem(rpMark),
+        clues=[
+          Error.Expected(")"),
+          Error.Received(Lexer.tokenKindToString(currentToken(state3).kind)),
+        ],
+        severity=Error.Warning
+      )
+      ([lpItem, SurfaceAst.ExprItem(scrutinee), rpItem], s2)
+    }
+    if (kindIs(currentToken(state3m).kind, Lexer.LBrace)) {
+      let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state3m)
       let span = spanFromTokens(matchTok.span, rbraceTok.span)
-      mkMatchExpr(id, span, Some(scrutinee), fnItems, false, state5)
-    } else if (kindIs(currentToken(state3).kind, Lexer.FatArrow)) {
-      let (_, state4) = expectSimple(Lexer.FatArrow, state3)
+      mkMatchExpr(id, span, Some(scrutinee), fnItems, false, matchItems, state5)
+    } else if (kindIs(currentToken(state3m).kind, Lexer.FatArrow)) {
+      let (_, state4) = expectSimple(Lexer.FatArrow, state3m)
       if (kindIs(currentToken(state4).kind, Lexer.LBrace)) {
         let _ = match (exprToParamPattern(scrutinee)) {
           Some(_) => void,
@@ -4136,7 +4280,7 @@ and parseMatch = (state: ParseState) => {
         }
         let (fnItems, rbraceTok, state5) = parseFnItemsInBraces(state4)
         let span = spanFromTokens(matchTok.span, rbraceTok.span)
-        mkMatchExpr(id, span, Some(scrutinee), fnItems, true, state5)
+        mkMatchExpr(id, span, Some(scrutinee), fnItems, true, matchItems, state5)
       } else {
         let syntheticSpan = Source.makeSpan(
           currentToken(state4).span.line,
@@ -4166,12 +4310,12 @@ and parseMatch = (state: ParseState) => {
           severity=Error.SError
         )
         let span = spanFromTokens(matchTok.span, syntheticRbrace.span)
-        mkMatchExpr(id, span, Some(scrutinee), recoveryItems, true, state5)
+        mkMatchExpr(id, span, Some(scrutinee), recoveryItems, true, matchItems, state5)
       }
     } else {
-      let (markId, stateX) = freshId(state3)
+      let (markId, stateX) = freshId(state3m)
       let mark: SurfaceAst.Mark = {
-        node: { id: markId, span: currentToken(state3).span },
+        node: { id: markId, span: currentToken(state3m).span },
         kind: SurfaceAst.MissingBlock("match body"),
         expected: SurfaceAst.ExpectBlock,
     repairClass: SurfaceAst.RecoveryOnly,

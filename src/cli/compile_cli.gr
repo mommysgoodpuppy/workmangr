@@ -7,8 +7,9 @@ from "list" include List
 from "map" include Map
 
 from "../core/module/module_system.gr" include ModuleSystem
-from "../core/module/module_ir.gr" include WmcModuleIr
-from "../backend/wmc/driver.gr" include WmcDriver
+from "../core/module/module_infer.gr" include ModuleInfer
+from "../backend/wmc_experimental/driver.gr" include WmcExperimentalDriver
+from "../backend/wmc_experimental/emit_zig.gr" include WmcExpEmitZig
 
 let compileOutputPath = (filePath: String) =>
   if (String.endsWith(".wm", filePath)) {
@@ -17,20 +18,6 @@ let compileOutputPath = (filePath: String) =>
     filePath ++ ".zig"
   }
 
-let renderBootstrapStub = (
-  sourceFile: String,
-  moduleCount: Number,
-  diagCount: Number,
-) =>
-  "// WMC backend reboot scaffold\n"
-    ++ "const std = @import(\"std\");\n\n"
-    ++ "pub fn main() void {\n"
-    ++ "  std.debug.print(\"WMC reboot scaffold active\\n\", .{});\n"
-    ++ "  std.debug.print(\"source: " ++ sourceFile ++ "\\n\", .{});\n"
-    ++ "  std.debug.print(\"modules: " ++ toString(moduleCount) ++ "\\n\", .{});\n"
-    ++ "  std.debug.print(\"diagnostics: " ++ toString(diagCount) ++ "\\n\", .{});\n"
-    ++ "}\n"
-
 provide let compileFile = (entryPath: String, stdRoot: Option<String>) => {
   let baseOptions = ModuleSystem.defaultOptions()
   let options = match (stdRoot) {
@@ -38,38 +25,53 @@ provide let compileFile = (entryPath: String, stdRoot: Option<String>) => {
     None => baseOptions,
   }
 
-  let compileResult = WmcDriver.compileWorkmanGraph(entryPath, options=options)
-  let moduleArtifacts = List.map(
-    ((_moduleId, artifact): (String, WmcDriver.BackendModuleArtifacts)) => artifact,
-    Map.toList(compileResult.modules),
-  )
-  let moduleCount = List.length(moduleArtifacts)
-  let diagCount = List.reduce(
-    (acc: Number, artifact: WmcDriver.BackendModuleArtifacts) =>
-      acc + List.length((artifact.backendNode: WmcModuleIr.ModuleNode).diagnostics),
-    0,
-    moduleArtifacts,
-  )
+  let result = ModuleInfer.inferEntry(entryPath, options=options)
 
-  let outPath = compileOutputPath(entryPath)
-  let sourceText = renderBootstrapStub(entryPath, moduleCount, diagCount)
+  if (WmcExperimentalDriver.hasFatalErrors(result)) {
+    // Collect diagnostic messages
+    let diagMessages = List.flatten(List.map(
+      ((moduleId, summary): (String, ModuleInfer.ModuleSummary)) =>
+        List.map((d) => moduleId ++ ": " ++ toString(d), summary.diagnostics),
+      Map.toList(result.modules),
+    ))
+    let joined = match (diagMessages) {
+      [] => "",
+      [first, ...rest] => List.reduce((acc, s) => acc ++ "\n" ++ s, first, rest),
+    }
+    Err("Fatal type errors:\n" ++ joined)
+  } else {
+    let emitResult = WmcExperimentalDriver.compileFromInference(result)
 
-  match (Fs.Utf8.writeFile(sync=false, Path.fromString(outPath), sourceText)) {
-    Ok(_) => Ok(outPath),
-    Err(fsErr) =>
-      Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),
+    // Find the entry module's emitted source
+    let rec findEntry = (modules: List<WmcExpEmitZig.ModuleEmit>) =>
+      match (modules) {
+        [] => None,
+        [m, ...rest] =>
+          if (m.moduleId == emitResult.entryModuleId) {
+            Some(m.zigSource)
+          } else {
+            findEntry(rest)
+          },
+      }
+
+    match (findEntry(emitResult.modules)) {
+      None => Err("No entry module emitted"),
+      Some(zigSource) => {
+        let outPath = compileOutputPath(entryPath)
+        match (Fs.Utf8.writeFile(sync=false, Path.fromString(outPath), zigSource)) {
+          Ok(_) => Ok(outPath),
+          Err(fsErr) =>
+            Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),
+        }
+      },
+    }
   }
 }
 
 provide let runFile = (entryPath: String, stdRoot: Option<String>) => {
   match (compileFile(entryPath, stdRoot)) {
     Ok(outPath) =>
-      Ok(
-        "Run scaffold compiled to "
-          ++ outPath
-          ++ ". Execute with: zig run "
-          ++ outPath
-      ),
+      Ok("Compiled to " ++ outPath ++ ". Execute with: zig run " ++ outPath),
     Err(msg) => Err(msg),
   }
 }

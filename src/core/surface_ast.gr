@@ -76,7 +76,7 @@ provide enum rec ExprKind {
   RecordLit(List<RecordItem>),
   Seq(List<Expr>),
   Hole(Hole),
-  If(Expr, Expr, Option<Expr>),
+  If(IfExpr),
   Let(LetBinding, Expr),
   Assign(AssignExpr),
 }
@@ -117,6 +117,12 @@ and provide record Block {
   node: Node,
   items: List<BlockItem>,
   body: Expr,
+}
+and provide record IfExpr {
+  cond: Expr,
+  thenExpr: Expr,
+  elseExpr: Option<Expr>,
+  items: List<BlockItem>,
 }
 and provide enum ExpectedTopItemKind {
   TopItemAny,
@@ -220,6 +226,7 @@ and provide record MatchExpr {
   bundle: FnExpr,
   arrowSugar: Bool, // true for `match(param) => { ... }`
   attach: Attachments,
+  items: List<BlockItem>,
 }
 and provide enum TypeExprKind {
   Hole(Hole),

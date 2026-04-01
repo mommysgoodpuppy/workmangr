@@ -1,0 +1,646 @@
+module WmcExpEmitZig
+
+from "array" include Array
+from "char" include Char
+from "list" include List
+from "string" include String
+
+from "../../core/types.gr" include Types
+from "./core_ir.gr" include WmcExpCoreIR as IR
+
+// ── Emit state ────────────────────────────────────────────────────
+
+record EmitState {
+  mut nextId: Number,
+}
+
+// ── Name utilities ────────────────────────────────────────────────
+
+let joinStrings = (sep: String, items: List<String>) => match (items) {
+  [] => "",
+  [first, ...rest] => List.reduce((acc, s) => acc ++ sep ++ s, first, rest),
+}
+
+let indent = (s: String) => "    " ++ s
+let indent2 = (s: String) => "        " ++ s
+
+let isAsciiLetter = (c: Char) => {
+  let code = Char.code(c)
+  (code >= Char.code('a') && code <= Char.code('z'))
+    || (code >= Char.code('A') && code <= Char.code('Z'))
+}
+
+let isAsciiDigit = (c: Char) => {
+  let code = Char.code(c)
+  code >= Char.code('0') && code <= Char.code('9')
+}
+
+let sanitizeIdentBase = (input: String) => {
+  if (String.length(input) == 0) {
+    "_wm"
+  } else {
+    let rec loop = (idx: Number, out: String) => {
+      if (idx >= String.length(input)) {
+        out
+      } else {
+        let ch = String.charAt(idx, input)
+        let keep = isAsciiLetter(ch) || isAsciiDigit(ch) || ch == '_'
+        let next = if (keep) { out ++ Char.toString(ch) } else { out ++ "_" }
+        loop(idx + 1, next)
+      }
+    }
+    let raw = loop(0, "")
+    if (raw == "") { "_wm" } else {
+      let first = String.charAt(0, raw)
+      if (isAsciiDigit(first)) { "_" ++ raw } else { raw }
+    }
+  }
+}
+
+let isZigReserved = (name: String) =>
+  name == "align" || name == "allowzero" || name == "and"
+    || name == "anyframe" || name == "anytype" || name == "asm"
+    || name == "async" || name == "await" || name == "break"
+    || name == "catch" || name == "comptime" || name == "const"
+    || name == "continue" || name == "defer" || name == "else"
+    || name == "enum" || name == "errdefer" || name == "error"
+    || name == "export" || name == "extern" || name == "false"
+    || name == "for" || name == "if" || name == "inline"
+    || name == "linksection" || name == "noalias" || name == "noinline"
+    || name == "nosuspend" || name == "opaque" || name == "or"
+    || name == "orelse" || name == "packed" || name == "pub"
+    || name == "resume" || name == "return" || name == "struct"
+    || name == "suspend" || name == "switch" || name == "test"
+    || name == "threadlocal" || name == "true" || name == "try"
+    || name == "union" || name == "unreachable" || name == "usingnamespace"
+    || name == "var" || name == "volatile" || name == "while" || name == "_"
+
+let sanitizeLocal = (name: String) => {
+  let base = sanitizeIdentBase(name)
+  if (isZigReserved(base)) { base ++ "_wm" } else { base }
+}
+
+let freshName = (state: EmitState, hint: String) => {
+  let id = state.nextId
+  state.nextId = id + 1
+  "__wm_" ++ sanitizeLocal(hint) ++ "_" ++ toString(id)
+}
+
+// ── Type → Zig ────────────────────────────────────────────────────
+// Native Zig types. Generic types → comptime function calls.
+
+let rec typeToZig = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNumber => "i64",
+    Types.TString => "[]const u8",
+    Types.TChar => "u8",
+    Types.TByte => "u8",
+    Types.TBool => "bool",
+    Types.TVoid => "void",
+    Types.TTuple(items) =>
+      "struct { " ++ joinStrings(", ", List.map(typeToZig, items)) ++ " }",
+    Types.TFun(_, _) => "anytype",
+    Types.TNominal(name, args) =>
+      if (name == "Int") { "i64" }
+      else if (name == "U8") { "u8" }
+      else if (args != []) {
+        sanitizeLocal(name) ++ "(" ++ joinStrings(", ", List.map(typeToZig, args)) ++ ")"
+      } else {
+        sanitizeLocal(name)
+      },
+    Types.TVar(_) => "anytype",
+    Types.THole(_) => "anytype",
+  }
+
+// ── Literal → Zig ─────────────────────────────────────────────────
+
+let literalToZig = (lit: IR.Literal) =>
+  match (lit) {
+    IR.LUnit => "{}",
+    IR.LInt(n) => "@as(i64, " ++ toString(n) ++ ")",
+    IR.LBool(true) => "true",
+    IR.LBool(false) => "false",
+    IR.LChar(ch) => "@as(u8, " ++ toString(Char.code(ch)) ++ ")",
+    IR.LByte(n) => "@as(u8, " ++ toString(n) ++ ")",
+    IR.LString(s) =>
+      "\""
+        ++ String.replaceAll("\"", "\\\"",
+          String.replaceAll("\\", "\\\\",
+            String.replaceAll("\n", "\\n",
+              String.replaceAll("\r", "\\r",
+                String.replaceAll("\t", "\\t", s)))))
+        ++ "\"",
+  }
+
+// ── PrimOp → Zig ──────────────────────────────────────────────────
+
+let rec primOpToZig = (op: IR.PrimOp, args: List<String>) =>
+  match (op) {
+    IR.IntAdd => binOp("+", args),
+    IR.IntSub => binOp("-", args),
+    IR.IntMul => binOp("*", args),
+    IR.IntDiv => binOp("/", args),
+    IR.IntEq => binOp("==", args),
+    IR.IntNeq => binOp("!=", args),
+    IR.IntLt => binOp("<", args),
+    IR.IntLe => binOp("<=", args),
+    IR.IntGt => binOp(">", args),
+    IR.IntGe => binOp(">=", args),
+    IR.BoolAnd => binOp("and", args),
+    IR.BoolOr => binOp("or", args),
+    IR.BoolNot =>
+      match (args) {
+        [a] => "!" ++ a,
+        _ => "@compileError(\"bad bool_not arity\")",
+      },
+    IR.CharEq => binOp("==", args),
+    IR.StringLength =>
+      match (args) {
+        [a] => a ++ ".len",
+        _ => "@compileError(\"bad string_length arity\")",
+      },
+    IR.StringSlice => "@compileError(\"string_slice TODO\")",
+    IR.NativePrint =>
+      match (args) {
+        [a] => "std.debug.print(\"{any}\\n\", .{" ++ a ++ "})",
+        _ => "@compileError(\"bad print arity\")",
+      },
+    IR.Panic =>
+      match (args) {
+        [a] => "@panic(" ++ a ++ ")",
+        _ => "@panic(\"panic\")",
+      },
+  }
+
+and binOp = (op: String, args: List<String>) =>
+  match (args) {
+    [a, b] => "(" ++ a ++ " " ++ op ++ " " ++ b ++ ")",
+    _ => "@compileError(\"bad binary op arity\")",
+  }
+
+// ── Expression → Zig ──────────────────────────────────────────────
+// Returns (setupLines: List<String>, exprText: String)
+
+let rec emitExpr = (state: EmitState, expr: IR.Expr) =>
+  match (expr) {
+    IR.ELiteral(_, lit) => ([], literalToZig(lit)),
+
+    IR.EVar(_, name) => {
+      if (String.contains(".", name)) {
+        let parts = String.split(".", name)
+        let rec joinQualified = (items: List<String>, first: Bool) =>
+          match (items) {
+            [] => "",
+            [part, ...rest] =>
+              if (first) {
+                sanitizeLocal(part) ++ joinQualified(rest, false)
+              } else {
+                "." ++ part ++ joinQualified(rest, false)
+              },
+          }
+        let parts_ = Array.toList(parts)
+        ([], joinQualified(parts_, true))
+      } else {
+        ([], sanitizeLocal(name))
+      }
+    },
+
+    IR.ETuple(_, items) => {
+      let (allLines, texts) = emitExprList(state, items)
+      (allLines, ".{ " ++ joinStrings(", ", texts) ++ " }")
+    },
+
+    IR.ERecord(_, fields) => {
+      let (allLines, fieldTexts) = emitRecordFields(state, fields)
+      (allLines, ".{ " ++ joinStrings(", ", fieldTexts) ++ " }")
+    },
+
+    IR.ETupleGet(_, target, index) => {
+      let (lines, text) = emitExpr(state, target)
+      (lines, text ++ ".@\"" ++ toString(index) ++ "\"")
+    },
+
+    IR.EData(_, typeName, ctorName, args) =>
+      emitDataConstruction(state, typeName, ctorName, args),
+
+    IR.ELambda(meta, params, body) =>
+      emitLambda(state, meta, params, body),
+
+    IR.ECall(_, callee, args) =>
+      emitCall(state, callee, args),
+
+    IR.ELet(_, binding, body) =>
+      emitLet(state, binding, body),
+
+    IR.ELetRec(_, bindings, body) =>
+      emitLetRec(state, bindings, body),
+
+    IR.EIf(_, cond, thenBranch, elseBranch) =>
+      emitIf(state, cond, thenBranch, elseBranch),
+
+    IR.EPrim(_, op, args) => {
+      let (allLines, texts) = emitExprList(state, args)
+      (allLines, primOpToZig(op, texts))
+    },
+
+    IR.EMatch(_, scrutinee, cases, fallback) =>
+      emitMatch(state, scrutinee, cases, fallback),
+  }
+
+and emitExprList = (state: EmitState, exprs: List<IR.Expr>) => {
+  let rec loop = (rest: List<IR.Expr>, linesAcc: List<String>, textsAcc: List<String>) =>
+    match (rest) {
+      [] => (List.reverse(linesAcc), List.reverse(textsAcc)),
+      [e, ...tail] => {
+        let (lines, text) = emitExpr(state, e)
+        loop(tail, List.append(List.reverse(lines), linesAcc), [text, ...textsAcc])
+      },
+    }
+  loop(exprs, [], [])
+}
+
+and emitRecordFields = (state: EmitState, fields: List<IR.RecordField>) => {
+  let rec loop = (rest: List<IR.RecordField>, linesAcc: List<String>, textsAcc: List<String>) =>
+    match (rest) {
+      [] => (List.reverse(linesAcc), List.reverse(textsAcc)),
+      [field, ...tail] => {
+        let (lines, text) = emitExpr(state, field.value)
+        loop(tail, List.append(List.reverse(lines), linesAcc), ["." ++ sanitizeLocal(field.name) ++ " = " ++ text, ...textsAcc])
+      },
+    }
+  loop(fields, [], [])
+}
+
+and emitDataConstruction = (state: EmitState, typeName: String, ctorName: String, args: List<IR.Expr>) => {
+  if (args == []) {
+    // Nullary constructor
+    ([], ".{ ." ++ sanitizeLocal(ctorName) ++ " = {} }")
+  } else if (List.length(args) == 1) {
+    let arg = match (List.head(args)) { Some(a) => a, None => fail "impossible" }
+    let (lines, text) = emitExpr(state, arg)
+    (lines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = " ++ text ++ " }")
+  } else {
+    let (allLines, texts) = emitExprList(state, args)
+    (allLines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = .{ " ++ joinStrings(", ", texts) ++ " } }")
+  }
+}
+
+and emitLambda = (state: EmitState, meta: IR.ExprMeta, params: List<String>, body: IR.Expr) => {
+  let fnName = freshName(state, "fn")
+  let (bodyLines, bodyText) = emitExpr(state, body)
+  // Extract return type from function type TFun(param, ret)
+  let retType = match (meta.ty) {
+    Types.TFun(_, ret) => typeToZig(ret),
+    _ => "void",
+  }
+  // For thunks (single "_" param), emit zero-arg function
+  let isThunk = match (params) {
+    ["_"] => true,
+    _ => false,
+  }
+  let paramList = if (isThunk) {
+    ""
+  } else {
+    joinStrings(", ", List.map((p: String) =>
+      if (p == "_") { "_: anytype" } else { sanitizeLocal(p) ++ ": anytype" },
+    params))
+  }
+  let bodyBlock = if (bodyLines == []) {
+    "return " ++ bodyText ++ ";"
+  } else {
+    joinStrings("\n", List.map(indent2, bodyLines))
+      ++ "\n" ++ indent2("return " ++ bodyText ++ ";")
+  }
+  let fnDef = "const " ++ fnName ++ " = struct {\n"
+    ++ indent("fn call(" ++ paramList ++ ") " ++ retType ++ " {\n")
+    ++ indent2(bodyBlock) ++ "\n"
+    ++ indent("}\n")
+    ++ "}.call;"
+  ([fnDef], fnName)
+}
+
+and emitCall = (state: EmitState, callee: IR.Expr, args: List<IR.Expr>) => {
+  let (calleeLines, calleeText) = emitExpr(state, callee)
+  let (argLines, argTexts) = emitExprList(state, args)
+  let allLines = List.append(calleeLines, argLines)
+  (allLines, calleeText ++ "(" ++ joinStrings(", ", argTexts) ++ ")")
+}
+
+and emitLet = (state: EmitState, binding: IR.LetBinding, body: IR.Expr) => {
+  let name = sanitizeLocal(binding.name)
+  let (valueLines, valueText) = emitExpr(state, binding.value)
+  let (bodyLines, bodyText) = emitExpr(state, body)
+  let allLines = List.append(valueLines, ["const " ++ name ++ " = " ++ valueText ++ ";", ...bodyLines])
+  (allLines, bodyText)
+}
+
+and emitLetRec = (state: EmitState, bindings: List<IR.RecLetBinding>, body: IR.Expr) => {
+  // For recursive bindings, emit as var declarations with deferred init
+  let rec emitBindings = (rest: List<IR.RecLetBinding>, linesAcc: List<String>) =>
+    match (rest) {
+      [] => linesAcc,
+      [b, ...tail] => {
+        let name = sanitizeLocal(b.name)
+        let (valueLines, valueText) = emitExpr(state, b.value)
+        let allLines = List.append(linesAcc, List.append(valueLines, ["const " ++ name ++ " = " ++ valueText ++ ";"]))
+        emitBindings(tail, allLines)
+      },
+    }
+  let bindingLines = emitBindings(bindings, [])
+  let (bodyLines, bodyText) = emitExpr(state, body)
+  (List.append(bindingLines, bodyLines), bodyText)
+}
+
+and emitIf = (state: EmitState, cond: IR.Expr, thenBranch: IR.Expr, elseBranch: IR.Expr) => {
+  let (condLines, condText) = emitExpr(state, cond)
+  let (thenLines, thenText) = emitExpr(state, thenBranch)
+  let (elseLines, elseText) = emitExpr(state, elseBranch)
+  // If branches have setup lines, we need blocks
+  let thenPart = if (thenLines == []) { thenText } else {
+    let label = freshName(state, "then")
+    label ++ ": {\n"
+      ++ joinStrings("\n", List.map(indent, thenLines)) ++ "\n"
+      ++ indent("break :" ++ label ++ " " ++ thenText ++ ";") ++ "\n}"
+  }
+  let elsePart = if (elseLines == []) { elseText } else {
+    let label = freshName(state, "else")
+    label ++ ": {\n"
+      ++ joinStrings("\n", List.map(indent, elseLines)) ++ "\n"
+      ++ indent("break :" ++ label ++ " " ++ elseText ++ ";") ++ "\n}"
+  }
+  (condLines, "if (" ++ condText ++ ") " ++ thenPart ++ " else " ++ elsePart)
+}
+
+and emitMatch = (state: EmitState, scrutinee: IR.Expr, cases: List<IR.MatchCase>, fallback: Option<IR.Expr>) => {
+  // For now: emit as an if/else chain
+  // Full switch emission is a TODO
+  let (scrutLines, scrutText) = emitExpr(state, scrutinee)
+  let tmpName = freshName(state, "scrut")
+  let scrutLine = "const " ++ tmpName ++ " = " ++ scrutText ++ ";"
+  let casesText = emitMatchCasesAsIfChain(state, tmpName, cases, fallback)
+  (List.append(scrutLines, [scrutLine]), casesText)
+}
+
+and emitMatchCasesAsIfChain = (state: EmitState, scrutName: String, cases: List<IR.MatchCase>, fallback: Option<IR.Expr>) =>
+  match (cases) {
+    [] =>
+      match (fallback) {
+        Some(fb) => {
+          let (_, text) = emitExpr(state, fb)
+          text
+        },
+        None => "@compileError(\"non-exhaustive match\")",
+      },
+    [case_, ...rest] => {
+      let (condText, bindingLines) = emitPatternCondition(state, case_.pattern, scrutName)
+      let (bodyLines, bodyText) = emitExpr(state, case_.body)
+      let bodyBlock = if (bodyLines == [] && bindingLines == []) {
+        bodyText
+      } else {
+        let label = freshName(state, "arm")
+        label ++ ": {\n"
+          ++ joinStrings("\n", List.map(indent, List.append(bindingLines, bodyLines))) ++ "\n"
+          ++ indent("break :" ++ label ++ " " ++ bodyText ++ ";") ++ "\n}"
+      }
+      let elseText = emitMatchCasesAsIfChain(state, scrutName, rest, fallback)
+      if (condText == "true") {
+        // Unconditional match (wildcard/binding) — no if needed
+        if (bindingLines == []) {
+          bodyText
+        } else {
+          bodyBlock
+        }
+      } else {
+        "if (" ++ condText ++ ") " ++ bodyBlock ++ " else " ++ elseText
+      }
+    },
+  }
+
+and emitPatternCondition = (state: EmitState, pattern: IR.Pattern, scrutName: String) =>
+  match (pattern) {
+    IR.PWildcard(_) => ("true", []),
+    IR.PBinding(_, name) => ("true", ["const " ++ sanitizeLocal(name) ++ " = " ++ scrutName ++ ";"]),
+    IR.PLiteral(_, lit) => (scrutName ++ " == " ++ literalToZig(lit), []),
+    IR.PConstructor(_, typeName, ctorName, subPats) => {
+      let check = "std.meta.activeTag(" ++ scrutName ++ ") == ." ++ sanitizeLocal(ctorName)
+      let bindingLines = emitConstructorBindings(state, scrutName, ctorName, subPats)
+      (check, bindingLines)
+    },
+    IR.PTuple(_, elements) => {
+      // Tuple patterns — bind each element
+      let bindingLines = List.mapi((pat: IR.Pattern, idx: Number) => {
+        let fieldAccess = scrutName ++ ".@\"" ++ toString(idx) ++ "\""
+        match (pat) {
+          IR.PBinding(_, name) => ["const " ++ sanitizeLocal(name) ++ " = " ++ fieldAccess ++ ";"],
+          IR.PWildcard(_) => [],
+          _ => [],
+        }
+      }, elements)
+      ("true", List.flatten(bindingLines))
+    },
+    IR.PPinned(_, name) => (scrutName ++ " == " ++ sanitizeLocal(name), []),
+  }
+
+and emitConstructorBindings = (state: EmitState, scrutName: String, ctorName: String, subPats: List<IR.Pattern>) => {
+  let payload = scrutName ++ "." ++ sanitizeLocal(ctorName)
+  if (List.length(subPats) == 1) {
+    match (List.head(subPats)) {
+      Some(IR.PBinding(_, name)) => ["const " ++ sanitizeLocal(name) ++ " = " ++ payload ++ ";"],
+      Some(IR.PWildcard(_)) => [],
+      _ => [],
+    }
+  } else {
+    List.flatten(List.mapi((pat: IR.Pattern, idx: Number) => {
+      let fieldAccess = payload ++ ".@\"" ++ toString(idx) ++ "\""
+      match (pat) {
+        IR.PBinding(_, name) => ["const " ++ sanitizeLocal(name) ++ " = " ++ fieldAccess ++ ";"],
+        IR.PWildcard(_) => [],
+        _ => [],
+      }
+    }, subPats))
+  }
+}
+
+// ── Type declaration → Zig ────────────────────────────────────────
+
+let rec emitTypeDeclaration = (decl: IR.TypeDeclaration) => {
+  let name = sanitizeLocal(decl.name)
+  match (decl.recordFields) {
+    Some(fields) => emitRecordDecl(name, decl.typeParams, fields),
+    None =>
+      if (decl.constructors == []) {
+        None
+      } else {
+        emitVariantDecl(name, decl.typeParams, decl.constructors)
+      },
+  }
+}
+
+and emitRecordDecl = (name: String, typeParams: List<String>, fields: List<(String, Types.Type)>) => {
+  let fieldLines = List.map(((fieldName, fieldTy): (String, Types.Type)) =>
+    indent(sanitizeLocal(fieldName) ++ ": " ++ typeToZig(fieldTy) ++ ","),
+  fields)
+  if (typeParams != []) {
+    let comptimeParams = joinStrings(", ", List.map((p: String) => "comptime " ++ sanitizeLocal(p) ++ ": type", typeParams))
+    Some(
+      "fn " ++ name ++ "(" ++ comptimeParams ++ ") type {\n"
+        ++ indent("return struct {\n")
+        ++ joinStrings("\n", List.map(indent, fieldLines)) ++ "\n"
+        ++ indent("};\n")
+        ++ "}"
+    )
+  } else {
+    Some(
+      "const " ++ name ++ " = struct {\n"
+        ++ joinStrings("\n", fieldLines) ++ "\n"
+        ++ "};"
+    )
+  }
+}
+
+and emitVariantDecl = (name: String, typeParams: List<String>, ctors: List<IR.TypeConstructor>) => {
+  let ctorLines = List.map((ctor: IR.TypeConstructor) => {
+    let ctorZigName = sanitizeLocal(ctor.name)
+    if (ctor.arity == 0) {
+      indent(ctorZigName ++ ",")
+    } else if (ctor.arity == 1) {
+      let fieldType = match (List.head(ctor.fields)) {
+        Some(t) => typeToZig(t),
+        None => "anytype",
+      }
+      indent(ctorZigName ++ ": " ++ fieldType ++ ",")
+    } else {
+      // Multi-field constructor → tuple struct
+      let fieldTypes = joinStrings(", ", List.map((t: Types.Type) => typeToZig(t), ctor.fields))
+      indent(ctorZigName ++ ": struct { " ++ fieldTypes ++ " },")
+    }
+  }, ctors)
+
+  if (typeParams != []) {
+    let comptimeParams = joinStrings(", ", List.map((p: String) => "comptime " ++ sanitizeLocal(p) ++ ": type", typeParams))
+    Some(
+      "fn " ++ name ++ "(" ++ comptimeParams ++ ") type {\n"
+        ++ indent("return union(enum) {\n")
+        ++ joinStrings("\n", List.map(indent, ctorLines)) ++ "\n"
+        ++ indent("};\n")
+        ++ "}"
+    )
+  } else {
+    Some(
+      "const " ++ name ++ " = union(enum) {\n"
+        ++ joinStrings("\n", ctorLines) ++ "\n"
+        ++ "};"
+    )
+  }
+}
+
+// ── Module → Zig source ──────────────────────────────────────────
+
+provide record ModuleEmit {
+  moduleId: String,
+  zigSource: String,
+}
+
+provide record ProgramEmit {
+  modules: List<ModuleEmit>,
+  entryModuleId: String,
+}
+
+let isCHeader = (source: String) => {
+  let len = String.length(source)
+  len >= 2 && String.slice(len - 2, source) == ".h"
+}
+
+let emitModuleImports = (imports: List<IR.Import>) =>
+  List.map((imp: IR.Import) => {
+    let name = match (imp.alias) {
+      Some(alias) => sanitizeLocal(alias),
+      None => "__wm_mod_" ++ sanitizeIdentBase(imp.source),
+    }
+    if (isCHeader(imp.source)) {
+      "const " ++ name ++ " = @cImport(@cInclude(\"" ++ imp.source ++ "\"));"
+    } else {
+      let path = "./" ++ sanitizeIdentBase(imp.source) ++ ".zig"
+      "const " ++ name ++ " = @import(\"" ++ path ++ "\");"
+    }
+  }, imports)
+
+provide let emitModule = (module_: IR.Module, isEntry: Bool) => {
+  let state: EmitState = { nextId: 0 }
+  let mut lines: List<String> = [
+    "// Generated by Workman compiler (wmc-experimental)",
+    "// Zig comptime generics — no monomorphization",
+    "const std = @import(\"std\");",
+    "",
+  ]
+
+  // Imports
+  let importLines = emitModuleImports(module_.imports)
+  lines = List.append(lines, importLines)
+  if (importLines != []) {
+    lines = List.append(lines, [""])
+  }
+
+  // Type declarations
+  let typeDefs = List.filterMap(emitTypeDeclaration, module_.typeDeclarations)
+  lines = List.append(lines, typeDefs)
+  if (typeDefs != []) {
+    lines = List.append(lines, [""])
+  }
+
+  // Value bindings
+  let rec emitValues = (rest: List<IR.ValueBinding>, accRev: List<String>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [binding, ...tail] => {
+        // Rename "main" to avoid collision with Zig entry point
+        let name = if (binding.name == "main" && isEntry) {
+          "__wm_main"
+        } else {
+          sanitizeLocal(binding.name)
+        }
+        let pubPrefix = if (binding.exported) { "pub " } else { "" }
+        let (setupLines, exprText) = emitExpr(state, binding.value)
+        let valueCode = if (setupLines == []) {
+          pubPrefix ++ "const " ++ name ++ " = " ++ exprText ++ ";"
+        } else {
+          joinStrings("\n", setupLines)
+            ++ "\n" ++ pubPrefix ++ "const " ++ name ++ " = " ++ exprText ++ ";"
+        }
+        emitValues(tail, [valueCode, ...accRev])
+      },
+    }
+  let valueLines = emitValues(module_.values, [])
+  lines = List.append(lines, valueLines)
+
+  // Entry point
+  if (isEntry) {
+    let hasMain = List.some((b: IR.ValueBinding) => b.name == "main", module_.values)
+    if (hasMain) {
+      lines = List.append(lines, [
+        "",
+        "pub fn main() void {",
+        indent("__wm_main();"),
+        "}",
+      ])
+    }
+  }
+
+  joinStrings("\n", lines) ++ "\n"
+}
+
+provide let emitGraph = (graph: IR.ModuleGraph) => {
+  let rec emitModules = (rest: List<(String, IR.Module)>, accRev: List<ModuleEmit>) =>
+    match (rest) {
+      [] => List.reverse(accRev),
+      [(path, module_), ...tail] => {
+        let isEntry = path == graph.entry
+        let source = emitModule(module_, isEntry)
+        emitModules(tail, [{ moduleId: path, zigSource: source }: ModuleEmit, ...accRev])
+      },
+    }
+  {
+    modules: emitModules(graph.modules, []),
+    entryModuleId: graph.entry,
+  }: ProgramEmit
+}

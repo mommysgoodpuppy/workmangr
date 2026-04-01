@@ -1,0 +1,72 @@
+module WmcExperimentalDriver
+
+from "list" include List
+from "map" include Map
+
+from "../../core/module/module_system.gr" include ModuleSystem
+from "../../core/module/module_infer.gr" include ModuleInfer
+from "../../core/error.gr" include Error
+from "../../core/types.gr" include Types
+from "./core_ir.gr" include WmcExpCoreIR as IR
+from "./lower.gr" include WmcExpLower
+from "./emit_zig.gr" include WmcExpEmitZig
+
+// ── Public API ────────────────────────────────────────────────────
+
+provide let compileEntry = (
+  entryPath: String,
+  options: ModuleSystem.BuildOptions=ModuleSystem.defaultOptions(),
+) => {
+  let result = ModuleInfer.inferEntry(entryPath, options=options)
+  let graph = WmcExpLower.lowerProgram(result)
+  WmcExpEmitZig.emitGraph(graph)
+}
+
+provide let compileFromInference = (result: ModuleInfer.InferenceResult) => {
+  let graph = WmcExpLower.lowerProgram(result)
+  WmcExpEmitZig.emitGraph(graph)
+}
+
+provide let lowerFromInference = (result: ModuleInfer.InferenceResult) =>
+  WmcExpLower.lowerProgram(result)
+
+provide let emitFromGraph = (graph: IR.ModuleGraph) =>
+  WmcExpEmitZig.emitGraph(graph)
+
+// ── Diagnostics ───────────────────────────────────────────────────
+
+provide let hasFatalErrors = (result: ModuleInfer.InferenceResult) => {
+  let rec check = (moduleIds: List<String>) =>
+    match (moduleIds) {
+      [] => false,
+      [moduleId, ...rest] =>
+        match (Map.get(moduleId, result.modules)) {
+          Some(summary) =>
+            if (List.some((d: Error.CompilerError) => d.severity == Error.SError, summary.diagnostics)) {
+              true
+            } else {
+              check(rest)
+            },
+          None => check(rest),
+        },
+    }
+  check(result.graph.topo)
+}
+
+provide let debugSummary = (result: ModuleInfer.InferenceResult) => {
+  let graph = WmcExpLower.lowerProgram(result)
+  let rec countValues = (modules: List<(String, IR.Module)>, acc: Number) =>
+    match (modules) {
+      [] => acc,
+      [(_, m), ...rest] => countValues(rest, acc + List.length(m.values)),
+    }
+  let rec countTypes = (modules: List<(String, IR.Module)>, acc: Number) =>
+    match (modules) {
+      [] => acc,
+      [(_, m), ...rest] => countTypes(rest, acc + List.length(m.typeDeclarations)),
+    }
+  "wmc-experimental: entry=" ++ graph.entry
+    ++ " modules=" ++ toString(List.length(graph.modules))
+    ++ " values=" ++ toString(countValues(graph.modules, 0))
+    ++ " types=" ++ toString(countTypes(graph.modules, 0))
+}

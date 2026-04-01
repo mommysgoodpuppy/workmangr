@@ -15,9 +15,9 @@ from "json" include Json
 
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
-from "../../core/module_infer.gr" include ModuleInfer
+from "../../core/module/module_infer.gr" include ModuleInfer
 from "../../core/types.gr" include Types
-from "../../module/module_system.gr" include ModuleSystem
+from "../../core/module/module_system.gr" include ModuleSystem
 from "../../frontend/lexer.gr" include Lexer
 from "./format.gr" include Format
 from "./inlay.gr" include Inlay

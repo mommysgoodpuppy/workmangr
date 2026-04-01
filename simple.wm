@@ -1,3 +1,25 @@
+from "stdio.h" import * as Stdio;
+from "stdlib.h" import * as Stdlib;
+from "string.h" import * as CStr;
+from "errno.h" import * as Errno;
+
+let read_entire_file = (path) => {
+  let f = Stdio.fopen(path, "rb");
+  if f == Stdio.NULL {
+    print("Could not open file")
+  } else {
+    Stdio.fseek(f, 0, Stdio.SEEK_END);
+    let size = Stdio.ftell(f);
+    Stdio.fseek(f, 0, Stdio.SEEK_SET);
+
+    let buf = Stdlib.malloc(size);
+    Stdio.fread(buf, size, 1, f);
+    Stdio.fclose(f);
+    buf
+  }
+};
+
 let main = => {
-    1+1
+  let contents = read_entire_file("simple.wm");
+  print(contents)
 };
