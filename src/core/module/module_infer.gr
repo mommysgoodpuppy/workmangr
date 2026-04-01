@@ -64,54 +64,51 @@ let spanContainsOffset = (span: Source.Span, offset: Number) => {
 
 let spanLength = (span: Source.Span) => span.end - span.start
 
-let buildTypeEntries = (
-  program: CoreAst.Program,
-  infer: Infer.InferState,
-) => {
+let buildTypeEntries = (program: CoreAst.Program, infer: Infer.InferState) => {
   let nodeSpans = Analysis.buildNodeSpans(program)
-  let raw = List.filterMap(((nodeId, inferredType): (Number, Types.Type)) =>
-    match (Map.get(nodeId, nodeSpans)) {
-      Some(span) => {
-        let appliedType = Types.applySubstType(infer.subst, inferredType)
-        Some({ nodeId, span, ty: appliedType }: TypeAtOffset)
+  let raw = List.filterMap(
+    ((nodeId, inferredType): (Number, Types.Type)) =>
+      match (Map.get(nodeId, nodeSpans)) {
+        Some(span) => {
+          let appliedType = Types.applySubstType(infer.subst, inferredType)
+          Some({ nodeId, span, ty: appliedType }: TypeAtOffset)
+        },
+        None => None,
       },
-      None => None,
-    }, Map.toList(infer.nodeTypes))
-  List.sort(
-    compare=((a, b) => {
-      let lenA = spanLength(a.span)
-      let lenB = spanLength(b.span)
-      if (lenA == lenB) {
-        a.span.start - b.span.start
-      } else {
-        lenA - lenB
-      }
-    }),
-    raw,
+    Map.toList(infer.nodeTypes)
   )
+  List.sort(compare=(a, b) => {
+    let lenA = spanLength(a.span)
+    let lenB = spanLength(b.span)
+    if (lenA == lenB) {
+      a.span.start - b.span.start
+    } else {
+      lenA - lenB
+    }
+  }, raw)
 }
 
 provide let typeAtOffsetInSummary = (summary: ModuleSummary, offset: Number) => {
-  let rec choose = (entries: List<TypeAtOffset>) =>
-    match (entries) {
-      [] => None,
-      [entry, ...rest] =>
-        if (spanContainsOffset(entry.span, offset)) {
-          Some(entry)
-        } else {
-          choose(rest)
-        },
-    }
+  let rec choose = (entries: List<TypeAtOffset>) => match (entries) {
+    [] => None,
+    [entry, ...rest] => if (spanContainsOffset(entry.span, offset)) {
+      Some(entry)
+    } else {
+      choose(rest)
+    },
+  }
 
   choose(summary.typeEntries)
 }
 
-provide let effectNotesAtNodeInSummary = (summary: ModuleSummary, nodeId: Number) =>
-  match (Map.get(nodeId, summary.infer.effectEventsByNode)) {
-    Some(events) =>
-      List.map((event: Infer.EffectEvent) => event.message, List.reverse(events)),
-    None => [],
-  }
+provide let effectNotesAtNodeInSummary = (
+  summary: ModuleSummary,
+  nodeId: Number,
+) => match (Map.get(nodeId, summary.infer.effectEventsByNode)) {
+  Some(events) =>
+    List.map((event: Infer.EffectEvent) => event.message, List.reverse(events)),
+  None => [],
+}
 
 let typeDiagnosticsForProgram = (
   program: CoreAst.Program,
@@ -152,28 +149,45 @@ let collectImportedEnv = (
   }
   let providerTypes = (summary: ModuleSummary) => summary.typeExports
   let mergeProviderTypes = (summary: ModuleSummary) =>
-    List.forEach(((typeName, info): (String, Env.TypeInfo)) => {
-      Map.set(typeName, info, importedTypes)
-    }, Map.toList(providerTypes(summary)))
+    List.forEach(
+      ((typeName, info): (String, Env.TypeInfo)) => {
+        Map.set(typeName, info, importedTypes)
+      },
+      Map.toList(providerTypes(summary))
+    )
   let mergeProviderRegistry = (summary: ModuleSummary) => {
-    List.forEach(((domainName, def): (String, InfectionRegistry.DomainRuleDefinition)) => {
-      Map.set(domainName, def, importedRegistry.domains)
-    }, Map.toList(summary.infer.infectionRegistry.domains))
-    List.forEach(((opName, def): (String, InfectionRegistry.OpRuleDefinition)) => {
-      Map.set(opName, def, importedRegistry.opRules)
-    }, Map.toList(summary.infer.infectionRegistry.opRules))
-    List.forEach(((policyName, def): (String, InfectionRegistry.PolicyDefinition)) => {
-      Map.set(policyName, def, importedRegistry.policies)
-    }, Map.toList(summary.infer.infectionRegistry.policies))
-    List.forEach(((target, def): (String, InfectionRegistry.AnnotationDefinition)) => {
-      Map.set(target, def, importedRegistry.annotations)
-    }, Map.toList(summary.infer.infectionRegistry.annotations))
+    List.forEach(
+      ((domainName, def): (String, InfectionRegistry.DomainRuleDefinition)) => {
+        Map.set(domainName, def, importedRegistry.domains)
+      },
+      Map.toList(summary.infer.infectionRegistry.domains)
+    )
+    List.forEach(
+      ((opName, def): (String, InfectionRegistry.OpRuleDefinition)) => {
+        Map.set(opName, def, importedRegistry.opRules)
+      },
+      Map.toList(summary.infer.infectionRegistry.opRules)
+    )
+    List.forEach(
+      ((policyName, def): (String, InfectionRegistry.PolicyDefinition)) => {
+        Map.set(policyName, def, importedRegistry.policies)
+      },
+      Map.toList(summary.infer.infectionRegistry.policies)
+    )
+    List.forEach(
+      ((target, def): (String, InfectionRegistry.AnnotationDefinition)) => {
+        Map.set(target, def, importedRegistry.annotations)
+      },
+      Map.toList(summary.infer.infectionRegistry.annotations)
+    )
   }
-  let importDecls = List.filterMap((item: CoreAst.TopItem) =>
-    match (item) {
+  let importDecls = List.filterMap(
+    (item: CoreAst.TopItem) => match (item) {
       CoreAst.Import(importDecl) => Some(importDecl),
       _ => None,
-    }, lowered.items)
+    },
+    lowered.items
+  )
   let applyWildcardImport = (providerPath: String) => {
     match (Map.get(providerPath, summaries)) {
       Some(summary) => {
@@ -186,6 +200,12 @@ let collectImportedEnv = (
       },
       None => void,
     }
+  }
+  let mut nextHoleId = -100000
+  let freshHoleScheme = () => {
+    let id = nextHoleId
+    nextHoleId = id - 1
+    { quantifiers: [], ty: Types.THole(id) }: Types.Scheme
   }
   let rec loop = (
     remainingImports: List<CoreAst.ImportDecl>,
@@ -205,48 +225,64 @@ let collectImportedEnv = (
           applyWildcardImport(providerPath)
           loop(remainingImports, pathRest)
         } else {
-        match (Map.get(providerPath, summaries)) {
-          Some(summary) => {
-            mergeProviderTypes(summary)
-            mergeProviderRegistry(summary)
-            let values = providerValues(summary)
-            if (importDecl.names != []) {
-              List.forEach((item: CoreAst.ImportName) => {
-                let exportedName = item.name.text
-                let localName = match (item.alias) {
-                  Some(aliasName) => aliasName.text,
-                  None => exportedName,
+          if (ModuleSystem.isCHeader(providerPath)) {
+            match (importDecl.alias) {
+              Some(alias) => {
+                let holeScheme = freshHoleScheme()
+                let capAlias = capitalizeHead(alias.text)
+                Map.set(alias.text, holeScheme, env)
+                if (capAlias != alias.text) {
+                  Map.set(capAlias, holeScheme, env)
+                } else {
+                  void
                 }
-                match (Map.get(exportedName, values)) {
-                  Some(scheme) => Map.set(localName, scheme, env),
-                  None => void,
-                }
-              }, importDecl.names)
-            } else {
-              match (importDecl.alias) {
-                Some(alias) =>
-                  List.forEach(((name, scheme)) => {
-                    let capAlias = capitalizeHead(alias.text)
-                    let aliases = if (capAlias == alias.text) {
-                      [alias.text]
-                    } else {
-                      [alias.text, capAlias]
-                    }
-                    List.forEach((aliasName: String) => {
-                      let qualified = aliasName ++ "." ++ name
-                      Map.set(qualified, scheme, env)
-                    }, aliases)
-                  }, Map.toList(values)),
-                None =>
-                  List.forEach(((name, scheme)) => {
-                    Map.set(name, scheme, env)
-                  }, Map.toList(values)),
-              }
+              },
+              None => void,
             }
-          },
-          None => void,
-        }
-        loop(importRest, pathRest)
+          } else {
+            match (Map.get(providerPath, summaries)) {
+              Some(summary) => {
+                mergeProviderTypes(summary)
+                mergeProviderRegistry(summary)
+                let values = providerValues(summary)
+                if (importDecl.names != []) {
+                  List.forEach((item: CoreAst.ImportName) => {
+                    let exportedName = item.name.text
+                    let localName = match (item.alias) {
+                      Some(aliasName) => aliasName.text,
+                      None => exportedName,
+                    }
+                    match (Map.get(exportedName, values)) {
+                      Some(scheme) => Map.set(localName, scheme, env),
+                      None => void,
+                    }
+                  }, importDecl.names)
+                } else {
+                  match (importDecl.alias) {
+                    Some(alias) =>
+                      List.forEach(((name, scheme)) => {
+                        let capAlias = capitalizeHead(alias.text)
+                        let aliases = if (capAlias == alias.text) {
+                          [alias.text]
+                        } else {
+                          [alias.text, capAlias]
+                        }
+                        List.forEach((aliasName: String) => {
+                          let qualified = aliasName ++ "." ++ name
+                          Map.set(qualified, scheme, env)
+                        }, aliases)
+                      }, Map.toList(values)),
+                    None =>
+                      List.forEach(((name, scheme)) => {
+                        Map.set(name, scheme, env)
+                      }, Map.toList(values)),
+                  }
+                }
+              },
+              None => void,
+            }
+          }
+          loop(importRest, pathRest)
         }
       },
     }
@@ -264,15 +300,19 @@ let collectExplicitExports = (program: CoreAst.Program) => {
         List.forEach((decl: CoreAst.Decl) => {
           match (decl) {
             CoreAst.LetDecl(letDecl) =>
-              List.forEach((binding: CoreAst.LetBinding) => {
-                let name = Layer1Expr.bindingName(binding)
-                if (name != "_") {
-                  Map.set(name, true, exportedValues)
-                } else {
-                  void
-                }
-              }, letDecl.bindings),
-            CoreAst.TypeDecl(typeDecl) => Map.set(typeDecl.name.text, true, exportedTypes),
+              List.forEach(
+                (binding: CoreAst.LetBinding) => {
+                  let name = Layer1Expr.bindingName(binding)
+                  if (name != "_") {
+                    Map.set(name, true, exportedValues)
+                  } else {
+                    void
+                  }
+                },
+                letDecl.bindings
+              ),
+            CoreAst.TypeDecl(typeDecl) =>
+              Map.set(typeDecl.name.text, true, exportedTypes),
             CoreAst.RecordDecl(recordDecl) =>
               Map.set(recordDecl.name.text, true, exportedTypes),
             _ => void,
@@ -284,16 +324,19 @@ let collectExplicitExports = (program: CoreAst.Program) => {
   (exportedValues, exportedTypes)
 }
 
-let buildOwnExports = (
-  lowered: CoreAst.Program,
-  infer: Infer.InferState,
-) => {
+let buildOwnExports = (lowered: CoreAst.Program, infer: Infer.InferState) => {
   let values = Map.make()
   let types = Map.make()
   let allValues = Env.snapshotValues(infer.env)
   let (explicitValueNames, explicitTypeNames) = collectExplicitExports(lowered)
-  let explicitValueList = List.map(((name, _)) => name, Map.toList(explicitValueNames))
-  let explicitTypeList = List.map(((name, _)) => name, Map.toList(explicitTypeNames))
+  let explicitValueList = List.map(
+    ((name, _)) => name,
+    Map.toList(explicitValueNames)
+  )
+  let explicitTypeList = List.map(
+    ((name, _)) => name,
+    Map.toList(explicitTypeNames)
+  )
 
   // Keep value exports permissive unless there is an explicit value export list.
   // This prevents `export from "...\" type ...` from accidentally suppressing `export let ...`.
@@ -350,7 +393,10 @@ let applyReexports = (
 }
 
 let schemeSignature = (scheme: Types.Scheme) => {
-  let qs = Array.join(",", Array.fromList(List.map(toString, scheme.quantifiers)))
+  let qs = Array.join(
+    ",",
+    Array.fromList(List.map(toString, scheme.quantifiers))
+  )
   qs ++ "|" ++ Types.typeToString(scheme.ty)
 }
 
@@ -358,14 +404,21 @@ let typeInfoSignature = (info: Env.TypeInfo) => {
   let typeParams = Array.join(",", Array.fromList(info.typeParams))
   let ctors = Array.join(
     ",",
-    Array.fromList(List.map((ctor: Env.ConstructorInfo) => ctor.name, info.constructors))
+    Array.fromList(
+      List.map((ctor: Env.ConstructorInfo) => ctor.name, info.constructors)
+    )
   )
   let fields = match (info.recordFields) {
     None => "",
     Some(items) =>
       Array.join(
         ",",
-        Array.fromList(List.map(((name, _ty): (CoreAst.Name, CoreAst.TypeExpr)) => name.text, items))
+        Array.fromList(
+          List.map(
+            ((name, _ty): (CoreAst.Name, CoreAst.TypeExpr)) => name.text,
+            items
+          )
+        )
       ),
   }
   info.name ++ "<" ++ typeParams ++ ">[" ++ ctors ++ "]{" ++ fields ++ "}"
@@ -398,11 +451,13 @@ let dependencySignature = (
   nextCache: SummaryCache,
 ) => {
   let depList = List.append(node.imports, node.reexports)
-  let parts = List.map((depId: String) =>
-    match (Map.get(depId, nextCache)) {
+  let parts = List.map(
+    (depId: String) => match (Map.get(depId, nextCache)) {
       Some(dep) => depId ++ "#" ++ dep.exportSignature,
       None => depId ++ "#missing",
-    }, depList)
+    },
+    depList
+  )
   Array.join("|", Array.fromList(parts))
 }
 
@@ -422,8 +477,8 @@ provide let inferGraphWithCache = (
       Some(node) => {
         let depSig = dependencySignature(node, nextCache)
         let reusedSummary = match (Map.get(moduleId, previousCache)) {
-          Some(prev) when prev.node == node && prev.dependencySignature == depSig =>
-            Some(prev.summary),
+          Some(prev) when prev.node == node
+            && prev.dependencySignature == depSig => Some(prev.summary),
           _ => None,
         }
         match (reusedSummary) {
@@ -446,11 +501,8 @@ provide let inferGraphWithCache = (
             let lowered = Lower.lowerProgram(node.program)
             let loweringDiagnostics = Error.getErrors()
             Error.clearErrors()
-            let (importedValues, importedTypes, importedRegistry) = collectImportedEnv(
-              node,
-              lowered,
-              summaries
-            )
+            let (importedValues, importedTypes, importedRegistry) =
+              collectImportedEnv(node, lowered, summaries)
             let infer = Infer.inferProgramWithTypingEnvAndRegistry(
               lowered,
               importedValues,
@@ -459,11 +511,16 @@ provide let inferGraphWithCache = (
             )
             let typeEntries = buildTypeEntries(lowered, infer)
             let typeDiagnostics = typeDiagnosticsForProgram(lowered, infer)
-            let parseDiagnostics = match (Map.get(moduleId, graph.diagnosticsById)) {
+            let parseDiagnostics = match (
+              Map.get(moduleId, graph.diagnosticsById)
+            ) {
               Some(diags) => diags,
               None => [],
             }
-            let parseAndLower = List.append(parseDiagnostics, loweringDiagnostics)
+            let parseAndLower = List.append(
+              parseDiagnostics,
+              loweringDiagnostics
+            )
             let combined = List.append(parseAndLower, typeDiagnostics)
             Map.set(moduleId, combined, diagnosticsById)
 
@@ -493,7 +550,12 @@ provide let inferGraphWithCache = (
     }
   }, graph.topo)
 
-  ({ graph, modules: summaries, diagnosticsById }: InferenceResult, nextCache, reused, recomputed)
+  (
+    { graph, modules: summaries, diagnosticsById }: InferenceResult,
+    nextCache,
+    reused,
+    recomputed,
+  )
 }
 
 provide let inferGraph = (graph: ModuleSystem.ModuleGraph) => {

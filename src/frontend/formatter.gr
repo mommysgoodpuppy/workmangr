@@ -322,8 +322,8 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.Tuple(items) => anyExprList(items),
     SurfaceAst.List(items) => anyListItems(items),
     SurfaceAst.RecordLit(items) => anyRecordItems(items),
-    SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
-      exprHasHole(cond) || exprHasHole(thenExpr) || match (elseExprOpt) {
+    SurfaceAst.If(ifExpr) =>
+      exprHasHole(ifExpr.cond) || exprHasHole(ifExpr.thenExpr) || match (ifExpr.elseExpr) {
         Some(e) => exprHasHole(e),
         None => false,
       },
@@ -490,10 +490,10 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.Tuple(items) => anyExprMissingRBrace(items),
     SurfaceAst.List(items) => anyListItemsMissingRBrace(items),
     SurfaceAst.RecordLit(items) => anyRecordItemsMissingRBrace(items),
-    SurfaceAst.If(cond, thenExpr, elseExprOpt) =>
-      exprHasMissingRBrace(cond)
-        || exprHasMissingRBrace(thenExpr)
-        || match (elseExprOpt) {
+    SurfaceAst.If(ifExpr) =>
+      exprHasMissingRBrace(ifExpr.cond)
+        || exprHasMissingRBrace(ifExpr.thenExpr)
+        || match (ifExpr.elseExpr) {
           Some(e) => exprHasMissingRBrace(e),
           None => false,
         },
@@ -1188,13 +1188,51 @@ let renderWithSettingsWithTokens = (
           }
         },
         SurfaceAst.Block(block) => emitBlock(block),
-        SurfaceAst.If(cond, thenExpr, elseExpr) => {
+        SurfaceAst.If(ifExpr) => {
+          let isMissingParenRecovery = (items: List<SurfaceAst.BlockItem>) =>
+            match (items) {
+              [
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(lp), _ }),
+                SurfaceAst.ExprItem(_),
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(rp), _ }),
+              ] => lp == "(" && rp == ")",
+              _ => false,
+            }
           write("if")
           space()
-          emitExpr(cond)
+          if (isMissingParenRecovery(ifExpr.items)) {
+            match (ifExpr.items) {
+              [
+                SurfaceAst.MarkItem(lpMark),
+                SurfaceAst.ExprItem(condExpr),
+                SurfaceAst.MarkItem(rpMark),
+              ] => {
+                emitVirtual(
+                  "(",
+                  lpMark.node.span.start,
+                  "missing token",
+                  stackAutoFix(lpMark.node.span.start, lpMark.repairClass),
+                  lpMark.repairPairId
+                )
+                emitExpr(condExpr)
+                emitVirtual(
+                  ")",
+                  condExpr.node.span.end,
+                  "missing token",
+                  stackAutoFix(condExpr.node.span.end, rpMark.repairClass),
+                  rpMark.repairPairId
+                )
+              },
+              _ => void,
+            }
+          } else {
+            write("(")
+            emitExpr(ifExpr.cond)
+            write(")")
+          }
           space()
-          emitExpr(thenExpr)
-          match (elseExpr) {
+          emitExpr(ifExpr.thenExpr)
+          match (ifExpr.elseExpr) {
             None => void,
             Some(e) => {
               space()
@@ -1247,19 +1285,55 @@ let renderWithSettingsWithTokens = (
           }
         },
         SurfaceAst.Match(matchExpr) => {
+          let isMissingParenRecoveryMatch = (items: List<SurfaceAst.BlockItem>) =>
+            match (items) {
+              [
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(lp), _ }),
+                SurfaceAst.ExprItem(_),
+                SurfaceAst.MarkItem({ kind: SurfaceAst.MissingToken(rp), _ }),
+              ] => lp == "(" && rp == ")",
+              _ => false,
+            }
           write("match")
           match (matchExpr.scrutinee) {
             None => {
               space()
             },
             Some(scrutinee) => {
-              match (scrutinee.kind) {
-                SurfaceAst.Tuple(_) => emitExpr(scrutinee),
-                _ => {
-                  write("(")
-                  emitExprUnparen(scrutinee)
-                  write(")")
-                },
+              if (isMissingParenRecoveryMatch(matchExpr.items)) {
+                match (matchExpr.items) {
+                  [
+                    SurfaceAst.MarkItem(lpMark),
+                    SurfaceAst.ExprItem(condExpr),
+                    SurfaceAst.MarkItem(rpMark),
+                  ] => {
+                    emitVirtual(
+                      "(",
+                      lpMark.node.span.start,
+                      "missing token",
+                      stackAutoFix(lpMark.node.span.start, lpMark.repairClass),
+                      lpMark.repairPairId
+                    )
+                    emitExpr(condExpr)
+                    emitVirtual(
+                      ")",
+                      condExpr.node.span.end,
+                      "missing token",
+                      stackAutoFix(condExpr.node.span.end, rpMark.repairClass),
+                      rpMark.repairPairId
+                    )
+                  },
+                  _ => void,
+                }
+              } else {
+                match (scrutinee.kind) {
+                  SurfaceAst.Tuple(_) => emitExpr(scrutinee),
+                  _ => {
+                    write("(")
+                    emitExprUnparen(scrutinee)
+                    write(")")
+                  },
+                }
               }
               space()
               if (matchExpr.arrowSugar) {

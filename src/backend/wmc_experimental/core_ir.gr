@@ -1,0 +1,194 @@
+module WmcExpCoreIR
+
+from "list" include List
+from "../../core/source.gr" include Source
+from "../../core/types.gr" include Types
+
+// ── Core IR for wmc-experimental ──────────────────────────────────
+// A lowered, desugared IR modeled after the TypeScript Core IR in /workman.
+// Key properties:
+//   - No marks/holes (resolved before lowering)
+//   - No curried application (uncurried call with args list)
+//   - Pattern matching is a first-class expression (not embedded in functions)
+//   - Lambda is single-abstraction with named params
+//   - Let-rec is explicit
+//   - Types are resolved (from inference substitution)
+
+// ── Literals ──────────────────────────────────────────────────────
+
+provide enum Literal {
+  LUnit,
+  LInt(Number),
+  LBool(Bool),
+  LChar(Char),
+  LString(String),
+  LByte(Number),
+}
+
+// ── Expression metadata ───────────────────────────────────────────
+
+provide record ExprMeta {
+  ty: Types.Type,
+  span: Option<Source.Span>,
+}
+
+// ── Primitive operations ──────────────────────────────────────────
+
+provide enum PrimOp {
+  IntAdd,
+  IntSub,
+  IntMul,
+  IntDiv,
+  IntEq,
+  IntNeq,
+  IntLt,
+  IntLe,
+  IntGt,
+  IntGe,
+  BoolAnd,
+  BoolOr,
+  BoolNot,
+  CharEq,
+  StringLength,
+  StringSlice,
+  NativePrint,
+  Panic,
+}
+
+// ── Expressions ───────────────────────────────────────────────────
+// Expr, RecordField, LetBinding, RecLetBinding, MatchCase, and Pattern
+// are all mutually recursive and must be in the same rec...and group.
+
+provide enum rec Expr {
+  ELiteral(ExprMeta, Literal),
+  EVar(ExprMeta, String),
+  ETuple(ExprMeta, List<Expr>),
+  ERecord(ExprMeta, List<RecordField>),
+  ETupleGet(ExprMeta, Expr, Number),
+  EData(ExprMeta, String, String, List<Expr>),
+  ELambda(ExprMeta, List<String>, Expr),
+  ECall(ExprMeta, Expr, List<Expr>),
+  ELet(ExprMeta, LetBinding, Expr),
+  ELetRec(ExprMeta, List<RecLetBinding>, Expr),
+  EIf(ExprMeta, Expr, Expr, Expr),
+  EPrim(ExprMeta, PrimOp, List<Expr>),
+  EMatch(ExprMeta, Expr, List<MatchCase>, Option<Expr>),
+}
+
+and provide record RecordField {
+  name: String,
+  value: Expr,
+}
+
+and provide record LetBinding {
+  name: String,
+  value: Expr,
+}
+
+and provide record RecLetBinding {
+  name: String,
+  value: Expr,
+}
+
+and provide record MatchCase {
+  pattern: Pattern,
+  guard: Option<Expr>,
+  body: Expr,
+}
+
+and provide enum Pattern {
+  PWildcard(Types.Type),
+  PBinding(Types.Type, String),
+  PLiteral(Types.Type, Literal),
+  PTuple(Types.Type, List<Pattern>),
+  PConstructor(Types.Type, String, String, List<Pattern>),
+  PPinned(Types.Type, String),
+}
+
+// ── Expression/Pattern accessors ─────────────────────────────────
+
+provide let exprMeta = (expr: Expr) =>
+  match (expr) {
+    ELiteral(m, _) => m,
+    EVar(m, _) => m,
+    ETuple(m, _) => m,
+    ERecord(m, _) => m,
+    ETupleGet(m, _, _) => m,
+    EData(m, _, _, _) => m,
+    ELambda(m, _, _) => m,
+    ECall(m, _, _) => m,
+    ELet(m, _, _) => m,
+    ELetRec(m, _, _) => m,
+    EIf(m, _, _, _) => m,
+    EPrim(m, _, _) => m,
+    EMatch(m, _, _, _) => m,
+  }
+
+provide let patternType = (pat: Pattern) =>
+  match (pat) {
+    PWildcard(t) => t,
+    PBinding(t, _) => t,
+    PLiteral(t, _) => t,
+    PTuple(t, _) => t,
+    PConstructor(t, _, _, _) => t,
+    PPinned(t, _) => t,
+  }
+
+// ── Type declarations ─────────────────────────────────────────────
+
+provide record TypeConstructor {
+  name: String,
+  arity: Number,
+  exported: Bool,
+  fields: List<Types.Type>,
+}
+
+provide record TypeDeclaration {
+  name: String,
+  typeParams: List<String>,
+  constructors: List<TypeConstructor>,
+  exported: Bool,
+  recordFields: Option<List<(String, Types.Type)>>,
+  aliasType: Option<Types.Type>,
+}
+
+// ── Module structure ──────────────────────────────────────────────
+
+provide record ImportSpecifier {
+  imported: String,
+  local: String,
+}
+
+provide record Import {
+  source: String,
+  specifiers: List<ImportSpecifier>,
+  alias: Option<String>,
+}
+
+provide enum Export {
+  ValueExport(String, String),
+  ConstructorExport(String, String, String),
+  TypeExport(String, String),
+}
+
+provide record ValueBinding {
+  name: String,
+  value: Expr,
+  exported: Bool,
+  isRecursive: Bool,
+}
+
+provide record Module {
+  path: String,
+  imports: List<Import>,
+  typeDeclarations: List<TypeDeclaration>,
+  values: List<ValueBinding>,
+  exports: List<Export>,
+}
+
+provide record ModuleGraph {
+  entry: String,
+  order: List<String>,
+  modules: List<(String, Module)>,
+  prelude: Option<String>,
+}

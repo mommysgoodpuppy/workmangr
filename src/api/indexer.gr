@@ -183,13 +183,13 @@ let rec visitExpr = (store: NS.NodeStore, expr: SurfaceAst.Expr) => {
       }, store, exprs)
     },
 
-    SurfaceAst.If(cond, thenE, elseOpt) => {
+    SurfaceAst.If(ifExpr) => {
       let store = NS.updatePreview(store, expr.node.id, "If")
-      let store = visitExpr(store, cond)
-      let store = NS.addChild(store, expr.node.id, "cond", cond.node.id)
-      let store = visitExpr(store, thenE)
-      let store = NS.addChild(store, expr.node.id, "then", thenE.node.id)
-      match (elseOpt) {
+      let store = visitExpr(store, ifExpr.cond)
+      let store = NS.addChild(store, expr.node.id, "cond", ifExpr.cond.node.id)
+      let store = visitExpr(store, ifExpr.thenExpr)
+      let store = NS.addChild(store, expr.node.id, "then", ifExpr.thenExpr.node.id)
+      match (ifExpr.elseExpr) {
         None => store,
         Some(elseE) => {
           let store = visitExpr(store, elseE)

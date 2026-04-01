@@ -1637,24 +1637,99 @@ let lookupEnv = (name: CoreAst.Name, state: InferState) => {
       )
     },
     None => {
-      let (unknownType, state1) = freshVar(state)
-      let marked = addTypeMark(
-        state1,
-        UnknownIdentifier,
-        originForNode(name.node.id, "unknown identifier"),
-        CoreAst.FreeVar(name),
-        "Type error: unknown identifier " ++ name.text
-      )
-      (
-        {
-          ty: unknownType,
-          bindingId: -1,
-          scopeId: state.flow.currentScopeId,
-          identities: Flow.emptyDomainIdentities(),
-          functionNodeId: None,
-        }: LookupResult,
-        marked,
-      )
+      let dotIdx = {
+        let rec findDot = (i: Number) =>
+          if (i >= String.length(name.text)) { -1 }
+          else if (String.charAt(i, name.text) == '.') { i }
+          else { findDot(i + 1) }
+        findDot(0)
+      }
+      if (dotIdx > 0) {
+        let baseName = String.slice(0, end=dotIdx, name.text)
+        match (Env.lookupValue(state.env, baseName)) {
+          Some(baseEntry) =>
+            match (Types.applySubstType(state.subst, baseEntry.scheme.ty)) {
+              Types.THole(holeId) => {
+                let t = Types.THole(name.node.id)
+                let state1 = noteHoleObservation(
+                  state,
+                  holeId,
+                  t,
+                  originForNode(name.node.id, "hole projection")
+                )
+                (
+                  {
+                    ty: t,
+                    bindingId: -1,
+                    scopeId: state.flow.currentScopeId,
+                    identities: Flow.emptyDomainIdentities(),
+                    functionNodeId: None,
+                  }: LookupResult,
+                  state1,
+                )
+              },
+              _ => {
+                let (unknownType, state1) = freshVar(state)
+                let marked = addTypeMark(
+                  state1,
+                  UnknownIdentifier,
+                  originForNode(name.node.id, "unknown identifier"),
+                  CoreAst.FreeVar(name),
+                  "Type error: unknown identifier " ++ name.text
+                )
+                (
+                  {
+                    ty: unknownType,
+                    bindingId: -1,
+                    scopeId: state.flow.currentScopeId,
+                    identities: Flow.emptyDomainIdentities(),
+                    functionNodeId: None,
+                  }: LookupResult,
+                  marked,
+                )
+              },
+            },
+          None => {
+            let (unknownType, state1) = freshVar(state)
+            let marked = addTypeMark(
+              state1,
+              UnknownIdentifier,
+              originForNode(name.node.id, "unknown identifier"),
+              CoreAst.FreeVar(name),
+              "Type error: unknown identifier " ++ name.text
+            )
+            (
+              {
+                ty: unknownType,
+                bindingId: -1,
+                scopeId: state.flow.currentScopeId,
+                identities: Flow.emptyDomainIdentities(),
+                functionNodeId: None,
+              }: LookupResult,
+              marked,
+            )
+          },
+        }
+      } else {
+        let (unknownType, state1) = freshVar(state)
+        let marked = addTypeMark(
+          state1,
+          UnknownIdentifier,
+          originForNode(name.node.id, "unknown identifier"),
+          CoreAst.FreeVar(name),
+          "Type error: unknown identifier " ++ name.text
+        )
+        (
+          {
+            ty: unknownType,
+            bindingId: -1,
+            scopeId: state.flow.currentScopeId,
+            identities: Flow.emptyDomainIdentities(),
+            functionNodeId: None,
+          }: LookupResult,
+          marked,
+        )
+      }
     },
   }
 }

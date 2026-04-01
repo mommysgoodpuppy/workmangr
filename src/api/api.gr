@@ -172,7 +172,7 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.RecordLit(_) => "RecordLit",
       SurfaceAst.Seq(_) => "Seq",
       SurfaceAst.Hole(_) => "Hole",
-      SurfaceAst.If(_, _, _) => "If",
+      SurfaceAst.If(_) => "If",
       SurfaceAst.Let(_, _) => "Let",
       SurfaceAst.Assign(_) => "Assign",
     }
@@ -272,10 +272,10 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
         let allExprs = [firstJson, ...restJsons]
         ",\"children\":[" ++ joinStrings(",", allExprs) ++ "]"
       },
-      SurfaceAst.If(cond, thenE, elseE) => {
-        let condJson = exprToJson(cond, depth + 1)
-        let thenJson = exprToJson(thenE, depth + 1)
-        let elseJson = match (elseE) {
+      SurfaceAst.If(ifExpr) => {
+        let condJson = exprToJson(ifExpr.cond, depth + 1)
+        let thenJson = exprToJson(ifExpr.thenExpr, depth + 1)
+        let elseJson = match (ifExpr.elseExpr) {
           Some(e) => exprToJson(e, depth + 1),
           None => "null",
         }
