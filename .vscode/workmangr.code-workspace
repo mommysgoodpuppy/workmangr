@@ -1,0 +1,18 @@
+{
+	"folders": [
+		{
+			"name": "workmangr",
+			"path": ".."
+		},
+		{
+			"name": "workman",
+			"path": "../../workman"
+		},
+		{
+			"path": "../../grain-lang.org"
+		}
+	],
+	"settings": {
+		"explorerExclude.backup": {}
+	}
+}

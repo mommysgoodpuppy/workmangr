@@ -1,0 +1,557 @@
+module WmcCoreNorm
+
+from "list" include List
+from "map" include Map
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/error.gr" include Error
+from "../../core/surface_ast.gr" include SurfaceAst
+from "./core_ir.gr" include WmcCoreIr
+
+provide enum rec PatternKind {
+  NPWildcard,
+  NPVar(String),
+  NPPin(String),
+  NPLit(CoreAst.AtomLiteral),
+  NPConstructor(String, List<Pattern>),
+  NPTuple(List<Pattern>),
+  NPList(List<Pattern>, Option<Pattern>),
+  NPAllErrors,
+}
+and provide record Pattern {
+  node: WmcCoreIr.TypedNode,
+  kind: PatternKind,
+}
+
+provide enum rec ExprKind {
+  NELit(CoreAst.AtomLiteral),
+  NEIdent(String),
+  NECall(Expr, List<Expr>),
+  NELet(String, Expr, Expr),
+  NELetRec(List<LetRecBinding>, Expr),
+  NELambda(List<String>, Expr),
+  NETuple(List<Expr>),
+  NERecordLit(List<RecordItem>),
+  NEMatch(MatchExpr),
+}
+and provide record Expr {
+  node: WmcCoreIr.TypedNode,
+  kind: ExprKind,
+}
+and provide enum RecordItem {
+  NRField(String, Expr),
+  NRSpread(Expr),
+}
+and provide record LetRecBinding {
+  name: String,
+  value: Expr,
+}
+and provide record MatchClause {
+  index: Number,
+  node: WmcCoreIr.TypedNode,
+  pattern: Pattern,
+  guard: Option<Expr>,
+  body: Expr,
+}
+and provide record MatchExpr {
+  node: WmcCoreIr.TypedNode,
+  scrutinee: Expr,
+  clauses: List<MatchClause>,
+}
+
+provide record TopValueBinding {
+  name: String,
+  exported: Bool,
+  groupId: Number,
+  groupKind: CoreAst.LetGroupMods,
+  node: WmcCoreIr.TypedNode,
+  annotation: Option<CoreAst.TypeExpr>,
+  value: Expr,
+}
+
+provide record Module {
+  id: String,
+  sourcePath: String,
+  surfaceProgram: SurfaceAst.Program,
+  resolvedImports: List<String>,
+  imports: List<WmcCoreIr.CoreImport>,
+  reexports: List<String>,
+  valueNames: List<String>,
+  typeDecls: List<WmcCoreIr.CoreTypeDecl>,
+  values: List<TopValueBinding>,
+  diagnostics: List<Error.CompilerError>,
+  status: WmcCoreIr.ModuleStatus,
+}
+
+provide record ModuleGraph {
+  entry: String,
+  order: List<String>,
+  modules: Map.Map<String, Module>,
+}
+
+provide enum NormalizationIssueKind {
+  UnsupportedPattern(String),
+  UnsupportedExpr(String),
+  UnsupportedFn(String),
+  UnsupportedTopBinding(String),
+}
+
+provide record NormalizationIssue {
+  node: WmcCoreIr.TypedNode,
+  kind: NormalizationIssueKind,
+  message: String,
+}
+
+provide record NormalizedModuleResult {
+  normalized: Module,
+  issues: List<NormalizationIssue>,
+}
+
+provide record NormalizedGraphResult {
+  graph: ModuleGraph,
+  issues: List<NormalizationIssue>,
+}
+
+provide let zeroArgThunkParamName = "__wm_unit"
+
+let mapOption = (opt, fn) => match (opt) {
+  None => None,
+  Some(v) => Some(fn(v)),
+}
+
+let issue = (
+  node: WmcCoreIr.TypedNode,
+  kind: NormalizationIssueKind,
+  message: String,
+) => ({ node, kind, message }: NormalizationIssue)
+
+let boolPattern = (node: WmcCoreIr.TypedNode, value: Bool) =>
+  { node, kind: NPLit(CoreAst.Bool(value)) }: Pattern
+
+let generatedFnParamName = (node: WmcCoreIr.TypedNode) =>
+  "__wm_fn_arg_" ++ toString(node.id)
+
+let callArgsFromExpr = (expr: Expr) =>
+  match (expr.kind) {
+    NETuple(items) => items,
+    _ => [expr],
+  }
+
+let rec normalizePatternDetailed = (pattern: WmcCoreIr.Pattern) => {
+  let node = pattern.node
+  match (pattern.kind) {
+    WmcCoreIr.PMark(_, inner) => normalizePatternDetailed(inner),
+    WmcCoreIr.PHole(_) =>
+      ({
+        node,
+        kind: NPWildcard,
+      }: Pattern, [
+        issue(node, UnsupportedPattern("hole"), "Pattern holes are not supported in normalized core"),
+      ]),
+    WmcCoreIr.PWildcard => ({ node, kind: NPWildcard }: Pattern, []),
+    WmcCoreIr.PVar(name) => ({ node, kind: NPVar(name) }: Pattern, []),
+    WmcCoreIr.PPin(name) => ({ node, kind: NPPin(name) }: Pattern, []),
+    WmcCoreIr.PLit(lit) => ({ node, kind: NPLit(lit) }: Pattern, []),
+    WmcCoreIr.PConstructor(name, fields) => {
+      let normalized = List.map(normalizePatternDetailed, fields)
+      let items = List.map(((item, _issues)) => item, normalized)
+      let issues = List.flatten(List.map(((_item, issues)) => issues, normalized))
+      ({ node, kind: NPConstructor(name, items) }: Pattern, issues)
+    },
+    WmcCoreIr.PTuple(items) => {
+      let normalized = List.map(normalizePatternDetailed, items)
+      let nextItems = List.map(((item, _issues)) => item, normalized)
+      let issues = List.flatten(List.map(((_item, issues)) => issues, normalized))
+      ({ node, kind: NPTuple(nextItems) }: Pattern, issues)
+    },
+    WmcCoreIr.PList(items, rest) => {
+      let normalizedItems = List.map(normalizePatternDetailed, items)
+      let nextItems = List.map(((item, _issues)) => item, normalizedItems)
+      let itemIssues = List.flatten(List.map(((_item, issues)) => issues, normalizedItems))
+      match (rest) {
+        None => ({ node, kind: NPList(nextItems, None) }: Pattern, itemIssues),
+        Some(restPattern) => {
+          let (nextRest, restIssues) = normalizePatternDetailed(restPattern)
+          ({ node, kind: NPList(nextItems, Some(nextRest)) }: Pattern, List.append(itemIssues, restIssues))
+        },
+      }
+    },
+    WmcCoreIr.PAllErrors => ({ node, kind: NPAllErrors }: Pattern, []),
+  }
+}
+
+let rec normalizeExprDetailed = (expr: WmcCoreIr.Expr) => {
+  let node = expr.node
+  match (expr.kind) {
+    WmcCoreIr.EMark(_, inner) => normalizeExprDetailed(inner),
+    WmcCoreIr.ELit(lit) => ({ node, kind: NELit(lit) }: Expr, []),
+    WmcCoreIr.EIdent(name) => ({ node, kind: NEIdent(name) }: Expr, []),
+    WmcCoreIr.EAnnotate(value, _annotation) => normalizeExprDetailed(value),
+    WmcCoreIr.EApply(callee, arg) => {
+      let (calleeExpr, calleeIssues) = normalizeExprDetailed(callee)
+      let (argExpr, argIssues) = normalizeExprDetailed(arg)
+      ({
+        node,
+        kind: NECall(calleeExpr, callArgsFromExpr(argExpr)),
+      }: Expr, List.append(calleeIssues, argIssues))
+    },
+    WmcCoreIr.EFn(fnExpr) => normalizeFnExprDetailed(fnExpr),
+    WmcCoreIr.ELet(binding, body) =>
+      match (binding.name.kind) {
+        WmcCoreIr.PVar(name) => {
+          let (valueExpr, valueIssues) = normalizeExprDetailed(binding.value)
+          let (bodyExpr, bodyIssues) = normalizeExprDetailed(body)
+          ({ node, kind: NELet(name, valueExpr, bodyExpr) }: Expr, List.append(valueIssues, bodyIssues))
+        },
+        _ => {
+          let (valueExpr, valueIssues) = normalizeExprDetailed(binding.value)
+          let (bodyExpr, bodyIssues) = normalizeExprDetailed(body)
+          ({ node, kind: NELet("_", valueExpr, bodyExpr) }: Expr, List.append(
+            [
+              issue(node, UnsupportedExpr("let_pattern"), "Only variable let patterns are supported in normalized core"),
+            ],
+            List.append(valueIssues, bodyIssues),
+          ))
+        },
+      },
+    WmcCoreIr.EIf(cond, thenExpr, elseExpr) =>
+      match (elseExpr) {
+        None => (
+          { node, kind: NELit(CoreAst.Unit) }: Expr,
+          [
+            issue(node, UnsupportedExpr("if_missing_else"), "Normalized core requires if/else to have an else branch"),
+          ],
+        ),
+        Some(elseBranch) => {
+          let (condExpr, condIssues) = normalizeExprDetailed(cond)
+          let (thenNorm, thenIssues) = normalizeExprDetailed(thenExpr)
+          let (elseNorm, elseIssues) = normalizeExprDetailed(elseBranch)
+          let clauses = [
+            {
+              index: 0,
+              node,
+              pattern: boolPattern(node, true),
+              guard: None,
+              body: thenNorm,
+            }: MatchClause,
+            {
+              index: 1,
+              node,
+              pattern: boolPattern(node, false),
+              guard: None,
+              body: elseNorm,
+            }: MatchClause,
+          ]
+          (
+            {
+              node,
+              kind: NEMatch({ node, scrutinee: condExpr, clauses }: MatchExpr),
+            }: Expr,
+            List.append(condIssues, List.append(thenIssues, elseIssues)),
+          )
+        },
+      },
+    WmcCoreIr.ETuple(items) => {
+      let normalized = List.map(normalizeExprDetailed, items)
+      let nextItems = List.map(((item, _issues)) => item, normalized)
+      let issues = List.flatten(List.map(((_item, issues)) => issues, normalized))
+      ({ node, kind: NETuple(nextItems) }: Expr, issues)
+    },
+    WmcCoreIr.ERecordLit(items) => {
+      let normalized = List.map(normalizeRecordItemDetailed, items)
+      let nextItems = List.map(((item, _issues)) => item, normalized)
+      let issues = List.flatten(List.map(((_item, issues)) => issues, normalized))
+      ({ node, kind: NERecordLit(nextItems) }: Expr, issues)
+    },
+    WmcCoreIr.EHole(_) => (
+      { node, kind: NELit(CoreAst.Unit) }: Expr,
+      [
+        issue(node, UnsupportedExpr("hole"), "Expression holes are not supported in normalized core"),
+      ],
+    ),
+  }
+}
+and normalizeRecordItemDetailed = (item: WmcCoreIr.RecordItem) =>
+  match (item) {
+    WmcCoreIr.RField(name, value) => {
+      let (normalized, issues) = normalizeExprDetailed(value)
+      (NRField(name, normalized), issues)
+    },
+    WmcCoreIr.RSpread(value) => {
+      let (normalized, issues) = normalizeExprDetailed(value)
+      (NRSpread(normalized), issues)
+    },
+  }
+and normalizeFnExprDetailed = (fnExpr: WmcCoreIr.FnExpr) => {
+  let node = fnExpr.node
+  let clauses = List.filterMap(
+    (item: WmcCoreIr.FnItem) =>
+      match (item.kind) {
+        WmcCoreIr.FClause(clause) => Some(clause),
+        _ => None,
+      },
+    fnExpr.items
+  )
+  let itemIssues = List.flatten(List.map(
+    (item: WmcCoreIr.FnItem) =>
+      match (item.kind) {
+        WmcCoreIr.FClause(_) => [],
+        WmcCoreIr.FInclude(name) => [
+          issue(item.node, UnsupportedFn("include"), "Function clause includes are not yet supported in normalized core: " ++ name),
+        ],
+        WmcCoreIr.FHole(_) => [
+          issue(item.node, UnsupportedFn("hole"), "Function holes are not supported in normalized core"),
+        ],
+      },
+    fnExpr.items
+  ))
+  match (clauses) {
+    [] => (
+      { node, kind: NELit(CoreAst.Unit) }: Expr,
+      List.append(
+        [
+          issue(node, UnsupportedFn("empty"), "Functions with no clauses are not supported in normalized core"),
+        ],
+        itemIssues,
+      ),
+    ),
+    [clause] =>
+      if (clause.guard == None && clause.matchConstructor == None) {
+        match (clause.param.kind) {
+          WmcCoreIr.PVar(param) => {
+            let (bodyExpr, bodyIssues) = normalizeExprDetailed(clause.body)
+            ({ node, kind: NELambda([param], bodyExpr) }: Expr, List.append(itemIssues, bodyIssues))
+          },
+          WmcCoreIr.PLit(CoreAst.Unit) => {
+            let (bodyExpr, bodyIssues) = normalizeExprDetailed(clause.body)
+            ({ node, kind: NELambda([zeroArgThunkParamName], bodyExpr) }: Expr, List.append(itemIssues, bodyIssues))
+          },
+          _ => normalizeFnAsMatchDetailed(node, clauses, itemIssues),
+        }
+      } else {
+        normalizeFnAsMatchDetailed(node, clauses, itemIssues)
+      },
+    _ => normalizeFnAsMatchDetailed(node, clauses, itemIssues),
+  }
+}
+
+and normalizeFnAsMatchDetailed = (
+  node: WmcCoreIr.TypedNode,
+  clauses: List<WmcCoreIr.FnClause>,
+  itemIssues: List<NormalizationIssue>,
+) => {
+  let paramName = generatedFnParamName(node)
+  let scrutinee = { node, kind: NEIdent(paramName) }: Expr
+  let normalizedClauses = List.mapi((clause: WmcCoreIr.FnClause, index: Number) => {
+    let (pattern, patternIssues) = normalizePatternDetailed(clause.param)
+    let normalizedPattern = match ((clause.matchConstructor, pattern.kind)) {
+      (Some(name), NPVar(_)) => { node: clause.param.node, kind: NPConstructor(name, []) }: Pattern,
+      _ => pattern,
+    }
+    let (guard, guardIssues) = match (clause.guard) {
+      None => (None, []),
+      Some(guardExpr) => {
+        let (normalizedGuard, issues) = normalizeExprDetailed(guardExpr)
+        (Some(normalizedGuard), issues)
+      },
+    }
+    let (body, bodyIssues) = normalizeExprDetailed(clause.body)
+    (
+      {
+        index,
+        node: clause.node,
+        pattern: normalizedPattern,
+        guard,
+        body,
+      }: MatchClause,
+      List.append(patternIssues, List.append(guardIssues, bodyIssues)),
+    )
+  }, clauses)
+  let matchClauses = List.map(((clause, _issues)) => clause, normalizedClauses)
+  let clauseIssues = List.flatten(List.map(((_clause, issues)) => issues, normalizedClauses))
+  (
+    {
+      node,
+      kind: NELambda(
+        [paramName],
+        {
+          node,
+          kind: NEMatch({ node, scrutinee, clauses: matchClauses }: MatchExpr),
+        }: Expr,
+      ),
+    }: Expr,
+    List.append(itemIssues, clauseIssues),
+  )
+}
+
+let normalizeTopBindingDetailed = (binding: WmcCoreIr.TopValueBinding) =>
+  match (binding.binding.name.kind) {
+    WmcCoreIr.PVar(_name) => {
+      let (value, issues) = normalizeExprDetailed(binding.binding.value)
+      ({
+        name: binding.name,
+        exported: binding.exported,
+        groupId: binding.groupId,
+        groupKind: binding.groupKind,
+        node: binding.binding.node,
+        annotation: binding.binding.annotation,
+        value,
+      }: TopValueBinding, issues)
+    },
+    _ => {
+      let (value, valueIssues) = normalizeExprDetailed(binding.binding.value)
+      ({
+        name: binding.name,
+        exported: binding.exported,
+        groupId: binding.groupId,
+        groupKind: binding.groupKind,
+        node: binding.binding.node,
+        annotation: binding.binding.annotation,
+        value,
+      }: TopValueBinding, [
+        issue(binding.binding.node, UnsupportedTopBinding("pattern"), "Only variable top-level bindings are supported in normalized core"),
+        ...valueIssues,
+      ])
+    },
+  }
+
+let letRecExprForGroup = (
+  group: List<TopValueBinding>,
+  target: TopValueBinding,
+) => {
+  let rec buildBindings = (
+    remaining: List<TopValueBinding>,
+    bindingsRev: List<LetRecBinding>,
+    issuesRev: List<NormalizationIssue>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(bindingsRev), List.reverse(issuesRev)),
+      [binding, ...rest] =>
+        match (binding.value.kind) {
+          NELambda(_, _) =>
+            buildBindings(
+              rest,
+              [{ name: binding.name, value: binding.value }: LetRecBinding, ...bindingsRev],
+              issuesRev,
+            ),
+          _ =>
+            buildBindings(
+              rest,
+              [{ name: binding.name, value: binding.value }: LetRecBinding, ...bindingsRev],
+              [
+                issue(
+                  binding.node,
+                  UnsupportedTopBinding("rec_non_lambda"),
+                  "Recursive top-level bindings must normalize to lambdas",
+                ),
+                ...issuesRev,
+              ],
+            ),
+        },
+    }
+
+  let (bindings, issues) = buildBindings(group, [], [])
+  (
+    {
+      name: target.name,
+      exported: target.exported,
+      groupId: target.groupId,
+      groupKind: target.groupKind,
+      node: target.node,
+      annotation: target.annotation,
+      value: {
+        node: target.node,
+        kind: NELetRec(
+          bindings,
+          { node: target.node, kind: NEIdent(target.name) }: Expr,
+        ),
+      }: Expr,
+    }: TopValueBinding,
+    issues,
+  )
+}
+
+provide let normalizeModuleDetailed = (module_: WmcCoreIr.CoreModule) => {
+  let normalizedBindings = List.map(normalizeTopBindingDetailed, module_.values)
+  let normalizedValues = List.map(((binding, _issues)) => binding, normalizedBindings)
+  let baseIssues = List.flatten(List.map(((_binding, issues)) => issues, normalizedBindings))
+  let rec finalizeBindings = (
+    remaining: List<TopValueBinding>,
+    valuesRev: List<TopValueBinding>,
+    issuesRev: List<NormalizationIssue>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(valuesRev), List.reverse(issuesRev)),
+      [binding, ...rest] =>
+        if (binding.groupKind == CoreAst.Rec) {
+          let rec takeGroup = (
+            tail: List<TopValueBinding>,
+            accRev: List<TopValueBinding>,
+          ) =>
+            match (tail) {
+              [next, ...more]
+                when next.groupKind == CoreAst.Rec && next.groupId == binding.groupId =>
+                  takeGroup(more, [next, ...accRev]),
+              _ => (List.reverse(accRev), tail),
+            }
+          let (groupTail, afterGroup) = takeGroup(rest, [binding])
+          let converted = List.map((item: TopValueBinding) => letRecExprForGroup(groupTail, item), groupTail)
+          let nextValuesRev = List.append(
+            List.reverse(List.map(((item, _issues)) => item, converted)),
+            valuesRev,
+          )
+          let nextIssuesRev = List.append(
+            List.reverse(List.flatten(List.map(((_item, itemIssues)) => itemIssues, converted))),
+            issuesRev,
+          )
+          finalizeBindings(afterGroup, nextValuesRev, nextIssuesRev)
+        } else {
+          finalizeBindings(rest, [binding, ...valuesRev], issuesRev)
+        },
+    }
+
+  let (values, recIssues) = finalizeBindings(normalizedValues, [], [])
+  let issues = List.append(baseIssues, recIssues)
+  {
+    normalized: {
+      id: module_.id,
+      sourcePath: module_.sourcePath,
+      surfaceProgram: module_.surfaceProgram,
+      resolvedImports: module_.resolvedImports,
+      imports: module_.imports,
+      reexports: module_.reexports,
+      valueNames: module_.valueNames,
+      typeDecls: module_.typeDecls,
+      values,
+      diagnostics: module_.diagnostics,
+      status: module_.status,
+    }: Module,
+    issues,
+  }: NormalizedModuleResult
+}
+
+provide let normalizeGraphDetailed = (graph: WmcCoreIr.CoreModuleGraph) => {
+  let modules: Map.Map<String, Module> = Map.make()
+  let rec collect = (remaining: List<String>, issuesRev: List<NormalizationIssue>) =>
+    match (remaining) {
+      [] =>
+        {
+          graph: {
+            entry: graph.entry,
+            order: graph.order,
+            modules,
+          }: ModuleGraph,
+          issues: List.reverse(issuesRev),
+        }: NormalizedGraphResult,
+      [moduleId, ...rest] =>
+        match (Map.get(moduleId, graph.modules)) {
+          Some(module_) => {
+            let result = normalizeModuleDetailed(module_)
+            Map.set(moduleId, result.normalized, modules)
+            collect(rest, List.append(List.reverse(result.issues), issuesRev))
+          },
+          None => collect(rest, issuesRev),
+        },
+    }
+  collect(graph.order, [])
+}

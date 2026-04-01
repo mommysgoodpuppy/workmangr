@@ -7,6 +7,8 @@ from "../../core/module/module_infer.gr" include ModuleInfer
 from "../../core/module/module_system.gr" include ModuleSystem
 from "../../core/module/module_ir.gr" include WmcModuleIr
 from "./module_stage.gr" include WmcModuleStage
+from "./core_ir.gr" include WmcCoreIr
+from "./core_stage.gr" include WmcCoreStage
 
 provide record BackendModuleArtifacts {
   sourceNode: ModuleSystem.ModuleNode,
@@ -16,7 +18,8 @@ provide record BackendModuleArtifacts {
 
 provide record CompileGraphResult {
   entry: String,
-  graph: WmcModuleIr.ModuleGraph,
+  moduleGraph: WmcModuleIr.ModuleGraph,
+  coreGraph: WmcCoreIr.CoreModuleGraph,
   modules: Map.Map<String, BackendModuleArtifacts>,
 }
 
@@ -31,10 +34,7 @@ provide let compileWorkmanGraph = (
 ) => {
   let moduleSummaries = ModuleInfer.inferEntry(entryPath, options=options)
   let moduleGraph = WmcModuleStage.buildModuleGraph(moduleSummaries)
-  let sourceGraph = moduleSummaries.graph
-  let sourceGraphNodes = sourceGraph.nodes
-  let sourceGraphTopo = sourceGraph.topo
-  let summaries = moduleSummaries.modules
+  let coreGraph = WmcCoreStage.lowerInferenceToCoreGraph(moduleSummaries, moduleGraph)
 
   let modules: Map.Map<String, BackendModuleArtifacts> = Map.make()
   List.forEach((moduleId: String) => {
@@ -53,9 +53,15 @@ provide let compileWorkmanGraph = (
         ),
       _ => void,
     }
-  }, sourceGraphTopo)
+  }, moduleSummaries.graph.topo)
 
-  { entry: sourceGraph.entry, graph: moduleGraph, modules }: CompileGraphResult
+  {
+    entry: moduleSummaries.graph.entry,
+    modules,
+    moduleGraph,
+    coreGraph,
+  }:
+    CompileGraphResult
 }
 
 provide let bootstrap = (

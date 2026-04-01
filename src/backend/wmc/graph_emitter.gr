@@ -1,0 +1,85 @@
+module WmcGraphEmitter
+
+from "fs" include Fs
+from "path" include Path
+from "string" include String
+from "list" include List
+from "map" include Map
+
+from "./core_ir.gr" include WmcCoreIr
+from "./core_norm.gr" include WmcCoreNorm
+
+provide record EmitGraphOptions {
+  outDir: String,
+}
+
+provide record EmitGraphResult {
+  outPath: String,
+  zigSource: String,
+  normalizedGraph: WmcCoreNorm.ModuleGraph,
+  normalizationIssues: List<WmcCoreNorm.NormalizationIssue>,
+}
+
+let compileOutputPath = (sourcePath: String, outDir: String) => {
+  let source = Path.fromString(sourcePath)
+  let outBase = Path.fromString(outDir)
+  let baseName = match (Path.basename(source)) {
+    Some(name) => name,
+    None => sourcePath,
+  }
+  let fileName = if (String.endsWith(".wm", baseName)) {
+    String.slice(0, end=String.length(baseName) - 3, baseName) ++ ".zig"
+  } else {
+    baseName ++ ".zig"
+  }
+  match (Path.append(outBase, Path.fromString(fileName))) {
+    Ok(path) => Path.toString(path),
+    Err(_) => outDir ++ "/" ++ fileName,
+  }
+}
+
+let renderBootstrapStub = (
+  sourceFile: String,
+  moduleCount: Number,
+  issueCount: Number,
+) =>
+  "// WMC backend reboot scaffold\n"
+    ++ "const std = @import(\"std\");\n\n"
+    ++ "pub fn main() void {\n"
+    ++ "  std.debug.print(\"WMC reboot scaffold active\\n\", .{});\n"
+    ++ "  std.debug.print(\"source: " ++ sourceFile ++ "\\n\", .{});\n"
+    ++ "  std.debug.print(\"modules: " ++ toString(moduleCount) ++ "\\n\", .{});\n"
+    ++ "  std.debug.print(\"normalization issues: " ++ toString(issueCount) ++ "\\n\", .{});\n"
+    ++ "}\n"
+
+provide let prepareCoreGraphDetailed = (graph: WmcCoreIr.CoreModuleGraph) =>
+  WmcCoreNorm.normalizeGraphDetailed(graph)
+
+provide let emitModuleGraph = (
+  graph: WmcCoreIr.CoreModuleGraph,
+  options: EmitGraphOptions,
+) => {
+  let prepared = prepareCoreGraphDetailed(graph)
+  let moduleCount = List.length(graph.order)
+  let issueCount = List.length(prepared.issues)
+  let sourcePath = match (Map.get(graph.entry, graph.modules)) {
+    Some(module_) => module_.sourcePath,
+    None => graph.entry,
+  }
+  let outPath = compileOutputPath(sourcePath, options.outDir)
+  let zigSource = renderBootstrapStub(sourcePath, moduleCount, issueCount)
+
+  match (Fs.Utf8.writeFile(sync=false, Path.fromString(outPath), zigSource)) {
+    Ok(_) =>
+      Ok(
+        {
+          outPath,
+          zigSource,
+          normalizedGraph: prepared.graph,
+          normalizationIssues: prepared.issues,
+        }: EmitGraphResult
+      ),
+    Err(fsErr) =>
+      Err("Failed to write output: " ++ outPath ++ " " ++ toString(fsErr)),
+  }
+}

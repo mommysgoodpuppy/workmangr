@@ -7,6 +7,7 @@ from "list" include List
 
 from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/source.gr" include Source
+from "../src/core/surface_ast.gr" include SurfaceAst
 from "../src/backend/wmc/core_ir.gr" include WmcCoreIr
 from "../src/backend/wmc/core_norm.gr" include WmcCoreNorm
 
@@ -41,6 +42,7 @@ let topValue = (name: String, value: WmcCoreIr.Expr) =>
   {
     name,
     exported: false,
+    groupId: 1,
     groupKind: CoreAst.Plain,
     binding: {
       node: typedNode(1),
@@ -50,14 +52,35 @@ let topValue = (name: String, value: WmcCoreIr.Expr) =>
     }: WmcCoreIr.LetBinding,
   }: WmcCoreIr.TopValueBinding
 
+let topValueWithGroup = (
+  name: String,
+  groupId: Number,
+  groupKind: CoreAst.LetGroupMods,
+  value: WmcCoreIr.Expr,
+) =>
+  {
+    name,
+    exported: false,
+    groupId,
+    groupKind,
+    binding: {
+      node: typedNode(groupId),
+      name: pattern(groupId + 1, WmcCoreIr.PVar(name)),
+      annotation: None,
+      value,
+    }: WmcCoreIr.LetBinding,
+  }: WmcCoreIr.TopValueBinding
+
 let singleValueModule = (binding: WmcCoreIr.TopValueBinding) =>
   {
     id: "test",
     sourcePath: "test.wm",
+    surfaceProgram: { items: [], core: false }: SurfaceAst.Program,
+    resolvedImports: [],
     imports: [],
     reexports: [],
     valueNames: [binding.name],
-    typeNames: [],
+    typeDecls: [],
     values: [binding],
     diagnostics: [],
     status: WmcCoreIr.StatusOk,
@@ -89,7 +112,7 @@ test("core norm keeps simple single-clause lambda direct", () => {
   match (result.normalized.values) {
     [binding] =>
       match (binding.value.kind) {
-        WmcCoreNorm.NELambda("x", body) =>
+        WmcCoreNorm.NELambda(["x"], body) =>
           match (body.kind) {
             WmcCoreNorm.NEIdent("x") => assertTrue(true),
             _ => fail "expected direct identifier body",
@@ -97,6 +120,92 @@ test("core norm keeps simple single-clause lambda direct", () => {
         _ => fail "expected direct lambda normalization",
       },
     _ => fail "expected single normalized binding",
+  }
+})
+
+test("core norm rewrites recursive top-level groups into let_rec clusters", () => {
+  let evenFn = expr(
+    50,
+    WmcCoreIr.EFn({
+      node: typedNode(50),
+      items: [
+        {
+          node: typedNode(51),
+          kind: WmcCoreIr.FClause(
+            clause(
+              52,
+              pattern(53, WmcCoreIr.PVar("n")),
+              None,
+              None,
+              expr(54, WmcCoreIr.EIdent("odd")),
+            )
+          ),
+        }: WmcCoreIr.FnItem,
+      ],
+    }: WmcCoreIr.FnExpr),
+  )
+  let oddFn = expr(
+    60,
+    WmcCoreIr.EFn({
+      node: typedNode(60),
+      items: [
+        {
+          node: typedNode(61),
+          kind: WmcCoreIr.FClause(
+            clause(
+              62,
+              pattern(63, WmcCoreIr.PVar("n")),
+              None,
+              None,
+              expr(64, WmcCoreIr.EIdent("even")),
+            )
+          ),
+        }: WmcCoreIr.FnItem,
+      ],
+    }: WmcCoreIr.FnExpr),
+  )
+  let module_ = {
+    id: "test",
+    sourcePath: "test.wm",
+    surfaceProgram: { items: [], core: false }: SurfaceAst.Program,
+    resolvedImports: [],
+    imports: [],
+    reexports: [],
+    valueNames: ["even", "odd"],
+    typeDecls: [],
+    values: [
+      topValueWithGroup("even", 100, CoreAst.Rec, evenFn),
+      topValueWithGroup("odd", 100, CoreAst.Rec, oddFn),
+    ],
+    diagnostics: [],
+    status: WmcCoreIr.StatusOk,
+  }: WmcCoreIr.CoreModule
+  let result = WmcCoreNorm.normalizeModuleDetailed(module_)
+  assertEquals(0, List.length(result.issues))
+  match (result.normalized.values) {
+    [evenBinding, oddBinding] => {
+      match (evenBinding.value.kind) {
+        WmcCoreNorm.NELetRec(bindings, body) => {
+          assertEquals(2, List.length(bindings))
+          match (body.kind) {
+            WmcCoreNorm.NEIdent("even") => assertTrue(true),
+            _ => fail "expected even let_rec body to select even",
+          }
+        },
+        _ => fail "expected recursive binding to normalize into let_rec",
+      }
+      match (oddBinding.value.kind) {
+        WmcCoreNorm.NELetRec(bindings, body) => {
+          assertEquals(2, List.length(bindings))
+          match (body.kind) {
+            WmcCoreNorm.NEIdent("odd") => assertTrue(true),
+            _ => fail "expected odd let_rec body to select odd",
+          }
+        },
+        _ => fail "expected recursive binding to normalize into let_rec",
+      }
+    },
+    _ => fail "expected two normalized recursive bindings",
   }
 })
 
@@ -141,7 +250,7 @@ test("core norm rewrites guarded constructor clauses into lambda match", () => {
   match (result.normalized.values) {
     [binding] =>
       match (binding.value.kind) {
-        WmcCoreNorm.NELambda(paramName, body) =>
+        WmcCoreNorm.NELambda([paramName], body) =>
           match (body.kind) {
             WmcCoreNorm.NEMatch(matchExpr) => {
               match (matchExpr.scrutinee.kind) {
@@ -179,6 +288,45 @@ test("core norm rewrites guarded constructor clauses into lambda match", () => {
             _ => fail "expected lambda body to be a match",
           },
         _ => fail "expected function bundle to normalize into lambda",
+      },
+    _ => fail "expected single normalized binding",
+  }
+})
+
+test("core norm groups tuple call arguments into normalized call args", () => {
+  let callExpr = expr(
+    40,
+    WmcCoreIr.EApply(
+      expr(41, WmcCoreIr.EIdent("+")),
+      expr(
+        42,
+        WmcCoreIr.ETuple([
+          expr(43, WmcCoreIr.ELit(CoreAst.Int(1))),
+          expr(44, WmcCoreIr.ELit(CoreAst.Int(2))),
+        ]),
+      ),
+    ),
+  )
+  let result = WmcCoreNorm.normalizeModuleDetailed(singleValueModule(topValue("sum", callExpr)))
+  assertEquals(0, List.length(result.issues))
+  match (result.normalized.values) {
+    [binding] =>
+      match (binding.value.kind) {
+        WmcCoreNorm.NECall(callee, args) => {
+          match (callee.kind) {
+            WmcCoreNorm.NEIdent("+") => assertTrue(true),
+            _ => fail "expected call callee identifier",
+          }
+          match (args) {
+            [left, right] =>
+              match ((left.kind, right.kind)) {
+                (WmcCoreNorm.NELit(CoreAst.Int(1)), WmcCoreNorm.NELit(CoreAst.Int(2))) => assertTrue(true),
+                _ => fail "expected flattened tuple args in normalized call",
+              },
+            _ => fail "expected two grouped call arguments",
+          }
+        },
+        _ => fail "expected normalized call",
       },
     _ => fail "expected single normalized binding",
   }

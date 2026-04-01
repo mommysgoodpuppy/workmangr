@@ -1,0 +1,353 @@
+module WmcCoreStage
+
+from "list" include List
+from "map" include Map
+
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/infer.gr" include Infer
+from "../../core/module/module_infer.gr" include ModuleInfer
+from "../../core/module/module_ir.gr" include WmcModuleIr
+from "../../core/module/module_system.gr" include ModuleSystem
+from "../../core/types.gr" include Types
+from "./core_ir.gr" include WmcCoreIr
+
+let statusForBackend = (status: WmcModuleIr.ModuleStatus) => match (status) {
+  WmcModuleIr.StatusOk => WmcCoreIr.StatusOk,
+  WmcModuleIr.StatusPartial => WmcCoreIr.StatusPartial,
+  WmcModuleIr.StatusFailed => WmcCoreIr.StatusFailed,
+}
+
+let importFromDecl = (decl: CoreAst.ImportDecl) => {
+  let specifiers = List.map((item: CoreAst.ImportName) => {
+    let imported = item.name.text
+    let local = match (item.alias) {
+      Some(alias) => alias.text,
+      None => imported,
+    }
+    { imported, local }: WmcCoreIr.CoreImportSpecifier
+  }, decl.names)
+  { source: decl.modulePath, specifiers }: WmcCoreIr.CoreImport
+}
+
+let importsFromProgram = (program: CoreAst.Program) =>
+  List.filterMap((item: CoreAst.TopItem) =>
+    match (item) {
+      CoreAst.Import(importDecl) => Some(importFromDecl(importDecl)),
+      _ => None,
+    }, program.items)
+
+let constructorDeclFrom = (
+  (
+    ctorName,
+    payload,
+    annotation,
+  ): (CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)
+) => ({
+  name: ctorName.text,
+  payload,
+  annotation,
+}: WmcCoreIr.CoreConstructorDecl)
+
+let recordFieldDeclFrom = (
+  (fieldName, typeExpr): (CoreAst.Name, CoreAst.TypeExpr)
+) => ({
+  name: fieldName.text,
+  typeExpr,
+}: WmcCoreIr.CoreRecordFieldDecl)
+
+let mapOption = (opt, fn) => match (opt) {
+  None => None,
+  Some(v) => Some(fn(v)),
+}
+
+let typedNode = (infer: Infer.InferState, node: CoreAst.Node) => {
+  let ty = match (Map.get(node.id, infer.nodeTypes)) {
+    Some(t) => Some(Types.applySubstType(infer.subst, t)),
+    None => None,
+  }
+  { id: node.id, span: node.span, ty }: WmcCoreIr.TypedNode
+}
+
+let rec projectPattern = (infer: Infer.InferState, pattern: CoreAst.Pattern) => {
+  let kind = match (pattern.kind) {
+    CoreAst.Mark(mark, inner) => WmcCoreIr.PMark(mark, projectPattern(infer, inner)),
+    CoreAst.Hole(hole) => WmcCoreIr.PHole(hole),
+    CoreAst.Wildcard => WmcCoreIr.PWildcard,
+    CoreAst.Var(name) => WmcCoreIr.PVar(name.text),
+    CoreAst.Pin(name) => WmcCoreIr.PPin(name.text),
+    CoreAst.Lit(lit) => WmcCoreIr.PLit(lit),
+    CoreAst.Constructor(name, args) =>
+      WmcCoreIr.PConstructor(
+        name.text,
+        List.map((arg: CoreAst.Pattern) => projectPattern(infer, arg), args),
+      ),
+    CoreAst.Tuple(items) =>
+      WmcCoreIr.PTuple(List.map((item: CoreAst.Pattern) => projectPattern(infer, item), items)),
+    CoreAst.List(items, rest) =>
+      WmcCoreIr.PList(
+        List.map((item: CoreAst.Pattern) => projectPattern(infer, item), items),
+        mapOption(rest, (item: CoreAst.Pattern) => projectPattern(infer, item)),
+      ),
+    CoreAst.AllErrors => WmcCoreIr.PAllErrors,
+  }
+  { node: typedNode(infer, pattern.node), kind }: WmcCoreIr.Pattern
+}
+
+let rec projectExpr = (infer: Infer.InferState, expr: CoreAst.Expr) => {
+  let kind = match (expr.kind) {
+    CoreAst.Mark(mark, inner) => WmcCoreIr.EMark(mark, projectExpr(infer, inner)),
+    CoreAst.Lit(lit) => WmcCoreIr.ELit(lit),
+    CoreAst.Ident(name) => WmcCoreIr.EIdent(name.text),
+    CoreAst.Annotate(value, typeExpr) => WmcCoreIr.EAnnotate(projectExpr(infer, value), typeExpr),
+    CoreAst.Apply(callee, arg) => WmcCoreIr.EApply(projectExpr(infer, callee), projectExpr(infer, arg)),
+    CoreAst.Fn(fnExpr) => WmcCoreIr.EFn(projectFnExpr(infer, fnExpr)),
+    CoreAst.Let(binding, body) => WmcCoreIr.ELet(projectLetBinding(infer, binding), projectExpr(infer, body)),
+    CoreAst.If(cond, thenExpr, elseExpr) =>
+      WmcCoreIr.EIf(
+        projectExpr(infer, cond),
+        projectExpr(infer, thenExpr),
+        mapOption(elseExpr, (item: CoreAst.Expr) => projectExpr(infer, item)),
+      ),
+    CoreAst.Tuple(items) =>
+      WmcCoreIr.ETuple(List.map((item: CoreAst.Expr) => projectExpr(infer, item), items)),
+    CoreAst.RecordLit(items) =>
+      WmcCoreIr.ERecordLit(List.map((item: CoreAst.RecordItem) => projectRecordItem(infer, item), items)),
+    CoreAst.Hole(hole) => WmcCoreIr.EHole(hole),
+  }
+  { node: typedNode(infer, expr.node), kind }: WmcCoreIr.Expr
+}
+and projectRecordItem = (infer: Infer.InferState, item: CoreAst.RecordItem) =>
+  match (item) {
+    CoreAst.Field(name, value) => WmcCoreIr.RField(name.text, projectExpr(infer, value)),
+    CoreAst.Spread(value) => WmcCoreIr.RSpread(projectExpr(infer, value)),
+  }
+and projectFnClause = (infer: Infer.InferState, clause: CoreAst.FnClause) =>
+  {
+    node: typedNode(infer, clause.node),
+    param: projectPattern(infer, clause.param),
+    guard: mapOption(clause.guard, (item: CoreAst.Expr) => projectExpr(infer, item)),
+    matchConstructor: mapOption(clause.matchConstructor, (name: CoreAst.Name) => name.text),
+    body: projectExpr(infer, clause.body),
+  }: WmcCoreIr.FnClause
+and projectFnItem = (infer: Infer.InferState, item: CoreAst.FnItem) => {
+  let kind = match (item.kind) {
+    CoreAst.Clause(clause) => WmcCoreIr.FClause(projectFnClause(infer, clause)),
+    CoreAst.Include(name) => WmcCoreIr.FInclude(name.text),
+    CoreAst.Hole(hole) => WmcCoreIr.FHole(hole),
+  }
+  { node: typedNode(infer, item.node), kind }: WmcCoreIr.FnItem
+}
+and projectFnExpr = (infer: Infer.InferState, fnExpr: CoreAst.FnExpr) =>
+  {
+    node: typedNode(infer, fnExpr.node),
+    items: List.map((item: CoreAst.FnItem) => projectFnItem(infer, item), fnExpr.items),
+  }: WmcCoreIr.FnExpr
+and projectLetBinding = (infer: Infer.InferState, binding: CoreAst.LetBinding) =>
+  {
+    node: typedNode(infer, binding.node),
+    name: projectPattern(infer, binding.name),
+    annotation: binding.annotation,
+    value: projectExpr(infer, binding.value),
+  }: WmcCoreIr.LetBinding
+
+let bindingNameFromPattern = (pattern: CoreAst.Pattern) =>
+  match (pattern.kind) {
+    CoreAst.Var(name) => Some(name.text),
+    _ => None,
+  }
+
+let typeDeclFrom = (exported: Bool, decl: CoreAst.TypeDecl) => {
+  let typeParams = List.map((name: CoreAst.Name) => name.text, decl.typeParams)
+  let infection = mapOption(decl.infection, (name: CoreAst.Name) => name.text)
+  let kind = match (decl.body) {
+    CoreAst.Alias(typeExpr) => WmcCoreIr.TAlias(typeExpr),
+    CoreAst.Variant(ctors) =>
+      WmcCoreIr.TVariant(List.map(constructorDeclFrom, ctors)),
+  }
+  {
+    name: decl.name.text,
+    exported,
+    typeParams,
+    infection,
+    kind,
+  }: WmcCoreIr.CoreTypeDecl
+}
+
+let recordDeclFrom = (exported: Bool, decl: CoreAst.RecordDecl) => {
+  let typeParams = List.map((name: CoreAst.Name) => name.text, decl.typeParams)
+  {
+    name: decl.name.text,
+    exported,
+    typeParams,
+    infection: None,
+    kind: WmcCoreIr.TRecord(List.map(recordFieldDeclFrom, decl.fields)),
+  }: WmcCoreIr.CoreTypeDecl
+}
+
+let typeDeclsFromProgram = (program: CoreAst.Program) => {
+  let rec collectItems = (
+    items: List<CoreAst.TopItem>,
+    accRev: List<WmcCoreIr.CoreTypeDecl>,
+  ) =>
+    match (items) {
+      [] => List.reverse(accRev),
+      [item, ...rest] =>
+        match (item) {
+          CoreAst.DeclGroup(group) => {
+            let nextAcc = List.reduce(
+              (declAcc: List<WmcCoreIr.CoreTypeDecl>, decl: CoreAst.Decl) =>
+                match (decl) {
+                  CoreAst.TypeDecl(typeDecl) =>
+                    [typeDeclFrom(group.exported, typeDecl), ...declAcc],
+                  CoreAst.RecordDecl(recordDecl) =>
+                    [recordDeclFrom(group.exported, recordDecl), ...declAcc],
+                  _ => declAcc,
+                },
+              accRev,
+              group.decls,
+            )
+            collectItems(rest, nextAcc)
+          },
+          _ => collectItems(rest, accRev),
+        },
+    }
+
+  collectItems(program.items, [])
+}
+
+let rec collectLetBindings = (
+  summary: ModuleInfer.ModuleSummary,
+  exported: Bool,
+  groupId: Number,
+  groupKind: CoreAst.LetGroupMods,
+  bindings: List<CoreAst.LetBinding>,
+  accRev: List<WmcCoreIr.TopValueBinding>,
+) =>
+  match (bindings) {
+    [] => accRev,
+    [binding, ...rest] => {
+      let nextAcc = match (bindingNameFromPattern(binding.name)) {
+        Some(name) => [
+          {
+            name,
+            exported,
+            groupId,
+            groupKind,
+            binding: projectLetBinding(summary.infer, binding),
+          }: WmcCoreIr.TopValueBinding,
+          ...accRev,
+        ],
+        None => accRev,
+      }
+      collectLetBindings(summary, exported, groupId, groupKind, rest, nextAcc)
+    },
+  }
+
+and collectValueDecls = (
+  summary: ModuleInfer.ModuleSummary,
+  exported: Bool,
+  groupId: Number,
+  groupKind: CoreAst.LetGroupMods,
+  decls: List<CoreAst.Decl>,
+  accRev: List<WmcCoreIr.TopValueBinding>,
+) =>
+  match (decls) {
+    [] => accRev,
+    [decl, ...rest] =>
+      match (decl) {
+        CoreAst.LetDecl(letDecl) =>
+          collectValueDecls(
+            summary,
+            exported,
+            groupId,
+            groupKind,
+            rest,
+            collectLetBindings(summary, exported, groupId, groupKind, letDecl.bindings, accRev),
+          ),
+        _ => collectValueDecls(summary, exported, groupId, groupKind, rest, accRev),
+      },
+  }
+
+let valuesFromProgram = (summary: ModuleInfer.ModuleSummary) => {
+  let rec collectItems = (
+    items: List<CoreAst.TopItem>,
+    accRev: List<WmcCoreIr.TopValueBinding>,
+  ) =>
+    match (items) {
+      [] => List.reverse(accRev),
+      [item, ...rest] =>
+        match (item) {
+          CoreAst.DeclGroup(group) =>
+            match (group.kind) {
+              CoreAst.LetGroup(groupKind) =>
+                collectItems(
+                  rest,
+                  collectValueDecls(summary, group.exported, group.node.id, groupKind, group.decls, accRev),
+                ),
+              _ => collectItems(rest, accRev),
+            },
+          _ => collectItems(rest, accRev),
+        },
+    }
+
+  collectItems(summary.program.items, [])
+}
+
+let moduleFromSummary = (
+  moduleId: String,
+  sourceNode: ModuleSystem.ModuleNode,
+  backendNode: WmcModuleIr.ModuleNode,
+  summary: ModuleInfer.ModuleSummary,
+) => {
+  let values = valuesFromProgram(summary)
+  let typeDecls = typeDeclsFromProgram(summary.program)
+  {
+    id: moduleId,
+    sourcePath: sourceNode.sourcePath,
+    surfaceProgram: sourceNode.program,
+    resolvedImports: sourceNode.imports,
+    imports: importsFromProgram(summary.program),
+    reexports: sourceNode.reexports,
+    valueNames: backendNode.exports.values,
+    typeDecls,
+    values,
+    diagnostics: summary.diagnostics,
+    status: statusForBackend(backendNode.status),
+  }: WmcCoreIr.CoreModule
+}
+
+provide let lowerInferenceToCoreGraph = (
+  inference: ModuleInfer.InferenceResult,
+  moduleGraph: WmcModuleIr.ModuleGraph,
+) => {
+  let modules: Map.Map<String, WmcCoreIr.CoreModule> = Map.make()
+  let graph = inference.graph
+  let rec collect = (remaining: List<String>) =>
+    match (remaining) {
+      [] => void,
+      [moduleId, ...rest] => {
+        match (
+          (
+            Map.get(moduleId, graph.nodes),
+            Map.get(moduleId, moduleGraph.nodes),
+            Map.get(moduleId, inference.modules),
+          )
+        ) {
+          (Some(sourceNode), Some(backendNode), Some(summary)) =>
+            Map.set(
+              moduleId,
+              moduleFromSummary(moduleId, sourceNode, backendNode, summary),
+              modules
+            ),
+          _ => void,
+        }
+        collect(rest)
+      },
+    }
+  collect(graph.topo)
+  {
+    entry: graph.entry,
+    order: graph.topo,
+    modules,
+  }: WmcCoreIr.CoreModuleGraph
+}

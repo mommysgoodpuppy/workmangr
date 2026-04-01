@@ -1,11 +1,12 @@
 module CompileCli
 
-from "fs" include Fs
 from "path" include Path
-from "string" include String
 from "list" include List
 from "map" include Map
+from "string" include String
+from "fs" include Fs
 
+from "../core/error.gr" include Error
 from "../core/module/module_system.gr" include ModuleSystem
 from "../core/module/module_infer.gr" include ModuleInfer
 from "../backend/wmc_experimental/driver.gr" include WmcExperimentalDriver

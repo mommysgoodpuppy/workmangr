@@ -1,0 +1,74 @@
+module CoreStageTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "list" include List
+from "map" include Map
+
+from "../src/core/module/module_system.gr" include ModuleSystem
+from "../src/backend/wmc/driver.gr" include WmcDriver
+from "../src/backend/wmc/core_ir.gr" include WmcCoreIr
+
+setSourceFile("./tests/core_stage_test.gr")
+
+let expectCoreModule = (result: WmcDriver.CompileGraphResult, moduleId: String) =>
+  match (Map.get(moduleId, result.coreGraph.modules)) {
+    Some(module_) => module_,
+    None => fail("missing core module: " ++ moduleId),
+  }
+
+test("backend core graph carries resolved imports and type declarations", () => {
+  let overrides = Map.make()
+  Map.set(
+    "entry.wm",
+    "export type Maybe<T> = Some<T> | None;\n"
+      ++ "export record Pair<T> { left: T, right: T }\n"
+      ++ "let main = => { 1 };",
+    overrides
+  )
+  Map.set("stdroot/prelude.wm", "let preludeMarker = 1;", overrides)
+
+  let result = WmcDriver.compileWorkmanGraph(
+    "entry",
+    options={
+      ...ModuleSystem.defaultOptions(),
+      stdRoots: ["stdroot"],
+      sourceOverrides: overrides,
+    }
+  )
+
+  let entry = expectCoreModule(result, "entry.wm")
+  let hasPreludeImport = List.some(
+    (path: String) => path == "stdroot/prelude.wm",
+    entry.resolvedImports
+  )
+  let hasNoExplicitImports = entry.imports == []
+  let hasMaybe = List.some(
+    (decl: WmcCoreIr.CoreTypeDecl) =>
+      decl.name == "Maybe"
+        && decl.exported
+        && match (decl.kind) {
+          WmcCoreIr.TVariant(constructors) => List.length(constructors) == 2,
+          _ => false,
+        },
+    entry.typeDecls
+  )
+  let hasPair = List.some(
+    (decl: WmcCoreIr.CoreTypeDecl) =>
+      decl.name == "Pair"
+        && decl.exported
+        && match (decl.kind) {
+          WmcCoreIr.TRecord(fields) => List.length(fields) == 2,
+          _ => false,
+        },
+    entry.typeDecls
+  )
+
+  all([
+    assertTrue(hasPreludeImport),
+    assertTrue(hasNoExplicitImports),
+    assertTrue(hasMaybe),
+    assertTrue(hasPair),
+  ])
+})

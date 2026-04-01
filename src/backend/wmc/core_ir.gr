@@ -1,0 +1,149 @@
+module WmcCoreIr
+
+from "list" include List
+from "map" include Map
+from "../../core/source.gr" include Source
+from "../../core/core_ast.gr" include CoreAst
+from "../../core/surface_ast.gr" include SurfaceAst
+from "../../core/types.gr" include Types
+from "../../core/error.gr" include Error
+
+provide enum ModuleStatus {
+  StatusOk,
+  StatusPartial,
+  StatusFailed,
+}
+
+provide record TypedNode {
+  id: Number,
+  span: Source.Span,
+  ty: Option<Types.Type>,
+}
+
+provide enum rec PatternKind {
+  PMark(CoreAst.Mark, Pattern),
+  PHole(CoreAst.Hole),
+  PWildcard,
+  PVar(String),
+  PPin(String),
+  PLit(CoreAst.AtomLiteral),
+  PConstructor(String, List<Pattern>),
+  PTuple(List<Pattern>),
+  PList(List<Pattern>, Option<Pattern>),
+  PAllErrors,
+}
+and provide record Pattern {
+  node: TypedNode,
+  kind: PatternKind,
+}
+
+provide enum rec ExprKind {
+  EMark(CoreAst.Mark, Expr),
+  ELit(CoreAst.AtomLiteral),
+  EIdent(String),
+  EAnnotate(Expr, CoreAst.TypeExpr),
+  EApply(Expr, Expr),
+  EFn(FnExpr),
+  ELet(LetBinding, Expr),
+  EIf(Expr, Expr, Option<Expr>),
+  ETuple(List<Expr>),
+  ERecordLit(List<RecordItem>),
+  EHole(CoreAst.Hole),
+}
+and provide record Expr {
+  node: TypedNode,
+  kind: ExprKind,
+}
+and provide enum RecordItem {
+  RField(String, Expr),
+  RSpread(Expr),
+}
+and provide record FnClause {
+  node: TypedNode,
+  param: Pattern,
+  guard: Option<Expr>,
+  matchConstructor: Option<String>,
+  body: Expr,
+}
+and provide enum FnItemKind {
+  FClause(FnClause),
+  FInclude(String),
+  FHole(CoreAst.Hole),
+}
+and provide record FnItem {
+  node: TypedNode,
+  kind: FnItemKind,
+}
+and provide record FnExpr {
+  node: TypedNode,
+  items: List<FnItem>,
+}
+and provide record LetBinding {
+  node: TypedNode,
+  name: Pattern,
+  annotation: Option<CoreAst.TypeExpr>,
+  value: Expr,
+}
+
+provide record TopValueBinding {
+  name: String,
+  exported: Bool,
+  groupId: Number,
+  groupKind: CoreAst.LetGroupMods,
+  binding: LetBinding,
+}
+
+provide record CoreImportSpecifier {
+  imported: String,
+  local: String,
+}
+
+provide record CoreImport {
+  source: String,
+  specifiers: List<CoreImportSpecifier>,
+}
+
+provide record CoreConstructorDecl {
+  name: String,
+  payload: Option<CoreAst.TypeExpr>,
+  annotation: Option<CoreAst.Annotation>,
+}
+
+provide record CoreRecordFieldDecl {
+  name: String,
+  typeExpr: CoreAst.TypeExpr,
+}
+
+provide enum CoreTypeDeclKind {
+  TAlias(CoreAst.TypeExpr),
+  TVariant(List<CoreConstructorDecl>),
+  TRecord(List<CoreRecordFieldDecl>),
+}
+
+provide record CoreTypeDecl {
+  name: String,
+  exported: Bool,
+  typeParams: List<String>,
+  infection: Option<String>,
+  kind: CoreTypeDeclKind,
+}
+
+provide record CoreModule {
+  id: String,
+  sourcePath: String,
+  surfaceProgram: SurfaceAst.Program,
+  resolvedImports: List<String>,
+  imports: List<CoreImport>,
+  reexports: List<String>,
+  valueNames: List<String>,
+  typeDecls: List<CoreTypeDecl>,
+  values: List<TopValueBinding>,
+  diagnostics: List<Error.CompilerError>,
+  status: ModuleStatus,
+}
+
+provide record CoreModuleGraph {
+  entry: String,
+  order: List<String>,
+  modules: Map.Map<String, CoreModule>,
+}

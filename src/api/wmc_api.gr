@@ -7,11 +7,9 @@ from "string" include String
 from "fs" include Fs
 from "wasi/process" include Process
 
-from "../module/module_system.gr" include ModuleSystem
+from "../core/module/module_system.gr" include ModuleSystem
 from "../backend/wmc/driver.gr" include WmcDriver
-from "../backend/wmc/emit_zig_direct.gr" include WmcEmitZigDirect
-from "../backend/wmc/tcore.gr" include WmcTCore
-from "../backend/wmc/tcore_norm.gr" include WmcTCoreNorm
+
 from "../core/types.gr" include Types
 from "../core/error.gr" include Error
 
