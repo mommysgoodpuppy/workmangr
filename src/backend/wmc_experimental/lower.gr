@@ -18,7 +18,7 @@ from "./core_ir.gr" include WmcExpCoreIR as IR
 // ── Lowering context ──────────────────────────────────────────────
 
 record LowerCtx {
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   moduleId: String,
 }
 

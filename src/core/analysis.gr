@@ -5,6 +5,7 @@ from "map" include Map
 
 from "./core_ast.gr" include CoreAst
 from "./layer1/infer.gr" include Infer
+from "./layer2/solve.gr" include Layer2Solve
 from "./types.gr" include Types
 from "./source.gr" include Source
 from "./constraints.gr" include Constraints
@@ -13,7 +14,7 @@ from "../frontend/frontend.gr" include Frontend
 
 provide record Analysis {
   program: CoreAst.Program,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
 }
 
 let originClue = (origin: Constraints.Origin) => Error.Note(Constraints.originToString(origin))
@@ -337,7 +338,8 @@ provide let buildNodeSpans = buildNodeSpanIndex
 
 provide let analyze = (source: String) => {
   let loweredProgram = Frontend.parseAndLower(source)
-  let infer = Infer.inferProgram(loweredProgram)
+  let layer1 = Infer.inferProgramLayer1(loweredProgram)
+  let infer = Layer2Solve.solveConstraints(layer1)
   let nodeSpans = buildNodeSpanIndex(loweredProgram)
   let typeDiagnostics = typeInferenceDiagnostics(infer.marks, nodeSpans)
   emitTypeInferenceDiagnostics(typeDiagnostics)

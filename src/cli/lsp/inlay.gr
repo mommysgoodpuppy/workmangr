@@ -16,6 +16,7 @@ from "../../core/surface_ast.gr" include SurfaceAst
 from "../../core/core_ast.gr" include CoreAst
 from "../../core/env.gr" include Env
 from "../../core/layer1/infer.gr" include Infer
+from "../../core/layer2/solve.gr" include Layer2Solve
 from "../../core/semantic_index.gr" include SemanticIndex
 from "../../core/types.gr" include Types
 from "../../frontend/parser.gr" include Parser
@@ -1310,7 +1311,8 @@ provide let rec inlayHintsForSource = (
   Error.setPanicMode(false)
   let parsed = Parser.parseResult(source)
   let lowered = Lower.lowerProgram(parsed.program)
-  let infer = Infer.inferProgram(lowered)
+  let layer1 = Infer.inferProgramLayer1(lowered)
+  let infer = Layer2Solve.solveConstraints(layer1)
   let typeJson = typeInlayHintsFromSemanticIndex(
     SemanticIndex.build(source, parsed.program, infer),
     infer.env,

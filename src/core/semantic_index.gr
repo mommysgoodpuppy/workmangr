@@ -44,7 +44,7 @@ let safeSourceSlice = (source: String, span: Source.Span) => {
   String.slice(start, end=end_, source)
 }
 
-let effectNotesForNode = (infer: Infer.InferState, nodeId: Number) =>
+let effectNotesForNode = (infer: Infer.Layer2Result, nodeId: Number) =>
   match (Map.get(nodeId, infer.effectEventsByNode)) {
     Some(events) =>
       List.map((event: Infer.EffectEvent) => event.message, List.reverse(events)),
@@ -53,14 +53,14 @@ let effectNotesForNode = (infer: Infer.InferState, nodeId: Number) =>
 
 let rec candidateFromNode = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   node: SurfaceAst.Node,
 ) =>
   candidateFromTypeNode(source, infer, node, node.id)
 
 and candidateFromTypeNode = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   spanNode: SurfaceAst.Node,
   typeNodeId: Number,
 ) =>
@@ -80,7 +80,7 @@ and candidateFromTypeNode = (
 
 let bindingNameCandidate = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   binding: SurfaceAst.LetBinding,
 ) =>
   match (Map.get(binding.value.node.id, infer.nodeTypes)) {
@@ -99,7 +99,7 @@ let bindingNameCandidate = (
 
 let rec collectPatternEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   pattern: SurfaceAst.Pattern,
 ) => {
   let self =
@@ -141,7 +141,7 @@ let rec collectPatternEntries = (
 
 let rec collectBlockItemEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   item: SurfaceAst.BlockItem,
 ) =>
   match (item) {
@@ -153,7 +153,7 @@ let rec collectBlockItemEntries = (
 
 and collectFnClauseEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   clause: SurfaceAst.FnClause,
 ) =>
   List.append(
@@ -169,7 +169,7 @@ and collectFnClauseEntries = (
 
 and collectFnEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   fnExpr: SurfaceAst.FnExpr,
 ) =>
   flatten(
@@ -182,7 +182,7 @@ and collectFnEntries = (
 
 and collectBlockEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   block: SurfaceAst.Block,
 ) =>
   List.append(
@@ -192,7 +192,7 @@ and collectBlockEntries = (
 
 and collectExprEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   expr: SurfaceAst.Expr,
 ) => {
   let self = match (expr.kind) {
@@ -296,7 +296,7 @@ and collectExprEntries = (
 
 and collectLetBindingEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   binding: SurfaceAst.LetBinding,
 ) =>
   List.append(
@@ -309,7 +309,7 @@ and collectLetBindingEntries = (
 
 and collectDeclEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   decl: SurfaceAst.Decl,
 ) =>
   match (decl) {
@@ -322,7 +322,7 @@ and collectDeclEntries = (
 
 and collectDeclGroupEntries = (
   source: String,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   group: SurfaceAst.DeclGroup,
 ) =>
   flatten(List.map((decl) => collectDeclEntries(source, infer, decl), group.decls))
@@ -355,7 +355,7 @@ let sortEntries = (entries: List<SemanticEntry>) =>
 provide let build = (
   source: String,
   surfaceProgram: SurfaceAst.Program,
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
 ) => {
   let entries = flatten(
     List.map((item) =>

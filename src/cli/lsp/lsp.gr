@@ -967,10 +967,9 @@ let computeInlayHints = (
       )
       match (summaryOpt) {
         Some(summary) => {
-          let inferState: Infer.InferState = summary.infer
           Inlay.typeInlayHintsFromSemanticIndex(
             SemanticIndex.build(source, summary.surfaceProgram, summary.infer),
-            inferState.env,
+            summary.infer.env,
             0,
             sourceLen
           )
@@ -1265,12 +1264,11 @@ let handleHover = (
                   sendResponse(
                     idText,
                     {
-                      let inferState: Infer.InferState = summary.infer
                       hoverJsonForTypeValue(
                         source,
                         hoverSpan,
                         selectedType,
-                        inferState.env,
+                        summary.infer.env,
                         found.effectNotes
                       )
                     }

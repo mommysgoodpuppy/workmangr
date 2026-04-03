@@ -1,6 +1,328 @@
 module Layer2Solve
 
+from "list" include List
+from "map" include Map
+
+from "../constraints.gr" include Constraints
+from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../solver.gr" include Solver
+from "../types.gr" include Types
 from "../layer1/infer.gr" include Infer
 
-// Layer 2 solving API: solve constraints and zonk node types.
-provide let state = (state: Infer.InferState) => Infer.inferProgramLayer2(state)
+let isConcreteConflict = (left: Types.Type, right: Types.Type) => {
+  let rec loop = (a: Types.Type, b: Types.Type) =>
+    match ((a, b)) {
+      (Types.THole(_), _) => false,
+      (_, Types.THole(_)) => false,
+      (Types.TVar(_), _) => false,
+      (_, Types.TVar(_)) => false,
+      (Types.TNumber, Types.TNumber) => false,
+      (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
+      (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => false,
+      (Types.TNumber, Types.TChar) => false,
+      (Types.TChar, Types.TNumber) => false,
+      (Types.TChar, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
+      (Types.TNominal(name, []), Types.TChar) when Types.isNumericNominalName(name) => false,
+      (Types.TBool, Types.TBool) => false,
+      (Types.TString, Types.TString) => false,
+      (Types.TByte, Types.TByte) => false,
+      (Types.TChar, Types.TChar) => false,
+      (Types.TVoid, Types.TVoid) => false,
+      (Types.TFun(a1, b1), Types.TFun(a2, b2)) => loop(a1, a2) || loop(b1, b2),
+      (Types.TTuple(xs), Types.TTuple(ys)) =>
+        if (List.length(xs) != List.length(ys)) {
+          true
+        } else {
+          let rec anyConflict = (ls: List<Types.Type>, rs: List<Types.Type>) =>
+            match ((ls, rs)) {
+              ([], []) => false,
+              ([xh, ...xt], [yh, ...yt]) => loop(xh, yh) || anyConflict(xt, yt),
+              _ => true,
+            }
+          anyConflict(xs, ys)
+        },
+      (Types.TNominal(nameL, argsL), Types.TNominal(nameR, argsR)) =>
+        if (nameL != nameR || List.length(argsL) != List.length(argsR)) {
+          true
+        } else {
+          let rec anyConflict = (ls: List<Types.Type>, rs: List<Types.Type>) =>
+            match ((ls, rs)) {
+              ([], []) => false,
+              ([xh, ...xt], [yh, ...yt]) => loop(xh, yh) || anyConflict(xt, yt),
+              _ => true,
+            }
+          anyConflict(argsL, argsR)
+        },
+      _ => true,
+    }
+  loop(left, right)
+}
+
+let collectNumericConstraintVars = (
+  constraints: List<Constraints.Constraint>,
+  subst: Types.Subst,
+) => {
+  let seen: Map.Map<Number, Bool> = Map.make()
+  let addTypeVars = (ty: Types.Type) =>
+    List.forEach((id: Number) => {
+      Map.set(id, true, seen)
+      void
+    }, Types.freeVars(Types.applySubstType(subst, ty)))
+  List.forEach((constraint: Constraints.Constraint) => {
+    match (constraint) {
+      Constraints.Numeric(spec, _origin) =>
+        match (spec) {
+          Constraints.IsNumeric(ty) => addTypeVars(ty),
+          Constraints.IntLiteral(ty, _value) => addTypeVars(ty),
+        },
+      _ => void,
+    }
+  }, constraints)
+  seen
+}
+
+let normalizeNumericTypeWithVarSet = (
+  ty: Types.Type,
+  subst: Types.Subst,
+  numericVars: Map.Map<Number, Bool>,
+) => {
+  let rec rewrite = (current: Types.Type) =>
+    match (Types.applySubstType(subst, current)) {
+      Types.TVar(id) =>
+        if (Map.get(id, numericVars) != None) {
+          Types.TNumber
+        } else {
+          Types.TVar(id)
+        },
+      Types.TFun(a, b) => Types.TFun(rewrite(a), rewrite(b)),
+      Types.TTuple(items) => Types.TTuple(List.map(rewrite, items)),
+      Types.TNominal(name, args) => Types.TNominal(name, List.map(rewrite, args)),
+      other => other,
+    }
+  rewrite(ty)
+}
+
+// Add a type mark to the accumulated marks and marksByNode map.
+let addMark = (
+  marks: List<Infer.TypeMark>,
+  marksByNode: Map.Map<Number, List<Infer.TypeMark>>,
+  reason: Infer.TypeMarkReason,
+  origin: Constraints.Origin,
+  mark: CoreAst.Mark,
+  message: String,
+) => {
+  let entry: Infer.TypeMark = { reason, origin, blame: None, related: [], mark, message }
+  let updatedMarks = [entry, ...marks]
+  let updatedByNode = if (origin.nodeId >= 0) {
+    let existing = match (Map.get(origin.nodeId, marksByNode)) {
+      Some(items) => items,
+      None => [],
+    }
+    Map.set(origin.nodeId, [entry, ...existing], marksByNode)
+    marksByNode
+  } else {
+    marksByNode
+  }
+  (updatedMarks, updatedByNode)
+}
+
+// Detect conflicting hole observations and emit unfillable-hole marks.
+let addUnfillableHoleMarks = (
+  marks: List<Infer.TypeMark>,
+  marksByNode: Map.Map<Number, List<Infer.TypeMark>>,
+  holeObservations: Map.Map<Number, List<Infer.HoleObservation>>,
+  solvedSubst: Types.Subst,
+) =>
+  List.reduce(
+    (
+      acc: (List<Infer.TypeMark>, Map.Map<Number, List<Infer.TypeMark>>),
+      entry: (Number, List<Infer.HoleObservation>),
+    ) => {
+      let (accMarks, accByNode) = acc
+      let (holeId, observations) = entry
+      let normalized = List.map(
+        (obs: Infer.HoleObservation) =>
+          {
+            observed: Types.applySubstType(solvedSubst, obs.observed),
+            origin: obs.origin,
+          }: Infer.HoleObservation,
+        observations
+      )
+      let rec hasConflict = (remaining: List<Infer.HoleObservation>) =>
+        match (remaining) {
+          [] => false,
+          [head, ...tail] => {
+            let pairConflict = List.some(
+              (other: Infer.HoleObservation) =>
+                isConcreteConflict(head.observed, other.observed),
+              tail
+            )
+            pairConflict || hasConflict(tail)
+          },
+        }
+      if (hasConflict(normalized)) {
+        addMark(
+          accMarks,
+          accByNode,
+          Infer.UnfillableHole,
+          Constraints.makeOrigin(holeId, "unfillable hole"),
+          CoreAst.UnfillableHole,
+          "Type error: unfillable hole"
+        )
+      } else {
+        acc
+      }
+    },
+    (marks, marksByNode),
+    Map.toList(holeObservations)
+  )
+
+// Layer 2: solve deferred domain/numeric constraints from Layer 1 output.
+provide let solveConstraints = (layer1: Infer.Layer1Result) => {
+  // Hazel-style layering: Layer 1 enforced HM equality constraints.
+  // Layer 2 handles only deferred domain/numeric constraints.
+  let deferred = List.filter((constraint: Constraints.Constraint) =>
+    match (constraint) {
+      Constraints.Domain(_, _) => true,
+      Constraints.Numeric(_, _) => true,
+      _ => false,
+    }, layer1.constraints)
+
+  let solverState = List.reduce(
+    (acc, constraint) => Solver.addConstraint(acc, constraint),
+    Solver.withSubst(layer1.subst),
+    List.reverse(deferred)
+  )
+  match (Solver.solve(solverState)) {
+    Ok(result) => {
+      Env.applySubst(layer1.env, result.subst)
+      let numericVars = collectNumericConstraintVars(layer1.constraints, result.subst)
+      let solvedNodeTypes = Map.make()
+      Map.forEach((id, ty) => {
+        let solved = normalizeNumericTypeWithVarSet(ty, result.subst, numericVars)
+        Map.set(id, solved, solvedNodeTypes)
+      }, layer1.nodeTypes)
+      let solvedTopBindings = Map.make()
+      List.forEach(((name, scheme): (String, Types.Scheme)) => {
+        let solvedTyFromScheme = normalizeNumericTypeWithVarSet(scheme.ty, result.subst, numericVars)
+        let solvedTy = if (scheme.quantifiers == []) {
+          match (Map.get(name, layer1.topBindingRawTypes)) {
+            Some(rawTy) => normalizeNumericTypeWithVarSet(rawTy, result.subst, numericVars),
+            None => solvedTyFromScheme,
+          }
+        } else {
+          solvedTyFromScheme
+        }
+        Map.set(name, { ...scheme, ty: solvedTy }: Types.Scheme, solvedTopBindings)
+      }, Map.toList(layer1.topBindings))
+      let (finalMarks, finalMarksByNode) = addUnfillableHoleMarks(
+        layer1.marks,
+        layer1.marksByNode,
+        layer1.holeObservations,
+        result.subst,
+      )
+      {
+        subst: result.subst,
+        env: layer1.env,
+        flow: layer1.flow,
+        infectionRegistry: layer1.infectionRegistry,
+        nodeTypes: solvedNodeTypes,
+        topBindings: solvedTopBindings,
+        constraints: result.domainConstraints,
+        matchArms: layer1.matchArms,
+        marks: finalMarks,
+        marksByNode: finalMarksByNode,
+        effectEventsByNode: layer1.effectEventsByNode,
+        holeObservations: layer1.holeObservations,
+        varBindingOrigins: layer1.varBindingOrigins,
+        bindingBlames: layer1.bindingBlames,
+      }: Infer.Layer2Result
+    },
+    Err(Solver.Occurs(origin)) => {
+      let (marks, marksByNode) = addMark(
+        layer1.marks,
+        layer1.marksByNode,
+        Infer.OccursCycle,
+        origin,
+        CoreAst.OccursCheck,
+        "Type error: occurs check failed"
+      )
+      {
+        subst: layer1.subst,
+        env: layer1.env,
+        flow: layer1.flow,
+        infectionRegistry: layer1.infectionRegistry,
+        nodeTypes: layer1.nodeTypes,
+        topBindings: layer1.topBindings,
+        constraints: layer1.constraints,
+        matchArms: layer1.matchArms,
+        marks,
+        marksByNode,
+        effectEventsByNode: layer1.effectEventsByNode,
+        holeObservations: layer1.holeObservations,
+        varBindingOrigins: layer1.varBindingOrigins,
+        bindingBlames: layer1.bindingBlames,
+      }: Infer.Layer2Result
+    },
+    Err(Solver.CannotUnify(left, right, origin)) => {
+      let message = "Type error ("
+        ++ origin.description
+        ++ "): cannot unify "
+        ++ Types.typeToReadableString(left)
+        ++ " with "
+        ++ Types.typeToReadableString(right)
+      let (marks, marksByNode) = addMark(
+        layer1.marks,
+        layer1.marksByNode,
+        Infer.TypeMismatch,
+        origin,
+        CoreAst.Inconsistent,
+        message
+      )
+      {
+        subst: layer1.subst,
+        env: layer1.env,
+        flow: layer1.flow,
+        infectionRegistry: layer1.infectionRegistry,
+        nodeTypes: layer1.nodeTypes,
+        topBindings: layer1.topBindings,
+        constraints: layer1.constraints,
+        matchArms: layer1.matchArms,
+        marks,
+        marksByNode,
+        effectEventsByNode: layer1.effectEventsByNode,
+        holeObservations: layer1.holeObservations,
+        varBindingOrigins: layer1.varBindingOrigins,
+        bindingBlames: layer1.bindingBlames,
+      }: Infer.Layer2Result
+    },
+    Err(Solver.NumericViolation(origin, violationMsg)) => {
+      let message = "Type error (" ++ origin.description ++ "): " ++ violationMsg
+      let (marks, marksByNode) = addMark(
+        layer1.marks,
+        layer1.marksByNode,
+        Infer.TypeMismatch,
+        origin,
+        CoreAst.Inconsistent,
+        message
+      )
+      {
+        subst: layer1.subst,
+        env: layer1.env,
+        flow: layer1.flow,
+        infectionRegistry: layer1.infectionRegistry,
+        nodeTypes: layer1.nodeTypes,
+        topBindings: layer1.topBindings,
+        constraints: layer1.constraints,
+        matchArms: layer1.matchArms,
+        marks,
+        marksByNode,
+        effectEventsByNode: layer1.effectEventsByNode,
+        holeObservations: layer1.holeObservations,
+        varBindingOrigins: layer1.varBindingOrigins,
+        bindingBlames: layer1.bindingBlames,
+      }: Infer.Layer2Result
+    },
+  }
+}

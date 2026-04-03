@@ -63,7 +63,7 @@ record LookupResult {
   functionNodeId: Option<Number>,
 }
 
-provide record InferState {
+record InferState {
   nextVar: Number,
   subst: Types.Subst,
   env: Env.TypingEnv,
@@ -72,6 +72,43 @@ provide record InferState {
   nodeTypes: Map.Map<Number, Types.Type>,
   topBindings: Map.Map<String, Types.Scheme>,
   topBindingRawTypes: Map.Map<String, Types.Type>,
+  constraints: List<Constraints.Constraint>,
+  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
+  marks: List<TypeMark>,
+  marksByNode: Map.Map<Number, List<TypeMark>>,
+  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
+  holeObservations: Map.Map<Number, List<HoleObservation>>,
+  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
+  bindingBlames: Map.Map<Number, Constraints.Origin>,
+}
+
+// Output of Layer 1: all generated constraints and type information, ready for Layer 2.
+provide record Layer1Result {
+  subst: Types.Subst,
+  env: Env.TypingEnv,
+  flow: Flow.FlowState,
+  infectionRegistry: InfectionRegistry.Registry,
+  nodeTypes: Map.Map<Number, Types.Type>,
+  topBindings: Map.Map<String, Types.Scheme>,
+  topBindingRawTypes: Map.Map<String, Types.Type>,
+  constraints: List<Constraints.Constraint>,
+  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
+  marks: List<TypeMark>,
+  marksByNode: Map.Map<Number, List<TypeMark>>,
+  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
+  holeObservations: Map.Map<Number, List<HoleObservation>>,
+  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
+  bindingBlames: Map.Map<Number, Constraints.Origin>,
+}
+
+// Output of Layer 2: solved types, finalized substitution, and all diagnostics.
+provide record Layer2Result {
+  subst: Types.Subst,
+  env: Env.TypingEnv,
+  flow: Flow.FlowState,
+  infectionRegistry: InfectionRegistry.Registry,
+  nodeTypes: Map.Map<Number, Types.Type>,
+  topBindings: Map.Map<String, Types.Scheme>,
   constraints: List<Constraints.Constraint>,
   matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
   marks: List<TypeMark>,
@@ -329,6 +366,26 @@ let makeInitialState = () => {
     varBindingOrigins: Map.make(),
     bindingBlames: Map.make(),
   }
+}
+
+let toLayer1Result = (state: InferState) => {
+  {
+    subst: state.subst,
+    env: state.env,
+    flow: state.flow,
+    infectionRegistry: state.infectionRegistry,
+    nodeTypes: state.nodeTypes,
+    topBindings: state.topBindings,
+    topBindingRawTypes: state.topBindingRawTypes,
+    constraints: state.constraints,
+    matchArms: state.matchArms,
+    marks: state.marks,
+    marksByNode: state.marksByNode,
+    effectEventsByNode: state.effectEventsByNode,
+    holeObservations: state.holeObservations,
+    varBindingOrigins: state.varBindingOrigins,
+    bindingBlames: state.bindingBlames,
+  }: Layer1Result
 }
 
 let recordConstraint = (state: InferState, constraint: Constraints.Constraint) =>
@@ -4354,193 +4411,22 @@ let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
     (_item, st) => st
   )
 
-let solveConstraints = (state: InferState) => {
-  let isConcreteConflict = (left: Types.Type, right: Types.Type) => {
-    let rec loop = (a: Types.Type, b: Types.Type) =>
-      match ((a, b)) {
-        (Types.THole(_), _) => false,
-        (_, Types.THole(_)) => false,
-        (Types.TVar(_), _) => false,
-        (_, Types.TVar(_)) => false,
-        (Types.TNumber, Types.TNumber) => false,
-        (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
-        (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => false,
-        (Types.TNumber, Types.TChar) => false,
-        (Types.TChar, Types.TNumber) => false,
-        (Types.TChar, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => false,
-        (Types.TNominal(name, []), Types.TChar) when Types.isNumericNominalName(name) => false,
-        (Types.TBool, Types.TBool) => false,
-        (Types.TString, Types.TString) => false,
-        (Types.TByte, Types.TByte) => false,
-        (Types.TChar, Types.TChar) => false,
-        (Types.TVoid, Types.TVoid) => false,
-        (Types.TFun(a1, b1), Types.TFun(a2, b2)) => loop(a1, a2) || loop(b1, b2),
-        (Types.TTuple(xs), Types.TTuple(ys)) =>
-          if (List.length(xs) != List.length(ys)) {
-            true
-          } else {
-            let rec anyConflict = (leftItems: List<Types.Type>, rightItems: List<Types.Type>) =>
-              match ((leftItems, rightItems)) {
-                ([], []) => false,
-                ([xh, ...xt], [yh, ...yt]) => loop(xh, yh) || anyConflict(xt, yt),
-                _ => true,
-            }
-            anyConflict(xs, ys)
-          },
-        (Types.TNominal(nameL, argsL), Types.TNominal(nameR, argsR)) =>
-          if (nameL != nameR || List.length(argsL) != List.length(argsR)) {
-            true
-          } else {
-            let rec anyConflict = (leftItems: List<Types.Type>, rightItems: List<Types.Type>) =>
-              match ((leftItems, rightItems)) {
-                ([], []) => false,
-                ([xh, ...xt], [yh, ...yt]) => loop(xh, yh) || anyConflict(xt, yt),
-                _ => true,
-              }
-            anyConflict(argsL, argsR)
-          },
-        _ => true,
-      }
-    loop(left, right)
-  }
-
-  let addUnfillableHoleMarks = (
-    marksState: InferState,
-    solvedSubst: Types.Subst,
-  ) =>
-    List.reduce(
-      (acc: InferState, entry: (Number, List<HoleObservation>)) => {
-        let (holeId, observations) = entry
-        let normalized = List.map(
-          (obs: HoleObservation) =>
-            {
-              observed: Types.applySubstType(solvedSubst, obs.observed),
-              origin: obs.origin,
-            }: HoleObservation,
-          observations
-        )
-        let rec hasConflict = (remaining: List<HoleObservation>) =>
-          match (remaining) {
-            [] => false,
-            [head, ...tail] => {
-              let pairConflict = List.some(
-                (other: HoleObservation) =>
-                  isConcreteConflict(head.observed, other.observed),
-                tail
-              )
-              pairConflict || hasConflict(tail)
-            },
-          }
-        if (hasConflict(normalized)) {
-          addTypeMark(
-            acc,
-            UnfillableHole,
-            Constraints.makeOrigin(holeId, "unfillable hole"),
-            CoreAst.UnfillableHole,
-            "Type error: unfillable hole"
-          )
-        } else {
-          acc
-        }
-      },
-      marksState,
-      Map.toList(marksState.holeObservations)
-    )
-
-  // Hazel-style layering: Layer 1 has already enforced HM equality constraints.
-  // Layer 2 handles only deferred domain-style constraints.
-  let deferred = List.filter((constraint: Constraints.Constraint) =>
-    match (constraint) {
-      Constraints.Domain(_, _) => true,
-      Constraints.Numeric(_, _) => true,
-      _ => false,
-    }, state.constraints)
-
-  let solverState = List.reduce(
-    (acc, constraint) => Solver.addConstraint(acc, constraint),
-    Solver.withSubst(state.subst),
-    List.reverse(deferred)
-  )
-  match (Solver.solve(solverState)) {
-    Ok(result) => {
-      Env.applySubst(state.env, result.subst)
-      let numericVars = collectNumericConstraintVars(state)
-      let solvedNodeTypes = Map.make()
-      Map.forEach((id, ty) => {
-        let solved = normalizeNumericTypeWithVarSet(ty, result.subst, numericVars)
-        Map.set(id, solved, solvedNodeTypes)
-      }, state.nodeTypes)
-      let solvedTopBindings = Map.make()
-      List.forEach(((name, scheme): (String, Types.Scheme)) => {
-        let solvedTyFromScheme = normalizeNumericTypeWithVarSet(scheme.ty, result.subst, numericVars)
-        let solvedTy = if (scheme.quantifiers == []) {
-          match (Map.get(name, state.topBindingRawTypes)) {
-            Some(rawTy) => normalizeNumericTypeWithVarSet(rawTy, result.subst, numericVars),
-            None => solvedTyFromScheme,
-          }
-        } else {
-          solvedTyFromScheme
-        }
-        Map.set(name, { ...scheme, ty: solvedTy }: Types.Scheme, solvedTopBindings)
-      }, Map.toList(state.topBindings))
-
-      let solvedState = {
-        ...state,
-        subst: result.subst,
-        nodeTypes: solvedNodeTypes,
-        topBindings: solvedTopBindings,
-        constraints: result.domainConstraints,
-      }
-      addUnfillableHoleMarks(solvedState, result.subst)
-    },
-    Err(Solver.Occurs(origin)) =>
-      addTypeMark(
-        state,
-        OccursCycle,
-        origin,
-        CoreAst.OccursCheck,
-        "Type error: occurs check failed"
-      ),
-    Err(Solver.CannotUnify(left, right, origin)) =>
-      addTypeMark(
-        state,
-        TypeMismatch,
-        origin,
-        CoreAst.Inconsistent,
-        "Type error (" ++ origin.description ++ "): cannot unify "
-          ++ Types.typeToReadableString(left)
-          ++ " with "
-          ++ Types.typeToReadableString(right)
-      ),
-    Err(Solver.NumericViolation(origin, message)) =>
-      addTypeMark(
-        state,
-        TypeMismatch,
-        origin,
-        CoreAst.Inconsistent,
-        "Type error (" ++ origin.description ++ "): " ++ message
-      ),
-  }
-}
-
-provide let inferProgram = (program: CoreAst.Program) => {
+provide let inferProgramLayer1 = (program: CoreAst.Program) => {
   let state = makeInitialState()
-  let inferred = inferTopItems(program.items, state)
-  solveConstraints(inferred)
+  toLayer1Result(inferTopItems(program.items, state))
 }
 
-provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) => {
+provide let inferProgramLayer1WithEnv = (program: CoreAst.Program, env: Types.Env) => {
   let baseEnv = seedBuiltinValues(Env.empty())
   Map.forEach((name, scheme) => {
     Env.defineValue(baseEnv, name, scheme)
     void
   }, env)
   let state = { ...makeInitialState(), env: baseEnv }
-  let inferred = inferTopItems(program.items, state)
-  solveConstraints(inferred)
+  toLayer1Result(inferTopItems(program.items, state))
 }
 
-provide let inferProgramWithTypingEnvAndRegistry = (
+provide let inferProgramLayer1WithTypingEnvAndRegistry = (
   program: CoreAst.Program,
   env: Types.Env,
   importedTypes: Map.Map<String, Env.TypeInfo>,
@@ -4555,35 +4441,17 @@ provide let inferProgramWithTypingEnvAndRegistry = (
     registerImportedTypeInfo(baseEnv, typeName, info)
   }, Map.toList(importedTypes))
   let state = { ...makeInitialState(), env: baseEnv, infectionRegistry: importedRegistry }
-  let inferred = inferTopItems(program.items, state)
-  solveConstraints(inferred)
+  toLayer1Result(inferTopItems(program.items, state))
 }
 
-provide let inferProgramWithTypingEnv = (
+provide let inferProgramLayer1WithTypingEnv = (
   program: CoreAst.Program,
   env: Types.Env,
   importedTypes: Map.Map<String, Env.TypeInfo>,
 ) =>
-  inferProgramWithTypingEnvAndRegistry(
+  inferProgramLayer1WithTypingEnvAndRegistry(
     program,
     env,
     importedTypes,
     InfectionRegistry.empty()
   )
-
-provide let inferProgramLayer1 = (program: CoreAst.Program) => {
-  let state = makeInitialState()
-  inferTopItems(program.items, state)
-}
-
-provide let inferProgramLayer1WithEnv = (program: CoreAst.Program, env: Types.Env) => {
-  let baseEnv = seedBuiltinValues(Env.empty())
-  Map.forEach((name, scheme) => {
-    Env.defineValue(baseEnv, name, scheme)
-    void
-  }, env)
-  let state = { ...makeInitialState(), env: baseEnv }
-  inferTopItems(program.items, state)
-}
-
-provide let inferProgramLayer2 = (state: InferState) => solveConstraints(state)

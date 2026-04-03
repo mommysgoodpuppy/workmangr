@@ -4,9 +4,9 @@ from "../core_ast.gr" include CoreAst
 from "../layer1/infer.gr" include Infer
 from "../types.gr" include Types
 
-// Layer 1 generation API: produce typing state + constraints.
-provide let program = (program: CoreAst.Program) =>
+// Layer 1 generation API: produce Layer1Result with constraints.
+provide let program: (CoreAst.Program) => Infer.Layer1Result = (program) =>
   Infer.inferProgramLayer1(program)
 
-provide let programWithEnv = (program: CoreAst.Program, env: Types.Env) =>
+provide let programWithEnv: (CoreAst.Program, Types.Env) => Infer.Layer1Result = (program, env) =>
   Infer.inferProgramLayer1WithEnv(program, env)

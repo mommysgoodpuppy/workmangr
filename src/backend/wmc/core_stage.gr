@@ -60,7 +60,7 @@ let mapOption = (opt, fn) => match (opt) {
   Some(v) => Some(fn(v)),
 }
 
-let typedNode = (infer: Infer.InferState, node: CoreAst.Node) => {
+let typedNode = (infer: Infer.Layer2Result, node: CoreAst.Node) => {
   let ty = match (Map.get(node.id, infer.nodeTypes)) {
     Some(t) => Some(Types.applySubstType(infer.subst, t)),
     None => None,
@@ -68,7 +68,7 @@ let typedNode = (infer: Infer.InferState, node: CoreAst.Node) => {
   { id: node.id, span: node.span, ty }: WmcCoreIr.TypedNode
 }
 
-let rec projectPattern = (infer: Infer.InferState, pattern: CoreAst.Pattern) => {
+let rec projectPattern = (infer: Infer.Layer2Result, pattern: CoreAst.Pattern) => {
   let kind = match (pattern.kind) {
     CoreAst.Mark(mark, inner) => WmcCoreIr.PMark(mark, projectPattern(infer, inner)),
     CoreAst.Hole(hole) => WmcCoreIr.PHole(hole),
@@ -93,7 +93,7 @@ let rec projectPattern = (infer: Infer.InferState, pattern: CoreAst.Pattern) => 
   { node: typedNode(infer, pattern.node), kind }: WmcCoreIr.Pattern
 }
 
-let rec projectExpr = (infer: Infer.InferState, expr: CoreAst.Expr) => {
+let rec projectExpr = (infer: Infer.Layer2Result, expr: CoreAst.Expr) => {
   let kind = match (expr.kind) {
     CoreAst.Mark(mark, inner) => WmcCoreIr.EMark(mark, projectExpr(infer, inner)),
     CoreAst.Lit(lit) => WmcCoreIr.ELit(lit),
@@ -117,12 +117,12 @@ let rec projectExpr = (infer: Infer.InferState, expr: CoreAst.Expr) => {
   }
   { node: typedNode(infer, expr.node), kind }: WmcCoreIr.Expr
 }
-and projectRecordItem = (infer: Infer.InferState, item: CoreAst.RecordItem) =>
+and projectRecordItem = (infer: Infer.Layer2Result, item: CoreAst.RecordItem) =>
   match (item) {
     CoreAst.Field(name, value) => WmcCoreIr.RField(name.text, projectExpr(infer, value)),
     CoreAst.Spread(value) => WmcCoreIr.RSpread(projectExpr(infer, value)),
   }
-and projectFnClause = (infer: Infer.InferState, clause: CoreAst.FnClause) =>
+and projectFnClause = (infer: Infer.Layer2Result, clause: CoreAst.FnClause) =>
   {
     node: typedNode(infer, clause.node),
     param: projectPattern(infer, clause.param),
@@ -130,7 +130,7 @@ and projectFnClause = (infer: Infer.InferState, clause: CoreAst.FnClause) =>
     matchConstructor: mapOption(clause.matchConstructor, (name: CoreAst.Name) => name.text),
     body: projectExpr(infer, clause.body),
   }: WmcCoreIr.FnClause
-and projectFnItem = (infer: Infer.InferState, item: CoreAst.FnItem) => {
+and projectFnItem = (infer: Infer.Layer2Result, item: CoreAst.FnItem) => {
   let kind = match (item.kind) {
     CoreAst.Clause(clause) => WmcCoreIr.FClause(projectFnClause(infer, clause)),
     CoreAst.Include(name) => WmcCoreIr.FInclude(name.text),
@@ -138,12 +138,12 @@ and projectFnItem = (infer: Infer.InferState, item: CoreAst.FnItem) => {
   }
   { node: typedNode(infer, item.node), kind }: WmcCoreIr.FnItem
 }
-and projectFnExpr = (infer: Infer.InferState, fnExpr: CoreAst.FnExpr) =>
+and projectFnExpr = (infer: Infer.Layer2Result, fnExpr: CoreAst.FnExpr) =>
   {
     node: typedNode(infer, fnExpr.node),
     items: List.map((item: CoreAst.FnItem) => projectFnItem(infer, item), fnExpr.items),
   }: WmcCoreIr.FnExpr
-and projectLetBinding = (infer: Infer.InferState, binding: CoreAst.LetBinding) =>
+and projectLetBinding = (infer: Infer.Layer2Result, binding: CoreAst.LetBinding) =>
   {
     node: typedNode(infer, binding.node),
     name: projectPattern(infer, binding.name),

@@ -6,12 +6,13 @@ from "map" include Map
 from "../../../core/analysis.gr" include Analysis
 from "../../../core/error.gr" include Error
 from "../../../core/layer1/infer.gr" include Infer
+from "../../../core/layer2/solve.gr" include Layer2Solve
 from "../../../core/source.gr" include Source
 from "../../../core/types.gr" include Types
 from "../../../frontend/frontend.gr" include Frontend
 
 provide record Snapshot {
-  infer: Infer.InferState,
+  infer: Infer.Layer2Result,
   nodeSpans: Map.Map<Number, Source.Span>,
   diagnostics: List<Error.CompilerError>,
 }
@@ -35,7 +36,8 @@ provide let analyzeSource = (source: String) => {
   // parse/lower can emit recoverable diagnostics globally; do not leak them across requests.
   Error.clearErrors()
   let program = Frontend.parseAndLower(source)
-  let infer = Infer.inferProgram(program)
+  let layer1 = Infer.inferProgramLayer1(program)
+  let infer = Layer2Solve.solveConstraints(layer1)
   let nodeSpans = Analysis.buildNodeSpans(program)
   let diagnostics = Analysis.typeInferenceDiagnostics(infer.marks, nodeSpans)
   Error.clearErrors()
@@ -71,4 +73,3 @@ provide let typeAtOffset = (snapshot: Snapshot, offset: Number) => {
 
   choose(Map.toList(snapshot.infer.nodeTypes), None)
 }
-

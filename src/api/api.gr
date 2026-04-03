@@ -12,6 +12,7 @@ from "../core/surface_ast.gr" include SurfaceAst
 from "../core/core_ast.gr" include CoreAst
 from "../core/analysis.gr" include Analysis
 from "../core/layer1/infer.gr" include Infer
+from "../core/layer2/solve.gr" include Layer2Solve
 from "../core/constraints.gr" include Constraints
 from "../core/types.gr" include Types
 from "../core/source.gr" include Source
@@ -783,7 +784,7 @@ provide let compileToJson = (source: String) => {
   // Lower
   let lowered = Lower.lowerProgram(parsed)
   let inferLayer1 = Infer.inferProgramLayer1(lowered)
-  let inferLayer2 = Infer.inferProgramLayer2(inferLayer1)
+  let inferLayer2 = Layer2Solve.solveConstraints(inferLayer1)
   let diagnostics = Error.getErrors()
   let markedDiagnostics = Error.getMarkedErrors()
   let nodeSpans = Analysis.buildNodeSpans(lowered)
