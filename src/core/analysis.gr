@@ -4,7 +4,7 @@ from "list" include List
 from "map" include Map
 
 from "./core_ast.gr" include CoreAst
-from "./infer.gr" include Infer
+from "./layer1/infer.gr" include Infer
 from "./types.gr" include Types
 from "./source.gr" include Source
 from "./constraints.gr" include Constraints

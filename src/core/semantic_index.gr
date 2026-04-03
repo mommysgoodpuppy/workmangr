@@ -5,7 +5,7 @@ from "map" include Map
 from "number" include Number
 from "string" include String
 
-from "./infer.gr" include Infer
+from "./layer1/infer.gr" include Infer
 from "./source.gr" include Source
 from "./surface_ast.gr" include SurfaceAst
 from "./types.gr" include Types

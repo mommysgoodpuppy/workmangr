@@ -1,7 +1,7 @@
 module Layer1Generate
 
 from "../core_ast.gr" include CoreAst
-from "../infer.gr" include Infer
+from "../layer1/infer.gr" include Infer
 from "../types.gr" include Types
 
 // Layer 1 generation API: produce typing state + constraints.

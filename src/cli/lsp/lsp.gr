@@ -16,7 +16,7 @@ from "json" include Json
 from "../../core/source.gr" include Source
 from "../../core/error.gr" include Error
 from "../../core/env.gr" include Env
-from "../../core/infer.gr" include Infer
+from "../../core/layer1/infer.gr" include Infer
 from "../../core/module/module_infer.gr" include ModuleInfer
 from "../../core/semantic_index.gr" include SemanticIndex
 from "../../core/types.gr" include Types

@@ -9,7 +9,7 @@ from "wasi/process" include Process
 
 from "../core/analysis.gr" include Analysis
 from "../core/error.gr" include Error
-from "../core/infer.gr" include Infer
+from "../core/layer1/infer.gr" include Infer
 from "../core/module/module_infer.gr" include ModuleInfer
 from "../core/module/module_system.gr" include ModuleSystem
 from "./report.gr" include Report

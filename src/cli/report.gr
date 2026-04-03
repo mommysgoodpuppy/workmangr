@@ -9,7 +9,7 @@ from "../core/core_ast.gr" include CoreAst
 from "../core/analysis.gr" include Analysis
 from "../core/env.gr" include Env
 from "../core/error.gr" include Error
-from "../core/infer.gr" include Infer
+from "../core/layer1/infer.gr" include Infer
 from "../core/layer1/expr.gr" include Layer1Expr
 from "../core/module/module_infer.gr" include ModuleInfer
 from "../core/semantic_index.gr" include SemanticIndex

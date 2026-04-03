@@ -14,7 +14,7 @@ from "../analysis.gr" include Analysis
 from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
 from "../error.gr" include Error
-from "../infer.gr" include Infer
+from "../layer1/infer.gr" include Infer
 from "../infection_registry.gr" include InfectionRegistry
 from "../source.gr" include Source
 from "../surface_ast.gr" include SurfaceAst

@@ -4,7 +4,7 @@ from "../submodules/graintest/lib/test.gr" include Test
 use Test.*
 
 from "../src/frontend/frontend.gr" include Frontend
-from "../src/core/infer.gr" include Infer
+from "../src/core/layer1/infer.gr" include Infer
 from "../src/core/layer1/mod.gr" include Layer1
 from "../src/core/layer2/mod.gr" include Layer2
 from "../src/core/core_ast.gr" include CoreAst

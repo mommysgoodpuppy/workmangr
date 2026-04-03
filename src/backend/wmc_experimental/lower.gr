@@ -7,7 +7,7 @@ from "string" include String
 from "../../core/source.gr" include Source
 from "../../core/core_ast.gr" include CoreAst
 from "../../core/types.gr" include Types
-from "../../core/infer.gr" include Infer
+from "../../core/layer1/infer.gr" include Infer
 from "../../core/env.gr" include Env
 from "../../core/flow.gr" include Flow
 from "../../core/module/module_system.gr" include ModuleSystem

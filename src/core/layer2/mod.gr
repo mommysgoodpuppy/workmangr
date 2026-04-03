@@ -1,6 +1,6 @@
 module Layer2
 
-from "../infer.gr" include Infer
+from "../layer1/infer.gr" include Infer
 from "./solve.gr" include Layer2Solve
 
 // Layer 2: solve constraints from Layer 1 and finalize substitutions.

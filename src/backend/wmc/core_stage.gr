@@ -4,7 +4,7 @@ from "list" include List
 from "map" include Map
 
 from "../../core/core_ast.gr" include CoreAst
-from "../../core/infer.gr" include Infer
+from "../../core/layer1/infer.gr" include Infer
 from "../../core/module/module_infer.gr" include ModuleInfer
 from "../../core/module/module_ir.gr" include WmcModuleIr
 from "../../core/module/module_system.gr" include ModuleSystem

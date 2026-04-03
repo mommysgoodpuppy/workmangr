@@ -15,7 +15,7 @@ from "../../core/error.gr" include Error
 from "../../core/surface_ast.gr" include SurfaceAst
 from "../../core/core_ast.gr" include CoreAst
 from "../../core/env.gr" include Env
-from "../../core/infer.gr" include Infer
+from "../../core/layer1/infer.gr" include Infer
 from "../../core/semantic_index.gr" include SemanticIndex
 from "../../core/types.gr" include Types
 from "../../frontend/parser.gr" include Parser

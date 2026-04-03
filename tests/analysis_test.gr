@@ -9,7 +9,7 @@ from "../src/core/analysis.gr" include Analysis
 from "../src/core/constraints.gr" include Constraints
 from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/error.gr" include Error
-from "../src/core/infer.gr" include Infer
+from "../src/core/layer1/infer.gr" include Infer
 from "../src/core/source.gr" include Source
 from "string" include String
 

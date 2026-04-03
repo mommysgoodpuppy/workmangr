@@ -8,18 +8,18 @@ from "bytes" include Bytes
 from "wasi/file" include File
 from "wasi/process" include Process
 
-from "./core_ast.gr" include CoreAst
-from "./constraints.gr" include Constraints
-from "./env.gr" include Env
-from "./flow.gr" include Flow
-from "./infection_registry.gr" include InfectionRegistry
-from "./solver.gr" include Solver
-from "./types.gr" include Types
-from "./layer1/expr.gr" include Layer1Expr
-from "./layer1/patterns.gr" include Layer1Patterns
-from "./layer1/declarations.gr" include Layer1Decl
-from "./layer1/bindings.gr" include Layer1Bindings
-from "./layer1/top.gr" include Layer1Top
+from "../core_ast.gr" include CoreAst
+from "../constraints.gr" include Constraints
+from "../env.gr" include Env
+from "../flow.gr" include Flow
+from "../infection_registry.gr" include InfectionRegistry
+from "../solver.gr" include Solver
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+from "./patterns.gr" include Layer1Patterns
+from "./declarations.gr" include Layer1Decl
+from "./bindings.gr" include Layer1Bindings
+from "./top.gr" include Layer1Top
 
 provide enum TypeMarkReason {
   TypeMismatch,
