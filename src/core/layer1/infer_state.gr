@@ -1,0 +1,341 @@
+module InferState
+
+from "list" include List
+from "map" include Map
+from "array" include Array
+from "string" include String
+from "bytes" include Bytes
+from "wasi/file" include File
+
+from "../core_ast.gr" include CoreAst
+from "../constraints.gr" include Constraints
+from "../env.gr" include Env
+from "../flow.gr" include Flow
+from "../infection_registry.gr" include InfectionRegistry
+from "../types.gr" include Types
+from "./patterns.gr" include Layer1Patterns
+
+provide enum TypeMarkReason {
+  TypeMismatch,
+  OccursCycle,
+  UnknownIdentifier,
+  UnfillableHole,
+  Internal,
+}
+
+provide record TypeMark {
+  reason: TypeMarkReason,
+  origin: Constraints.Origin,
+  blame: Option<Constraints.Origin>,
+  related: List<Constraints.Origin>,
+  mark: CoreAst.Mark,
+  message: String,
+}
+
+provide record HoleObservation {
+  observed: Types.Type,
+  origin: Constraints.Origin,
+}
+
+provide record EffectEvent {
+  kind: String,
+  message: String,
+}
+
+provide record InferState {
+  nextVar: Number,
+  subst: Types.Subst,
+  env: Env.TypingEnv,
+  flow: Flow.FlowState,
+  infectionRegistry: InfectionRegistry.Registry,
+  nodeTypes: Map.Map<Number, Types.Type>,
+  topBindings: Map.Map<String, Types.Scheme>,
+  topBindingRawTypes: Map.Map<String, Types.Type>,
+  constraints: List<Constraints.Constraint>,
+  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
+  marks: List<TypeMark>,
+  marksByNode: Map.Map<Number, List<TypeMark>>,
+  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
+  holeObservations: Map.Map<Number, List<HoleObservation>>,
+  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
+  bindingBlames: Map.Map<Number, Constraints.Origin>,
+}
+
+// Output of Layer 1: all generated constraints and type information, ready for Layer 2.
+provide record Layer1Result {
+  subst: Types.Subst,
+  env: Env.TypingEnv,
+  flow: Flow.FlowState,
+  infectionRegistry: InfectionRegistry.Registry,
+  nodeTypes: Map.Map<Number, Types.Type>,
+  topBindings: Map.Map<String, Types.Scheme>,
+  topBindingRawTypes: Map.Map<String, Types.Type>,
+  constraints: List<Constraints.Constraint>,
+  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
+  marks: List<TypeMark>,
+  marksByNode: Map.Map<Number, List<TypeMark>>,
+  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
+  holeObservations: Map.Map<Number, List<HoleObservation>>,
+  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
+  bindingBlames: Map.Map<Number, Constraints.Origin>,
+}
+
+// Output of Layer 2: solved types, finalized substitution, and all diagnostics.
+provide record Layer2Result {
+  subst: Types.Subst,
+  env: Env.TypingEnv,
+  flow: Flow.FlowState,
+  infectionRegistry: InfectionRegistry.Registry,
+  nodeTypes: Map.Map<Number, Types.Type>,
+  topBindings: Map.Map<String, Types.Scheme>,
+  constraints: List<Constraints.Constraint>,
+  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
+  marks: List<TypeMark>,
+  marksByNode: Map.Map<Number, List<TypeMark>>,
+  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
+  holeObservations: Map.Map<Number, List<HoleObservation>>,
+  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
+  bindingBlames: Map.Map<Number, Constraints.Origin>,
+}
+
+let mut inferDebugEnabled: Bool = false
+
+provide let setInferDebug = (enabled: Bool) => {
+  inferDebugEnabled = enabled
+}
+
+provide let inferDebug = (message: String) => {
+  if (inferDebugEnabled) {
+    let _ = File.fdWrite(File.stderr, Bytes.fromString("[Infer] " ++ message ++ "\\n"))
+    void
+  } else {
+    void
+  }
+}
+
+provide let mapSize = (m) => List.length(Map.toList(m))
+
+provide let isReservedValueName = (name: String) => name == "Panic"
+
+provide let reservedNameError = (name: String) =>
+  "Type error: reserved identifier " ++ name ++ " cannot be declared"
+
+provide let renderType = (t: Types.Type, state: InferState) =>
+  Types.typeToReadableString(Types.applySubstType(state.subst, t))
+
+provide let renderOrigin = (origin: Constraints.Origin) =>
+  Constraints.originToString(origin)
+
+provide let renderOriginTrail = (origins: List<Constraints.Origin>) =>
+  match (origins) {
+    [] => "<none>",
+    _ => Array.join(" <= ", Array.fromList(List.map(renderOrigin, origins))),
+  }
+
+provide let recentOrigins = (state: InferState, n: Number) => {
+  let recent = List.filterMap((constraint: Constraints.Constraint) =>
+    match (constraint) {
+      Constraints.Equality(_, _, o) => Some(o),
+      Constraints.Domain(_, o) => Some(o),
+      Constraints.Numeric(_, o) => Some(o),
+    }, state.constraints)
+  let rec take = (items: List<Constraints.Origin>, count: Number, acc: List<Constraints.Origin>) =>
+    if (count <= 0) {
+      List.reverse(acc)
+    } else {
+      match (items) {
+        [] => List.reverse(acc),
+        [head, ...tail] => take(tail, count - 1, [head, ...acc]),
+      }
+    }
+  take(recent, n, [])
+}
+
+provide let nominalTypeMismatchMessage = (
+  left: Types.Type,
+  right: Types.Type,
+  origin: Constraints.Origin,
+  state: InferState,
+) =>
+  "Type error ("
+    ++ origin.description
+    ++ "): cannot unify nominal types "
+    ++ renderType(left, state)
+    ++ " and "
+    ++ renderType(right, state)
+
+provide let traceNominalMismatch = (
+  left: Types.Type,
+  right: Types.Type,
+  origin: Constraints.Origin,
+  state: InferState,
+) => {
+  let trail = recentOrigins(state, 6)
+  inferDebug(
+    "nominal-mismatch origin="
+      ++ renderOrigin(origin)
+      ++ " left="
+      ++ renderType(left, state)
+      ++ " right="
+      ++ renderType(right, state)
+      ++ " recent="
+      ++ renderOriginTrail(trail)
+  )
+}
+
+provide let tracePatternStep = (
+  label: String,
+  pattern: CoreAst.Pattern,
+  expectedType: Types.Type,
+  state: InferState,
+) => {
+  inferDebug(
+    label
+      ++ " patternNode="
+      ++ toString(pattern.node.id)
+      ++ " expected="
+      ++ renderType(expectedType, state)
+  )
+}
+
+provide let logState = (label: String, state: InferState, nodeId: Number=-1) => {
+  inferDebug(
+    label
+      ++ " node="
+      ++ toString(nodeId)
+      ++ " env="
+      ++ toString(mapSize(Env.snapshotValues(state.env)))
+      ++ " subst="
+      ++ toString(mapSize(state.subst))
+      ++ " constraints="
+      ++ toString(List.length(state.constraints))
+      ++ " marks="
+      ++ toString(List.length(state.marks))
+      ++ " nextVar="
+      ++ toString(state.nextVar)
+  )
+}
+
+provide let makeInitialState = (seedBuiltinValues: Env.TypingEnv => Env.TypingEnv) => {
+  let subst = Types.emptySubst()
+  let env = seedBuiltinValues(Env.empty())
+  let flow = Flow.emptyState()
+  let infectionRegistry = InfectionRegistry.empty()
+  let nodeTypes = Map.make()
+  let topBindings = Map.make()
+  let topBindingRawTypes = Map.make()
+  {
+    nextVar: 0,
+    subst,
+    env,
+    flow,
+    infectionRegistry,
+    nodeTypes,
+    topBindings,
+    topBindingRawTypes,
+    constraints: [],
+    matchArms: Map.make(),
+    marks: [],
+    marksByNode: Map.make(),
+    effectEventsByNode: Map.make(),
+    holeObservations: Map.make(),
+    varBindingOrigins: Map.make(),
+    bindingBlames: Map.make(),
+  }
+}
+
+provide let toLayer1Result = (state: InferState) => {
+  {
+    subst: state.subst,
+    env: state.env,
+    flow: state.flow,
+    infectionRegistry: state.infectionRegistry,
+    nodeTypes: state.nodeTypes,
+    topBindings: state.topBindings,
+    topBindingRawTypes: state.topBindingRawTypes,
+    constraints: state.constraints,
+    matchArms: state.matchArms,
+    marks: state.marks,
+    marksByNode: state.marksByNode,
+    effectEventsByNode: state.effectEventsByNode,
+    holeObservations: state.holeObservations,
+    varBindingOrigins: state.varBindingOrigins,
+    bindingBlames: state.bindingBlames,
+  }: Layer1Result
+}
+
+provide let recordConstraint = (state: InferState, constraint: Constraints.Constraint) =>
+  { ...state, constraints: [constraint, ...state.constraints] }
+
+provide let recordNumericConstraint = (
+  state: InferState,
+  numeric: Constraints.NumericConstraint,
+  origin: Constraints.Origin,
+) => recordConstraint(state, Constraints.Numeric(numeric, origin))
+
+provide let recordNumericIs = (state: InferState, ty: Types.Type, origin: Constraints.Origin) =>
+  recordNumericConstraint(state, Constraints.IsNumeric(ty), origin)
+
+provide let recordNumericIntLiteral = (
+  state: InferState,
+  ty: Types.Type,
+  value: Number,
+  origin: Constraints.Origin,
+) => recordNumericConstraint(state, Constraints.IntLiteral(ty, value), origin)
+
+provide let freshVar = (state: InferState) => {
+  let id = state.nextVar
+  (Types.TVar(id), { ...state, nextVar: id + 1 })
+}
+
+provide let apply = (state: InferState, t: Types.Type) =>
+  Types.applySubstType(state.subst, t)
+
+provide let occurs = (varId: Number, t: Types.Type, state: InferState) => {
+  let fv = Types.freeVars(apply(state, t))
+  Types.containsVar(fv, varId)
+}
+
+provide let bindVar = (
+  varId: Number,
+  t: Types.Type,
+  state: InferState,
+  origin: Constraints.Origin,
+  blame: Option<Constraints.Origin>,
+  addTypeMarkWithBlame: (
+    InferState,
+    TypeMarkReason,
+    Constraints.Origin,
+    Option<Constraints.Origin>,
+    CoreAst.Mark,
+    String,
+  ) => InferState,
+) => {
+  let tApplied = apply(state, t)
+  if (tApplied == Types.TVar(varId)) {
+    state
+  } else if (occurs(varId, tApplied, state)) {
+    addTypeMarkWithBlame(
+      state,
+      OccursCycle,
+      origin,
+      blame,
+      CoreAst.OccursCheck,
+      "Type error: occurs check failed"
+    )
+  } else {
+    Types.extendSubst(state.subst, varId, tApplied)
+    let bindingOrigin = match (blame) {
+      Some(blameOrigin) => blameOrigin,
+      None => origin,
+    }
+    Map.set(varId, bindingOrigin, state.varBindingOrigins)
+    { ...state, varBindingOrigins: state.varBindingOrigins }
+  }
+}
+
+provide let recordNodeType = (id: Number, t: Types.Type, state: InferState) => {
+  let applied = apply(state, t)
+  Map.set(id, applied, state.nodeTypes)
+  applied
+}

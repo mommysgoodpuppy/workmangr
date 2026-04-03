@@ -1,0 +1,403 @@
+module Layer1Marks
+
+from "list" include List
+from "map" include Map
+from "array" include Array
+
+from "../core_ast.gr" include CoreAst
+from "../constraints.gr" include Constraints
+from "../env.gr" include Env
+from "../flow.gr" include Flow
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+from "./patterns.gr" include Layer1Patterns
+from "./infer_state.gr" include InferState as Layer1InferState
+
+let apply = (state: Layer1InferState.InferState, t: Types.Type) =>
+  Types.applySubstType(state.subst, t)
+
+let renderType = (t: Types.Type, state: Layer1InferState.InferState) =>
+  Types.typeToReadableString(apply(state, t))
+
+let renderOrigin = (origin: Constraints.Origin) =>
+  Constraints.originToString(origin)
+
+let renderOriginTrail = (origins: List<Constraints.Origin>) =>
+  match (origins) {
+    [] => "<none>",
+    _ => Array.join(" <= ", Array.fromList(List.map(renderOrigin, origins))),
+  }
+
+let recentOrigins = (state: Layer1InferState.InferState, n: Number) => {
+  let recent = List.filterMap((constraint: Constraints.Constraint) =>
+    match (constraint) {
+      Constraints.Equality(_, _, o) => Some(o),
+      Constraints.Domain(_, o) => Some(o),
+      Constraints.Numeric(_, o) => Some(o),
+    }, state.constraints)
+  let rec take = (items: List<Constraints.Origin>, count: Number, acc: List<Constraints.Origin>) =>
+    if (count <= 0) {
+      List.reverse(acc)
+    } else {
+      match (items) {
+        [] => List.reverse(acc),
+        [head, ...tail] => take(tail, count - 1, [head, ...acc]),
+      }
+    }
+  take(recent, n, [])
+}
+
+let inferDebug = (_message: String) => void
+
+let reservedNameError = (name: String) =>
+  "Type error: reserved identifier " ++ name ++ " cannot be declared"
+
+provide let originForNode = (nodeId: Number, description: String) =>
+  Constraints.makeOrigin(nodeId, description)
+
+provide let exprOrigin = (expr: CoreAst.Expr, description: String) =>
+  originForNode(expr.node.id, description)
+
+provide let rec blameExprOrigin = (expr: CoreAst.Expr, description: String) =>
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => blameExprOrigin(inner, description),
+    CoreAst.Annotate(valueExpr, _) => blameExprOrigin(valueExpr, description),
+    CoreAst.Cast(valueExpr, _) => blameExprOrigin(valueExpr, description),
+    CoreAst.Ident(name) => originForNode(name.node.id, description),
+    _ => exprOrigin(expr, description),
+  }
+
+provide let patternOrigin = (pattern: CoreAst.Pattern, description: String) =>
+  originForNode(pattern.node.id, description)
+
+provide let typeExprOrigin = (typeExpr: CoreAst.TypeExpr, description: String) =>
+  originForNode(typeExpr.node.id, description)
+
+provide let rec mismatchOriginFromType = (
+  ty: Types.Type,
+  fallback: Constraints.Origin,
+  state: Layer1InferState.InferState,
+) =>
+  match (ty) {
+    Types.TVar(varId) =>
+      match (Map.get(varId, state.varBindingOrigins)) {
+        Some(origin) => origin,
+        None => fallback,
+      },
+    Types.TFun(fromType, toType) => {
+      let fromTypeOrigin = mismatchOriginFromType(fromType, fallback, state)
+      if (fromTypeOrigin != fallback) {
+        fromTypeOrigin
+      } else {
+        mismatchOriginFromType(toType, fallback, state)
+      }
+    },
+    Types.TTuple(items) => {
+      let rec loop = (remaining: List<Types.Type>) =>
+        match (remaining) {
+          [] => fallback,
+          [head, ...tail] => {
+            let candidate = mismatchOriginFromType(head, fallback, state)
+            if (candidate != fallback) {
+              candidate
+            } else {
+              loop(tail)
+            }
+          },
+        }
+      loop(items)
+    },
+    Types.TNominal(_, args) => {
+      let rec loop = (remaining: List<Types.Type>) =>
+        match (remaining) {
+          [] => fallback,
+          [head, ...tail] => {
+            let candidate = mismatchOriginFromType(head, fallback, state)
+            if (candidate != fallback) {
+              candidate
+            } else {
+              loop(tail)
+            }
+          },
+        }
+      loop(args)
+    },
+    _ => fallback,
+  }
+
+provide let mismatchOrigin = (
+  leftRaw: Types.Type,
+  rightRaw: Types.Type,
+  fallback: Constraints.Origin,
+  state: Layer1InferState.InferState,
+) => {
+  let leftOrigin = mismatchOriginFromType(leftRaw, fallback, state)
+  if (leftOrigin != fallback) {
+    leftOrigin
+  } else {
+    mismatchOriginFromType(rightRaw, fallback, state)
+  }
+}
+
+provide let selectBlameOrigin = (
+  leftRaw: Types.Type,
+  rightRaw: Types.Type,
+  fallback: Constraints.Origin,
+  explicit: Option<Constraints.Origin>,
+  state: Layer1InferState.InferState,
+) =>
+  match (explicit) {
+    Some(origin) => origin,
+    None => mismatchOrigin(leftRaw, rightRaw, fallback, state),
+  }
+
+provide let addTypeMarkWithBlame = (
+  state: Layer1InferState.InferState,
+  reason: Layer1InferState.TypeMarkReason,
+  origin: Constraints.Origin,
+  blame: Option<Constraints.Origin>,
+  mark: CoreAst.Mark,
+  message: String,
+) => {
+  let related = recentOrigins(state, 3)
+  inferDebug(
+    "mark reason="
+      ++ toString(reason)
+      ++ " origin="
+      ++ renderOrigin(origin)
+      ++ " blame="
+      ++ renderOriginTrail(
+        match (blame) {
+          Some(blameOrigin) => [blameOrigin],
+          None => [],
+        }
+      )
+      ++ " message="
+      ++ message
+      ++ " related="
+      ++ renderOriginTrail(related)
+  )
+  let entry: Layer1InferState.TypeMark = { reason, origin, blame, related, mark, message }
+  let updatedMarks = [entry, ...state.marks]
+  let updatedByNode = if (origin.nodeId >= 0) {
+    let existing = match (Map.get(origin.nodeId, state.marksByNode)) {
+      Some(items) => items,
+      None => [],
+    }
+    Map.set(origin.nodeId, [entry, ...existing], state.marksByNode)
+    state.marksByNode
+  } else {
+    state.marksByNode
+  }
+  { ...state, marks: updatedMarks, marksByNode: updatedByNode }
+}
+
+provide let addTypeMark = (
+  state: Layer1InferState.InferState,
+  reason: Layer1InferState.TypeMarkReason,
+  origin: Constraints.Origin,
+  mark: CoreAst.Mark,
+  message: String,
+) => addTypeMarkWithBlame(state, reason, origin, None, mark, message)
+
+provide let addReservedNameMark = (
+  state: Layer1InferState.InferState,
+  node: CoreAst.Node,
+  name: String,
+) =>
+  addTypeMark(
+    state,
+    Layer1InferState.TypeMismatch,
+    originForNode(node.id, "reserved identifier"),
+    CoreAst.Inconsistent,
+    reservedNameError(name)
+  )
+
+provide let noteHoleObservation = (
+  state: Layer1InferState.InferState,
+  holeId: Number,
+  observed: Types.Type,
+  origin: Constraints.Origin,
+) => {
+  let obs: Layer1InferState.HoleObservation = {
+    observed: Types.applySubstType(state.subst, observed),
+    origin,
+  }
+  let existing = match (Map.get(holeId, state.holeObservations)) {
+    Some(items) => items,
+    None => [],
+  }
+  Map.set(holeId, [obs, ...existing], state.holeObservations)
+  { ...state, holeObservations: state.holeObservations }
+}
+
+provide let noteEffectEvent = (
+  state: Layer1InferState.InferState,
+  nodeId: Number,
+  kind: String,
+  message: String,
+) => {
+  let entry: Layer1InferState.EffectEvent = { kind, message }
+  let existing = match (Map.get(nodeId, state.effectEventsByNode)) {
+    Some(items) => items,
+    None => [],
+  }
+  Map.set(nodeId, [entry, ...existing], state.effectEventsByNode)
+  { ...state, effectEventsByNode: state.effectEventsByNode }
+}
+
+provide let recordMatchArms = (fnExpr: CoreAst.FnExpr, state: Layer1InferState.InferState) => {
+  let analysis = Layer1Patterns.analyzeMatchArms(fnExpr, state.env)
+  let state1 = List.reduce(
+    (accState: Layer1InferState.InferState, diag: Layer1Patterns.MatchAnalysisDiagnostic) =>
+      addTypeMark(
+        accState,
+        Layer1InferState.Internal,
+        originForNode(diag.nodeId, "match coverage"),
+        CoreAst.PatternError,
+        diag.message
+      ),
+    state,
+    analysis.diagnostics
+  )
+  match (analysis.armInfos) {
+    None => state1,
+    Some(armInfos) => {
+      Map.set(fnExpr.node.id, armInfos, state1.matchArms)
+      { ...state1, matchArms: state1.matchArms }
+    },
+  }
+}
+
+provide let bindingBlameForExprNode = (state: Layer1InferState.InferState, nodeId: Number) =>
+  match (Map.get(nodeId, state.flow.exprBindingRefs)) {
+    Some(bindingId) => Map.get(bindingId, state.bindingBlames),
+    None => None,
+  }
+
+provide let currentFunctionParamBindingId = (state: Layer1InferState.InferState) =>
+  match (Flow.currentFunctionId(state.flow)) {
+    Some(fnId) =>
+      match (Map.get(fnId, state.flow.functions)) {
+        Some(info) => info.paramBindingId,
+        None => None,
+      },
+    None => None,
+  }
+
+provide let noteBindingBlameForExprNode = (
+  state: Layer1InferState.InferState,
+  nodeId: Number,
+  origin: Constraints.Origin,
+) =>
+  match (Map.get(nodeId, state.flow.exprBindingRefs)) {
+    Some(bindingId) =>
+      if (bindingId < 0) {
+        state
+      } else {
+        Map.set(bindingId, origin, state.bindingBlames)
+        let state1 = { ...state, bindingBlames: state.bindingBlames }
+        match (Map.get(bindingId, state1.flow.bindingInfos)) {
+          Some(info) when info.bindingKind == Flow.PatternBinding =>
+            match (currentFunctionParamBindingId(state1)) {
+              Some(paramBindingId) =>
+                if (paramBindingId == bindingId) {
+                  state1
+                } else {
+                  Map.set(paramBindingId, origin, state1.bindingBlames)
+                  { ...state1, bindingBlames: state1.bindingBlames }
+                },
+              None => state1,
+            },
+          _ => state1,
+        }
+      },
+    None => state,
+  }
+
+provide let rec noteBindingBlameForExpr = (
+  state: Layer1InferState.InferState,
+  expr: CoreAst.Expr,
+  description: String,
+) =>
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => noteBindingBlameForExpr(state, inner, description),
+    CoreAst.Ident(_) =>
+      noteBindingBlameForExprNode(state, expr.node.id, blameExprOrigin(expr, description)),
+    CoreAst.Annotate(valueExpr, _) => noteBindingBlameForExpr(state, valueExpr, description),
+    CoreAst.Cast(valueExpr, _) => noteBindingBlameForExpr(state, valueExpr, description),
+    CoreAst.Tuple(items) =>
+      List.reduce(
+        (st: Layer1InferState.InferState, item: CoreAst.Expr) =>
+          noteBindingBlameForExpr(st, item, description),
+        state,
+        items
+      ),
+    _ => state,
+  }
+
+provide let handleMatchApplication = (
+  fnExpr: CoreAst.FnExpr,
+  scrutineeNodeId: Number,
+  argType: Types.Type,
+  state: Layer1InferState.InferState,
+  unifyForNodeWithBlame: (
+    Number,
+    String,
+    Types.Type,
+    Types.Type,
+    Option<Constraints.Origin>,
+    Layer1InferState.InferState,
+  ) => Layer1InferState.InferState,
+) => {
+  match (Map.get(fnExpr.node.id, state.matchArms)) {
+    Some(armInfos) => match (armInfos) {
+      [] => state,
+      [first, ..._] => {
+        inferDebug(
+          "match.apply.enter fnNode="
+            ++ toString(fnExpr.node.id)
+            ++ " argType="
+            ++ renderType(argType, state)
+            ++ " firstOwner="
+            ++ first.typeName
+            ++ " firstCtor="
+            ++ first.constructor.name
+        )
+        match (Env.lookupType(state.env, first.typeName)) {
+          None =>
+            addTypeMark(
+              state,
+              Layer1InferState.Internal,
+              originForNode(scrutineeNodeId, "match scrutinee"),
+              CoreAst.Internal("unknown nominal type"),
+              "Type error: unknown nominal type " ++ first.typeName
+            ),
+          Some(typeInfo) => {
+            let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
+              typeInfo.typeParams,
+              state.nextVar
+            )
+            let state1 = { ...state, nextVar }
+            let scrutineeType = Types.TNominal(typeInfo.name, paramTypes)
+            inferDebug(
+              "match.apply.scrutinee fnNode="
+                ++ toString(fnExpr.node.id)
+                ++ " scrutineeType="
+                ++ renderType(scrutineeType, state1)
+            )
+            unifyForNodeWithBlame(
+              scrutineeNodeId,
+              "match scrutinee",
+              argType,
+              scrutineeType,
+              bindingBlameForExprNode(state1, scrutineeNodeId),
+              state1
+            )
+          },
+        }
+      },
+    },
+    None => state,
+  }
+}
