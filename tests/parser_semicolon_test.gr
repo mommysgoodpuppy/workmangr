@@ -345,6 +345,30 @@ test("parser supports expression type ascription", () => {
   all([assertTrue(shapeOk), assertFalse(hasErrors)])
 })
 
+test("parser supports expression casts with as", () => {
+  clearErrors()
+  let source = "let x = Pair{} as Zeros;"
+  let parsed = Parser.parse(source)
+  let shapeOk = match (parsed.items) {
+    [SurfaceAst.DeclGroup(group)] => match (group.decls) {
+      [SurfaceAst.LetDecl(ld)] => match (ld.bindings) {
+        [binding] => match (binding.value.kind) {
+          SurfaceAst.Cast(
+            { kind: SurfaceAst.Apply({ kind: SurfaceAst.Ident({ text: "Pair", _ }), _ }, { kind: SurfaceAst.RecordLit([]), _ }), _ },
+            { kind: SurfaceAst.Var({ text: "Zeros", _ }), _ },
+          ) => true,
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+  let hasErrors = List.length(getMarkedErrors()) > 0
+  all([assertTrue(shapeOk), assertFalse(hasErrors)])
+})
+
 test("only @core directive enables canonical core mode", () => {
   clearErrors()
   let coreProgram = Parser.parse("@core;\nlet x = 1;")

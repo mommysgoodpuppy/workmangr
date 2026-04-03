@@ -159,6 +159,7 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.Lit(SurfaceAst.Byte(_)) => "Lit(Byte)",
       SurfaceAst.Ident(name) => "Ident(" ++ escapeJson(name.text) ++ ")",
       SurfaceAst.Annotate(_, _) => "Annotate",
+      SurfaceAst.Cast(_, _) => "Cast",
       SurfaceAst.Fn(_) => "Fn",
       SurfaceAst.Match(_) => "Match",
       SurfaceAst.Apply(_, _) => "Apply",
@@ -235,6 +236,8 @@ let rec exprToJson = (expr: SurfaceAst.Expr, depth: Number) => {
       SurfaceAst.ArrowPrefix(ap) =>
         ",\"children\":[" ++ exprToJson(ap.body, depth + 1) ++ "]",
       SurfaceAst.Annotate(valueExpr, _annotation) =>
+        ",\"children\":[" ++ exprToJson(valueExpr, depth + 1) ++ "]",
+      SurfaceAst.Cast(valueExpr, _target) =>
         ",\"children\":[" ++ exprToJson(valueExpr, depth + 1) ++ "]",
       SurfaceAst.Assign(asg) => {
         let targetJson = exprToJson(asg.target, depth + 1)
@@ -539,6 +542,13 @@ let typeMarkToJson = (entry: Infer.TypeMark) =>
     ++ escapeJson(entry.message)
     ++ "\",\"origin\":"
     ++ originToJson(entry.origin)
+    ++ ",\"blame\":"
+    ++ (
+      match (entry.blame) {
+        Some(blameOrigin) => originToJson(blameOrigin),
+        None => "null",
+      }
+    )
     ++ ",\"related\":["
     ++ joinStrings(",", List.map(originToJson, entry.related))
     ++ "],\"mark\":"

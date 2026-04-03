@@ -86,6 +86,53 @@ let freshName = (state: EmitState, hint: String) => {
   "__wm_" ++ sanitizeLocal(hint) ++ "_" ++ toString(id)
 }
 
+let isConstPtrState = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNominal("Const", []) => true,
+    _ => false,
+  }
+
+let pointerLikeInfo = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNominal("Ptr", [inner, stateTy]) =>
+      Some((false, inner, isConstPtrState(stateTy))),
+    Types.TNominal("ManyPtr", [inner, stateTy]) =>
+      Some((true, inner, isConstPtrState(stateTy))),
+    _ => None,
+  }
+
+let nullablePtrOptionInfo = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNominal("Option", [inner]) => pointerLikeInfo(inner),
+    _ => None,
+  }
+
+let nullablePtrOptionCtor = (ty: Types.Type) =>
+  match (nullablePtrOptionInfo(ty)) {
+    Some((true, inner, isConst)) =>
+      Some(("WmManyPtrOpt", inner, isConst)),
+    Some((false, inner, isConst)) =>
+      Some(("WmPtrOpt", inner, isConst)),
+    None => None,
+  }
+
+let optionalPointerPayloadAccess = (scrutName: String) => scrutName ++ ".raw"
+
+let emitOptionalPointerHelpers = () => [
+  "fn WmPtrOpt(comptime T: type, comptime is_const: bool) type {",
+  indent("return struct {"),
+  indent2("raw: if (is_const) ?*const T else ?*T,"),
+  indent("};"),
+  "}",
+  "",
+  "fn WmManyPtrOpt(comptime T: type, comptime is_const: bool) type {",
+  indent("return struct {"),
+  indent2("raw: if (is_const) ?[*]const T else ?[*]T,"),
+  indent("};"),
+  "}",
+  "",
+]
+
 // ── Type → Zig ────────────────────────────────────────────────────
 // Native Zig types. Generic types → comptime function calls.
 
@@ -103,10 +150,35 @@ let rec typeToZig = (ty: Types.Type) =>
     Types.TNominal(name, args) =>
       if (name == "Int") { "i64" }
       else if (name == "U8") { "u8" }
-      else if (args != []) {
-        sanitizeLocal(name) ++ "(" ++ joinStrings(", ", List.map(typeToZig, args)) ++ ")"
+      else if (name == "Ptr") {
+        match (args) {
+          [inner, stateTy] =>
+            "*" ++ if (isConstPtrState(stateTy)) { "const " } else { "" } ++ typeToZig(inner),
+          _ => "anytype",
+        }
+      } else if (name == "ManyPtr") {
+        match (args) {
+          [inner, stateTy] =>
+            "[*]" ++ if (isConstPtrState(stateTy)) { "const " } else { "" } ++ typeToZig(inner),
+          _ => "anytype",
+        }
+      } else if (name == "Slice") {
+        match (args) {
+          [inner, stateTy] =>
+            "[]" ++ if (isConstPtrState(stateTy)) { "const " } else { "" } ++ typeToZig(inner),
+          _ => "anytype",
+        }
       } else {
-        sanitizeLocal(name)
+        match (nullablePtrOptionCtor(ty)) {
+          Some((helperName, inner, isConst)) =>
+            helperName ++ "(" ++ typeToZig(inner) ++ ", " ++ if (isConst) { "true" } else { "false" } ++ ")",
+          None =>
+            if (args != []) {
+              sanitizeLocal(name) ++ "(" ++ joinStrings(", ", List.map(typeToZig, args)) ++ ")"
+            } else {
+              sanitizeLocal(name)
+            },
+        }
       },
     Types.TVar(_) => "anytype",
     Types.THole(_) => "anytype",
@@ -220,8 +292,8 @@ let rec emitExpr = (state: EmitState, expr: IR.Expr) =>
       (lines, text ++ ".@\"" ++ toString(index) ++ "\"")
     },
 
-    IR.EData(_, typeName, ctorName, args) =>
-      emitDataConstruction(state, typeName, ctorName, args),
+    IR.EData(meta, typeName, ctorName, args) =>
+      emitDataConstruction(state, meta.ty, typeName, ctorName, args),
 
     IR.ELambda(meta, params, body) =>
       emitLambda(state, meta, params, body),
@@ -271,17 +343,47 @@ and emitRecordFields = (state: EmitState, fields: List<IR.RecordField>) => {
   loop(fields, [], [])
 }
 
-and emitDataConstruction = (state: EmitState, typeName: String, ctorName: String, args: List<IR.Expr>) => {
-  if (args == []) {
-    // Nullary constructor
-    ([], ".{ ." ++ sanitizeLocal(ctorName) ++ " = {} }")
-  } else if (List.length(args) == 1) {
-    let arg = match (List.head(args)) { Some(a) => a, None => fail "impossible" }
-    let (lines, text) = emitExpr(state, arg)
-    (lines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = " ++ text ++ " }")
-  } else {
-    let (allLines, texts) = emitExprList(state, args)
-    (allLines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = .{ " ++ joinStrings(", ", texts) ++ " } }")
+and emitDataConstruction = (
+  state: EmitState,
+  constructedType: Types.Type,
+  typeName: String,
+  ctorName: String,
+  args: List<IR.Expr>,
+) => {
+  match (nullablePtrOptionInfo(constructedType)) {
+    Some(_) =>
+      if (ctorName == "None") {
+        ([], ".{ .raw = null }")
+      } else if (ctorName == "Some") {
+        match (args) {
+          [arg] => {
+            let (lines, text) = emitExpr(state, arg)
+            (lines, ".{ .raw = " ++ text ++ " }")
+          },
+          _ => ([], "@compileError(\"Option pointer Some arity mismatch\")"),
+        }
+      } else if (args == []) {
+        ([], ".{ ." ++ sanitizeLocal(ctorName) ++ " = {} }")
+      } else if (List.length(args) == 1) {
+        let arg = match (List.head(args)) { Some(a) => a, None => fail "impossible" }
+        let (lines, text) = emitExpr(state, arg)
+        (lines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = " ++ text ++ " }")
+      } else {
+        let (allLines, texts) = emitExprList(state, args)
+        (allLines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = .{ " ++ joinStrings(", ", texts) ++ " } }")
+      },
+    None =>
+      if (args == []) {
+        // Nullary constructor
+        ([], ".{ ." ++ sanitizeLocal(ctorName) ++ " = {} }")
+      } else if (List.length(args) == 1) {
+        let arg = match (List.head(args)) { Some(a) => a, None => fail "impossible" }
+        let (lines, text) = emitExpr(state, arg)
+        (lines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = " ++ text ++ " }")
+      } else {
+        let (allLines, texts) = emitExprList(state, args)
+        (allLines, ".{ ." ++ sanitizeLocal(ctorName) ++ " = .{ " ++ joinStrings(", ", texts) ++ " } }")
+      },
   }
 }
 
@@ -427,11 +529,26 @@ and emitPatternCondition = (state: EmitState, pattern: IR.Pattern, scrutName: St
     IR.PWildcard(_) => ("true", []),
     IR.PBinding(_, name) => ("true", ["const " ++ sanitizeLocal(name) ++ " = " ++ scrutName ++ ";"]),
     IR.PLiteral(_, lit) => (scrutName ++ " == " ++ literalToZig(lit), []),
-    IR.PConstructor(_, typeName, ctorName, subPats) => {
-      let check = "std.meta.activeTag(" ++ scrutName ++ ") == ." ++ sanitizeLocal(ctorName)
-      let bindingLines = emitConstructorBindings(state, scrutName, ctorName, subPats)
-      (check, bindingLines)
-    },
+    IR.PConstructor(ty, typeName, ctorName, subPats) =>
+      match (nullablePtrOptionInfo(ty)) {
+        Some(_) =>
+          if (ctorName == "Some") {
+            let check = optionalPointerPayloadAccess(scrutName) ++ " != null"
+            let bindingLines = emitOptionalPointerBindings(scrutName, subPats)
+            (check, bindingLines)
+          } else if (ctorName == "None") {
+            (optionalPointerPayloadAccess(scrutName) ++ " == null", [])
+          } else {
+            let check = "std.meta.activeTag(" ++ scrutName ++ ") == ." ++ sanitizeLocal(ctorName)
+            let bindingLines = emitConstructorBindings(state, scrutName, ctorName, subPats)
+            (check, bindingLines)
+          },
+        None => {
+          let check = "std.meta.activeTag(" ++ scrutName ++ ") == ." ++ sanitizeLocal(ctorName)
+          let bindingLines = emitConstructorBindings(state, scrutName, ctorName, subPats)
+          (check, bindingLines)
+        },
+      },
     IR.PTuple(_, elements) => {
       // Tuple patterns — bind each element
       let bindingLines = List.mapi((pat: IR.Pattern, idx: Number) => {
@@ -446,6 +563,15 @@ and emitPatternCondition = (state: EmitState, pattern: IR.Pattern, scrutName: St
     },
     IR.PPinned(_, name) => (scrutName ++ " == " ++ sanitizeLocal(name), []),
   }
+
+and emitOptionalPointerBindings = (scrutName: String, subPats: List<IR.Pattern>) => {
+  let payload = optionalPointerPayloadAccess(scrutName)
+  match (subPats) {
+    [IR.PBinding(_, name)] => ["const " ++ sanitizeLocal(name) ++ " = " ++ payload ++ ".?;"],
+    [IR.PWildcard(_)] => [],
+    _ => [],
+  }
+}
 
 and emitConstructorBindings = (state: EmitState, scrutName: String, ctorName: String, subPats: List<IR.Pattern>) => {
   let payload = scrutName ++ "." ++ sanitizeLocal(ctorName)
@@ -579,6 +705,8 @@ provide let emitModule = (module_: IR.Module, isEntry: Bool) => {
     "const std = @import(\"std\");",
     "",
   ]
+
+  lines = List.append(lines, emitOptionalPointerHelpers())
 
   // Imports
   let importLines = emitModuleImports(module_.imports)

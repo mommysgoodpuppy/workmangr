@@ -213,6 +213,48 @@ let x = 1 + 1: U8;
   ])
 })
 
+test("zeros cast permits omitted zero-valid record fields", () => {
+  let source =
+    "
+record Pair = {
+  x: U8,
+  y: U8,
+};
+let pair = Pair{} as Zeros;
+"
+  let state = inferSource(source)
+  let scheme = expectTopBinding(state, "pair")
+  let hasMissingField = List.some(
+    (entry: Infer.TypeMark) => String.contains("missing record field", entry.message),
+    state.marks
+  )
+  let hasInvalidZerosCast = List.some(
+    (entry: Infer.TypeMark) => String.contains("invalid cast to Zeros", entry.message),
+    state.marks
+  )
+  all([
+    assertFalse(hasMissingField),
+    assertFalse(hasInvalidZerosCast),
+    assertEquals("Pair", Types.typeToString(scheme.ty)),
+  ])
+})
+
+test("zeros cast rejects non-zero-valid record layouts", () => {
+  let source =
+    "
+record Named = {
+  text: String,
+};
+let named = Named{} as Zeros;
+"
+  let state = inferSource(source)
+  let hasInvalidZerosCast = List.some(
+    (entry: Infer.TypeMark) => String.contains("invalid cast to Zeros", entry.message),
+    state.marks
+  )
+  assertTrue(hasInvalidZerosCast)
+})
+
 test("string literals coerce to C string pointer params in function application", () => {
   let env = Map.make()
   Map.set(
@@ -250,6 +292,73 @@ let file = fopen(\"simple.wm\", \"rb\");
   all([
     assertFalse(hasHardMismatch),
     assertEquals("Option<Ptr<IO_FILE, T>>", Types.typeToString(scheme.ty)),
+  ])
+})
+
+test("matching Some over optional pointer feeds raw pointer params", () => {
+  let env = Map.make()
+  let stateVar = Types.TVar(0)
+  Map.set(
+    "fopen",
+    ({
+      quantifiers: [0],
+      ty: Types.TFun(
+        Types.TTuple([
+          Types.TNominal("ManyPtr", [Types.TNominal("U8", []), stateVar]),
+          Types.TNominal("ManyPtr", [Types.TNominal("U8", []), stateVar]),
+        ]),
+        Types.TNominal(
+          "Option",
+          [Types.TNominal("Ptr", [Types.TNominal("IO_FILE", []), stateVar])],
+        )
+      ),
+    }: Types.Scheme),
+    env
+  )
+  Map.set(
+    "fseek",
+    ({
+      quantifiers: [1],
+      ty: Types.TFun(
+        Types.TTuple([
+          Types.TNominal("Ptr", [Types.TNominal("IO_FILE", []), Types.TVar(1)]),
+          Types.TNominal("CLong", []),
+          Types.TNominal("CInt", []),
+        ]),
+        Types.TNominal("CInt", [])
+      ),
+    }: Types.Scheme),
+    env
+  )
+  let state = inferSourceWithEnv(
+    "
+let useFile = (path) => {
+  let fh = fopen(path, \"rb\");
+  match(fh) {
+    Some(file) => { fseek(file, 0, 0) }
+    None => { 0 }
+  }
+};
+",
+    env
+  )
+  let scheme = expectTopBinding(state, "useFile")
+  let hasHardMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("cannot unify", entry.message),
+    state.marks
+  )
+
+  all([
+    assertFalse(hasHardMismatch),
+    match (scheme.ty) {
+      Types.TFun(
+        Types.TNominal("ManyPtr", [Types.TNominal("U8", []), Types.TVar(_)]),
+        Types.TNominal("CInt", [])
+      ) => assertTrue(true),
+      _ => fail("expected useFile : ManyPtr<U8, _> -> CInt"),
+    },
   ])
 })
 
@@ -834,6 +943,23 @@ let bad = (x) => { if (1) { x } else { x } };
   assertTrue(hasInconsistent)
 })
 
+test("nominal type mismatch reports concrete conflicting types", () => {
+  let source =
+    "
+record Left = { x: Int };
+record Right = { x: Int };
+let bad = if (true) { Left{ x = 1 } } else { Right{ x = 1 } };
+"
+  let state = inferSource(source)
+  let hasNominalMismatch = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("cannot unify nominal types Left and Right", entry.message),
+    state.marks
+  )
+  assertTrue(hasNominalMismatch)
+})
+
 test("unknown identifier records free-var mark and continues", () => {
   let source =
     "
@@ -1303,6 +1429,61 @@ let keep = 1;
     assertEquals("U8", Types.typeToString(keepScheme.ty)),
     assertTrue(hasMixedTypeDiag),
   ])
+})
+
+test("lowered match keeps blame on the constraining use-site", () => {
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let takesInt = (x) => { x + 1 };
+let read = (x) => {
+  let file = x;
+  let _n = takesInt(file);
+  match(file) {
+    Some(file) => {
+      file
+    }
+    None => { 1 }
+  }
+};
+"
+  let state = inferSource(source)
+  let hasConstrainedBlame = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("Type error (match scrutinee)", entry.message)
+        && (
+          match (entry.blame) {
+            Some(blameOrigin) =>
+              blameOrigin.nodeId >= 0 && blameOrigin.description == "function argument",
+            None => false,
+          }
+        ),
+    state.marks
+  )
+  assertTrue(hasConstrainedBlame)
+})
+
+test("non-callable callee in function application blames the callee", () => {
+  let source =
+    "
+let f = true;
+let bad = f(1);
+"
+  let state = inferSource(source)
+  let hasCalleeBlame = List.some(
+    (entry: Infer.TypeMark) =>
+      entry.reason == Infer.TypeMismatch
+        && String.contains("Type error (function application)", entry.message)
+        && (
+          match (entry.blame) {
+            Some(blameOrigin) => blameOrigin.description == "function callee",
+            None => false,
+          }
+        ),
+    state.marks
+  )
+  assertTrue(hasCalleeBlame)
 })
 
 let results = runTests()

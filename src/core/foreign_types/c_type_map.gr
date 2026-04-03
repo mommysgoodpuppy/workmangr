@@ -267,18 +267,22 @@ and mapOptionalType = (
   match (desc.child) {
     Some(child) when child.kind == "pointer" => {
       let childType = mapTypeDesc(child, types, position)
-      match (childType) {
-        Types.TNominal("Ptr", [innerTy, stateTy, ...extraArgs]) => {
-          Types.TNominal("Option", [Types.TNominal("Ptr", [innerTy, stateTy, ...extraArgs])])
-        },
-        Types.TNominal("ManyPtr", [innerTy, stateTy, ...extraArgs]) => {
-          Types.TNominal("Option", [Types.TNominal("ManyPtr", [innerTy, stateTy, ...extraArgs])])
-        },
-        _ =>
-          Types.TNominal(
-            "Option",
-            [childType],
-          ),
+      if (position == PosParam) {
+        childType
+      } else {
+        match (childType) {
+          Types.TNominal("Ptr", [innerTy, stateTy, ...extraArgs]) => {
+            Types.TNominal("Option", [Types.TNominal("Ptr", [innerTy, stateTy, ...extraArgs])])
+          },
+          Types.TNominal("ManyPtr", [innerTy, stateTy, ...extraArgs]) => {
+            Types.TNominal("Option", [Types.TNominal("ManyPtr", [innerTy, stateTy, ...extraArgs])])
+          },
+          _ =>
+            Types.TNominal(
+              "Option",
+              [childType],
+            ),
+        }
       }
     },
     _ => {

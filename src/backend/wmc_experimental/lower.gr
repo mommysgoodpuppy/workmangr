@@ -67,6 +67,7 @@ let rec lowerExpr = (ctx: LowerCtx, expr: CoreAst.Expr) => {
     },
 
     CoreAst.Annotate(inner, _) => lowerExpr(ctx, inner),
+    CoreAst.Cast(inner, _) => lowerExpr(ctx, inner),
 
     CoreAst.Apply(callee, arg) =>
       lowerApplication(ctx, meta, callee, arg),
@@ -179,6 +180,8 @@ and collectApplyChain = (expr: CoreAst.Expr, argsAcc: List<CoreAst.Expr>) =>
     CoreAst.Mark(_, inner) =>
       collectApplyChain(inner, argsAcc),
     CoreAst.Annotate(inner, _) =>
+      collectApplyChain(inner, argsAcc),
+    CoreAst.Cast(inner, _) =>
       collectApplyChain(inner, argsAcc),
     _ => (expr, argsAcc),
   }

@@ -52,6 +52,11 @@ let rec visitExpr = (store: NS.NodeStore, expr: CoreAst.Expr) => {
       let store = visitExpr(store, valueExpr)
       NS.addChild(store, expr.node.id, "value", valueExpr.node.id)
     },
+    CoreAst.Cast(valueExpr, _target) => {
+      let store = NS.updatePreview(store, expr.node.id, "Cast")
+      let store = visitExpr(store, valueExpr)
+      NS.addChild(store, expr.node.id, "value", valueExpr.node.id)
+    },
     CoreAst.Fn(fnExpr) => {
       let store = NS.updatePreview(store, expr.node.id, "Fn")
       List.reduce((s: NS.NodeStore, item: CoreAst.FnItem) => {

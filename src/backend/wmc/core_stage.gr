@@ -99,6 +99,7 @@ let rec projectExpr = (infer: Infer.InferState, expr: CoreAst.Expr) => {
     CoreAst.Lit(lit) => WmcCoreIr.ELit(lit),
     CoreAst.Ident(name) => WmcCoreIr.EIdent(name.text),
     CoreAst.Annotate(value, typeExpr) => WmcCoreIr.EAnnotate(projectExpr(infer, value), typeExpr),
+    CoreAst.Cast(value, target) => WmcCoreIr.ECast(projectExpr(infer, value), target),
     CoreAst.Apply(callee, arg) => WmcCoreIr.EApply(projectExpr(infer, callee), projectExpr(infer, arg)),
     CoreAst.Fn(fnExpr) => WmcCoreIr.EFn(projectFnExpr(infer, fnExpr)),
     CoreAst.Let(binding, body) => WmcCoreIr.ELet(projectLetBinding(infer, binding), projectExpr(infer, body)),

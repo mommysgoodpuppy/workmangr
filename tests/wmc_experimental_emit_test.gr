@@ -1,0 +1,78 @@
+module WmcExperimentalEmitTest
+
+from "../submodules/graintest/lib/test.gr" include Test
+use Test.*
+
+from "string" include String
+
+from "../src/backend/wmc_experimental/core_ir.gr" include WmcExpCoreIR as IR
+from "../src/backend/wmc_experimental/emit_zig.gr" include WmcExpEmitZig
+from "../src/core/types.gr" include Types
+
+setSourceFile("./tests/wmc_experimental_emit_test.gr")
+
+let meta = (ty: Types.Type) => { ty, span: None }: IR.ExprMeta
+
+let ptrTy = Types.TNominal(
+  "Ptr",
+  [Types.TNominal("IO_FILE", []), Types.TNominal("Mut", [])]
+)
+
+let optPtrTy = Types.TNominal("Option", [ptrTy])
+
+test("experimental Zig emitter wraps Option<Ptr<T>> and matches via null checks", () => {
+  let wrapValue = IR.ELambda(
+    meta(Types.TFun(ptrTy, optPtrTy)),
+    ["p"],
+    IR.EData(meta(optPtrTy), "Option", "Some", [IR.EVar(meta(ptrTy), "p")])
+  )
+
+  let matchValue = IR.ELambda(
+    meta(Types.TFun(optPtrTy, Types.TVoid)),
+    ["opt"],
+    IR.EMatch(
+      meta(Types.TVoid),
+      IR.EVar(meta(optPtrTy), "opt"),
+      [
+        {
+          pattern: IR.PConstructor(optPtrTy, "Option", "Some", [IR.PBinding(ptrTy, "file")]),
+          guard: None,
+          body: IR.ELiteral(meta(Types.TVoid), IR.LUnit),
+        }: IR.MatchCase,
+        {
+          pattern: IR.PConstructor(optPtrTy, "Option", "None", []),
+          guard: None,
+          body: IR.ELiteral(meta(Types.TVoid), IR.LUnit),
+        }: IR.MatchCase,
+      ],
+      None
+    )
+  )
+
+  let module_: IR.Module = {
+    path: "entry.wm",
+    imports: [],
+    typeDeclarations: [],
+    values: [
+      { name: "wrap", value: wrapValue, exported: false, isRecursive: false }: IR.ValueBinding,
+      { name: "inspect", value: matchValue, exported: false, isRecursive: false }: IR.ValueBinding,
+    ],
+    exports: [],
+  }
+
+  let zig = WmcExpEmitZig.emitModule(module_, false)
+
+  all([
+    assertTrue(String.contains("fn WmPtrOpt(comptime T: type, comptime is_const: bool) type {", zig)),
+    assertTrue(String.contains("return struct {", zig)),
+    assertTrue(String.contains("raw: if (is_const) ?*const T else ?*T,", zig)),
+    assertTrue(String.contains(".{ .raw = p }", zig)),
+    assertTrue(String.contains(".raw != null", zig)),
+    assertTrue(String.contains(".raw.?;", zig)),
+    assertTrue(String.contains(".raw == null", zig)),
+    assertTrue(String.contains("WmPtrOpt(IO_FILE, false)", zig)),
+  ])
+})
+
+let results = runTests()
+printResultsAndExit(results)

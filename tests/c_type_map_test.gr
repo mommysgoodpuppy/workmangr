@@ -40,6 +40,30 @@ test("nullable C pointer maps to Option of Ptr", () => {
   }
 })
 
+test("optional pointer parameter maps to raw Ptr", () => {
+  let json =
+    "{\"types\":[],\"fns\":[{\"name\":\"fseek\",\"params\":[{\"kind\":\"optional\",\"child\":{\"kind\":\"pointer\",\"isConst\":false,\"child\":{\"kind\":\"named\",\"name\":\"cimport.struct__IO_FILE\"}}},{\"kind\":\"int\",\"name\":\"c_long\"},{\"kind\":\"int\",\"name\":\"c_int\"}],\"return\":{\"kind\":\"int\",\"name\":\"c_int\"}}],\"values\":[]}"
+
+  let result = match (CTypeMap.fromJson(json)) {
+    Ok(value) => value,
+    Err(msg) => fail(msg),
+  }
+  let ty = expectValueType(result, "fseek")
+
+  match (ty) {
+    Types.TFun(
+      Types.TTuple([
+        Types.TNominal("Ptr", [Types.TNominal("IO_FILE", []), Types.TNominal("Mut", [])]),
+        Types.TNominal("CLong", []),
+        Types.TNominal("CInt", []),
+      ]),
+      Types.TNominal("CInt", [])
+    ) =>
+      assertTrue(true),
+    _ => fail("expected fseek first param to be Ptr<IO_FILE, _> but got " ++ Types.typeToString(ty)),
+  }
+})
+
 test("nullable many pointer maps to Option of ManyPtr", () => {
   let json =
     "{\"types\":[],\"fns\":[],\"values\":[{\"name\":\"argv\",\"type\":{\"kind\":\"optional\",\"child\":{\"kind\":\"pointer\",\"isConst\":false,\"child\":{\"kind\":\"int\",\"name\":\"u8\"}}}}]}"

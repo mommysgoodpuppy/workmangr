@@ -303,6 +303,8 @@ let renderWithSettingsWithTokens = (
     SurfaceAst.Lit(_) | SurfaceAst.Ident(_) => false,
     SurfaceAst.Annotate(valueExpr, annotation) =>
       exprHasHole(valueExpr) || typeHasHole(annotation),
+    SurfaceAst.Cast(valueExpr, target) =>
+      exprHasHole(valueExpr) || typeHasHole(target),
     SurfaceAst.Fn(fn) => fnHasHole(fn),
     SurfaceAst.Match(matchExpr) =>
       match (matchExpr.scrutinee) {
@@ -468,6 +470,7 @@ let renderWithSettingsWithTokens = (
 
   let rec exprHasMissingRBrace = (expr: SurfaceAst.Expr) => match (expr.kind) {
     SurfaceAst.Annotate(valueExpr, _annotation) => exprHasMissingRBrace(valueExpr),
+    SurfaceAst.Cast(valueExpr, _target) => exprHasMissingRBrace(valueExpr),
     SurfaceAst.Block(block) =>
       blockHasMissingRBrace(block.items) || exprHasMissingRBrace(block.body),
     SurfaceAst.Fn(fnExpr) => anyFnItemMissingRBrace(fnExpr.items),
@@ -1059,6 +1062,11 @@ let renderWithSettingsWithTokens = (
           emitExpr(valueExpr)
           write(": ")
           emitTypeExpr(annotation)
+        },
+        SurfaceAst.Cast(valueExpr, target) => {
+          emitExpr(valueExpr)
+          write(" as ")
+          emitTypeExpr(target)
         },
         SurfaceAst.Paren(inner) => {
           write("(")
@@ -3494,4 +3502,3 @@ provide let profileRealFix = (source: String) => {
   logTiming("realfix/total", totalStart, totalEnd)
   final.text
 }
-

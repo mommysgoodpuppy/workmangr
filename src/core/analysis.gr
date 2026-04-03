@@ -16,6 +16,19 @@ provide record Analysis {
   infer: Infer.InferState,
 }
 
+let originClue = (origin: Constraints.Origin) => Error.Note(Constraints.originToString(origin))
+
+let blameClues = (entry: Infer.TypeMark) =>
+  match (entry.blame) {
+    Some(blameOrigin) =>
+      if (blameOrigin == entry.origin) {
+        []
+      } else {
+        [originClue(blameOrigin)]
+      },
+    None => [],
+  }
+
 let spanFromNodeId = (
   nodeId: Number,
   nodeSpans: Map.Map<Number, Source.Span>,
@@ -44,6 +57,13 @@ let resolveTypeMarkSpan = (
   match (fromMark) {
     Some(_) => fromMark,
     None => {
+  let fromBlame = match (entry.blame) {
+    Some(blameOrigin) => spanFromNodeId(blameOrigin.nodeId, nodeSpans),
+    None => None,
+  }
+  match (fromBlame) {
+    Some(_) => fromBlame,
+    None => {
   let fromOrigin = spanFromNodeId(entry.origin.nodeId, nodeSpans)
   match (fromOrigin) {
     Some(_) => fromOrigin,
@@ -67,30 +87,51 @@ let resolveTypeMarkSpan = (
   }
     },
   }
+    },
+  }
 }
 
 let indexNodeSpan = (index: Map.Map<Number, Source.Span>, node: CoreAst.Node) =>
   Map.set(node.id, node.span, index)
 
+let indexNameSpan = (index: Map.Map<Number, Source.Span>, name: CoreAst.Name) =>
+  indexNodeSpan(index, name.node)
+
 let rec indexTypeExpr = (typeExpr: CoreAst.TypeExpr, index: Map.Map<Number, Source.Span>) => {
   indexNodeSpan(index, typeExpr.node)
   match (typeExpr.kind) {
     CoreAst.Mark(_, inner) => indexTypeExpr(inner, index),
-    CoreAst.Ref(_, args) => List.forEach(arg => indexTypeExpr(arg, index), args),
+    CoreAst.Var(name) => indexNameSpan(index, name),
+    CoreAst.Ref(name, args) => {
+      indexNameSpan(index, name)
+      List.forEach(arg => indexTypeExpr(arg, index), args)
+    },
     CoreAst.Tuple(items) => List.forEach(item => indexTypeExpr(item, index), items),
     CoreAst.Record(fields) =>
-      List.forEach(((_name, fieldType)) => indexTypeExpr(fieldType, index), fields),
+      List.forEach(((fieldName, fieldType)) => {
+        indexNameSpan(index, fieldName)
+        indexTypeExpr(fieldType, index)
+      }, fields),
     CoreAst.Arrow(params, result) => {
       List.forEach(param => indexTypeExpr(param, index), params)
       indexTypeExpr(result, index)
     },
-    CoreAst.Ptr(inner, _) => indexTypeExpr(inner, index),
+    CoreAst.Ptr(inner, mode) => {
+      indexTypeExpr(inner, index)
+      match (mode) {
+        Some(name) => indexNameSpan(index, name),
+        None => void,
+      }
+    },
     CoreAst.EffectRow(cases, _) =>
-      List.forEach((effectCase: CoreAst.EffectCase) =>
+      List.forEach((effectCase: CoreAst.EffectCase) => {
+        indexNodeSpan(index, effectCase.node)
+        indexNameSpan(index, effectCase.name)
         match (effectCase.payload) {
           Some(payloadType) => indexTypeExpr(payloadType, index),
           None => void,
-        }, cases),
+        }
+      }, cases),
     _ => void,
   }
 }
@@ -99,7 +140,12 @@ let rec indexPattern = (pattern: CoreAst.Pattern, index: Map.Map<Number, Source.
   indexNodeSpan(index, pattern.node)
   match (pattern.kind) {
     CoreAst.Mark(_, inner) => indexPattern(inner, index),
-    CoreAst.Constructor(_, args) => List.forEach(arg => indexPattern(arg, index), args),
+    CoreAst.Var(name) => indexNameSpan(index, name),
+    CoreAst.Pin(name) => indexNameSpan(index, name),
+    CoreAst.Constructor(name, args) => {
+      indexNameSpan(index, name)
+      List.forEach(arg => indexPattern(arg, index), args)
+    },
     CoreAst.Tuple(items) => List.forEach(item => indexPattern(item, index), items),
     CoreAst.List(items, rest) => {
       List.forEach(item => indexPattern(item, index), items)
@@ -116,9 +162,14 @@ let rec indexExpr = (expr: CoreAst.Expr, index: Map.Map<Number, Source.Span>) =>
   indexNodeSpan(index, expr.node)
   match (expr.kind) {
     CoreAst.Mark(_, inner) => indexExpr(inner, index),
+    CoreAst.Ident(name) => indexNameSpan(index, name),
     CoreAst.Annotate(valueExpr, annotation) => {
       indexExpr(valueExpr, index)
       indexTypeExpr(annotation, index)
+    },
+    CoreAst.Cast(valueExpr, target) => {
+      indexExpr(valueExpr, index)
+      indexTypeExpr(target, index)
     },
     CoreAst.Apply(callee, arg) => {
       indexExpr(callee, index)
@@ -158,7 +209,10 @@ let rec indexExpr = (expr: CoreAst.Expr, index: Map.Map<Number, Source.Span>) =>
     CoreAst.Tuple(items) => List.forEach(item => indexExpr(item, index), items),
     CoreAst.RecordLit(items) =>
       List.forEach((recordItem: CoreAst.RecordItem) => match (recordItem) {
-        CoreAst.Field(_, valueExpr) => indexExpr(valueExpr, index),
+        CoreAst.Field(name, valueExpr) => {
+          indexNameSpan(index, name)
+          indexExpr(valueExpr, index)
+        },
         CoreAst.Spread(valueExpr) => indexExpr(valueExpr, index),
       }, items),
     _ => void,
@@ -185,25 +239,54 @@ let buildNodeSpanIndex = (program: CoreAst.Program) => {
         },
         CoreAst.TypeDecl(typeDecl) => {
           indexNodeSpan(index, typeDecl.node)
+          indexNameSpan(index, typeDecl.name)
+          List.forEach(name => indexNameSpan(index, name), typeDecl.typeParams)
           match (typeDecl.body) {
             CoreAst.Alias(typeExpr) => indexTypeExpr(typeExpr, index),
             CoreAst.Variant(constructors) =>
-              List.forEach(((_name, payload, _annotation)) => match (payload) {
-                Some(payloadType) => indexTypeExpr(payloadType, index),
-                None => void,
+              List.forEach(((name, payload, _annotation)) => {
+                indexNameSpan(index, name)
+                match (payload) {
+                  Some(payloadType) => indexTypeExpr(payloadType, index),
+                  None => void,
+                }
               }, constructors),
           }
         },
         CoreAst.RecordDecl(recordDecl) => {
           indexNodeSpan(index, recordDecl.node)
-          List.forEach(((_name, fieldType)) => indexTypeExpr(fieldType, index), recordDecl.fields)
+          indexNameSpan(index, recordDecl.name)
+          List.forEach(name => indexNameSpan(index, name), recordDecl.typeParams)
+          List.forEach(((fieldName, fieldType)) => {
+            indexNameSpan(index, fieldName)
+            indexTypeExpr(fieldType, index)
+          }, recordDecl.fields)
         },
-        CoreAst.InfixDecl(infixDecl) => indexNodeSpan(index, infixDecl.node),
-        CoreAst.PrefixDecl(prefixDecl) => indexNodeSpan(index, prefixDecl.node),
-        CoreAst.DomainDecl(domainDecl) => indexNodeSpan(index, domainDecl.node),
-        CoreAst.PolicyDecl(policyDecl) => indexNodeSpan(index, policyDecl.node),
-        CoreAst.OpDecl(opDecl) => indexNodeSpan(index, opDecl.node),
-        CoreAst.AnnotateDecl(annotateDecl) => indexNodeSpan(index, annotateDecl.node),
+        CoreAst.InfixDecl(infixDecl) => {
+          indexNodeSpan(index, infixDecl.node)
+          indexNameSpan(index, infixDecl.name)
+        },
+        CoreAst.PrefixDecl(prefixDecl) => {
+          indexNodeSpan(index, prefixDecl.node)
+          indexNameSpan(index, prefixDecl.name)
+        },
+        CoreAst.DomainDecl(domainDecl) => {
+          indexNodeSpan(index, domainDecl.node)
+          indexNameSpan(index, domainDecl.name)
+        },
+        CoreAst.PolicyDecl(policyDecl) => {
+          indexNodeSpan(index, policyDecl.node)
+          indexNameSpan(index, policyDecl.name)
+        },
+        CoreAst.OpDecl(opDecl) => {
+          indexNodeSpan(index, opDecl.node)
+          indexNameSpan(index, opDecl.name)
+        },
+        CoreAst.AnnotateDecl(annotateDecl) => {
+          indexNodeSpan(index, annotateDecl.node)
+          indexNameSpan(index, annotateDecl.target)
+          List.forEach(policy => indexNameSpan(index, policy), annotateDecl.policies)
+        },
       }, group.decls)
     },
     _ => void,
@@ -225,7 +308,13 @@ provide let typeInferenceDiagnostics = (
       severity: Error.SError,
       message: entry.message,
       span,
-      clues: [Error.Note(Constraints.originToString(entry.origin))],
+      clues: List.append(
+        List.append(
+          [originClue(entry.origin)],
+          blameClues(entry)
+        ),
+        List.map(originClue, entry.related)
+      ),
     }: Error.CompilerError
   }, marks)
 }

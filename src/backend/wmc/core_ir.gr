@@ -42,6 +42,7 @@ provide enum rec ExprKind {
   ELit(CoreAst.AtomLiteral),
   EIdent(String),
   EAnnotate(Expr, CoreAst.TypeExpr),
+  ECast(Expr, CoreAst.TypeExpr),
   EApply(Expr, Expr),
   EFn(FnExpr),
   ELet(LetBinding, Expr),

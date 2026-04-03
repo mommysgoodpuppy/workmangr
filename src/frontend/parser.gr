@@ -1165,18 +1165,27 @@ let rec parseExpr: Parser<SurfaceAst.Expr> = state => {
     },
     _ => (pipedExpr, pipedState),
   }
-  let rec parseTypeAscriptions = (lhs: SurfaceAst.Expr, stateX: ParseState) =>
-    if (kindIs(currentToken(stateX).kind, Lexer.Colon)) {
-      let (_, stateColon) = expectSimple(Lexer.Colon, stateX)
-      let (annotation, stateAfterType) = parseTypeExpr(stateColon)
-      let span = spanFromTokens(lhs.node.span, annotation.node.span)
-      let (id, stateAfterId) = freshId(stateAfterType)
-      let annotated = makeExpr(id, span, Annotate(lhs, annotation))
-      parseTypeAscriptions(annotated, stateAfterId)
-    } else {
-      (lhs, stateX)
+  let rec parseTypeSuffixes = (lhs: SurfaceAst.Expr, stateX: ParseState) =>
+    match (currentToken(stateX).kind) {
+      Lexer.Colon => {
+        let (_, stateColon) = expectSimple(Lexer.Colon, stateX)
+        let (annotation, stateAfterType) = parseTypeExpr(stateColon)
+        let span = spanFromTokens(lhs.node.span, annotation.node.span)
+        let (id, stateAfterId) = freshId(stateAfterType)
+        let annotated = makeExpr(id, span, Annotate(lhs, annotation))
+        parseTypeSuffixes(annotated, stateAfterId)
+      },
+      Lexer.LitName(name) when name == "as" => {
+        let (_, stateAs) = expectKeyword("as", stateX)
+        let (target, stateAfterType) = parseTypeExpr(stateAs)
+        let span = spanFromTokens(lhs.node.span, target.node.span)
+        let (id, stateAfterId) = freshId(stateAfterType)
+        let casted = makeExpr(id, span, Cast(lhs, target))
+        parseTypeSuffixes(casted, stateAfterId)
+      },
+      _ => (lhs, stateX),
     }
-  let (exprWithAscription, state1a) = parseTypeAscriptions(expr, state1)
+  let (exprWithAscription, state1a) = parseTypeSuffixes(expr, state1)
   let (trailingTrivia, state2) = takeTrailingGapTriviaOnLine(
     exprWithAscription.node.span.line,
     state1a,

@@ -199,6 +199,7 @@ and collectExprEntries = (
     SurfaceAst.Lit(_) |
     SurfaceAst.Ident(_) |
     SurfaceAst.Annotate(_, _) |
+    SurfaceAst.Cast(_, _) |
     SurfaceAst.Apply(_, _) |
     SurfaceAst.InfixChain(_) |
     SurfaceAst.Postfix(_) |
@@ -212,6 +213,7 @@ and collectExprEntries = (
 
   let children = match (expr.kind) {
     SurfaceAst.Annotate(valueExpr, _) => collectExprEntries(source, infer, valueExpr),
+    SurfaceAst.Cast(valueExpr, _) => collectExprEntries(source, infer, valueExpr),
     SurfaceAst.Fn(fnExpr) => collectFnEntries(source, infer, fnExpr),
     SurfaceAst.Match(matchExpr) => {
       let scrutineeEntries = match (matchExpr.scrutinee) {

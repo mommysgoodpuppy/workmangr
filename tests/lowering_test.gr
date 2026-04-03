@@ -760,5 +760,32 @@ test("expression type ascription lowers to core annotate node", () => {
   )
 })
 
+test("expression cast lowers to core cast node", () => {
+  let source = "record Pair = { x: U8, y: U8 }; let x = Pair{} as Zeros;"
+  let program = Frontend.parseAndLower(source)
+
+  bind(
+    bind(
+      bind(
+        expectSingleDeclGroup(program),
+        (dg) => expectNthLetDecl(dg, 1),
+      ),
+      (ld) => expectSingleBinding(ld),
+    ),
+    (binding) =>
+      match (binding.value.kind) {
+        CoreAst.Cast(valueExpr, target) =>
+          match ((valueExpr.kind, target.kind)) {
+            (
+              CoreAst.Apply(_, _),
+              CoreAst.Var({ text: "Zeros", _ }),
+            ) => Ok(void),
+            _ => Err("expected cast(record-construction, Zeros)"),
+          },
+        _ => Err("expected core cast node"),
+      },
+  )
+})
+
 let results = runTests()
 printResultsAndExit(results)

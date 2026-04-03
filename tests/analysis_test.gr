@@ -11,6 +11,7 @@ from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/error.gr" include Error
 from "../src/core/infer.gr" include Infer
 from "../src/core/source.gr" include Source
+from "string" include String
 
 setSourceFile("./tests/analysis_test.gr")
 
@@ -39,6 +40,7 @@ test("typeInferenceDiagnostics uses mark span for unknown identifiers", () => {
   let mark: Infer.TypeMark = {
     reason: Infer.UnknownIdentifier,
     origin: Constraints.makeOrigin(-1, "unknown identifier"),
+    blame: None,
     related: [],
     mark: CoreAst.FreeVar(name),
     message: "Type error: unknown identifier ys",
@@ -52,6 +54,432 @@ test("typeInferenceDiagnostics uses mark span for unknown identifiers", () => {
       assertEquals(122, diag.span.end),
     ]),
     _ => fail("expected exactly one diagnostic"),
+  }
+})
+
+test("typeInferenceDiagnostics keeps related origins as notes", () => {
+  let mark: Infer.TypeMark = {
+    reason: Infer.TypeMismatch,
+    origin: Constraints.makeOrigin(10, "match scrutinee"),
+    blame: None,
+    related: [
+      Constraints.makeOrigin(11, "then branch"),
+      Constraints.makeOrigin(12, "else branch"),
+    ],
+    mark: CoreAst.Inconsistent,
+    message: "Type error (match scrutinee): cannot unify nominal types Left and Right",
+  }
+  let diagnostics = Analysis.typeInferenceDiagnostics([mark], Map.make())
+  match (diagnostics) {
+    [diag] => {
+      let noteCount = List.length(diag.clues)
+      let hasOrigin = List.some(
+        (clue: Error.ErrorClue) => clue == Error.Note("node=10 match scrutinee"),
+        diag.clues
+      )
+      let hasThen = List.some(
+        (clue: Error.ErrorClue) => clue == Error.Note("node=11 then branch"),
+        diag.clues
+      )
+      let hasElse = List.some(
+        (clue: Error.ErrorClue) => clue == Error.Note("node=12 else branch"),
+        diag.clues
+      )
+      all([
+        assertEquals(3, noteCount),
+        assertTrue(hasOrigin),
+        assertTrue(hasThen),
+        assertTrue(hasElse),
+      ])
+    },
+    _ => fail("expected exactly one diagnostic"),
+  }
+})
+
+test("typeInferenceDiagnostics includes blame origin as note", () => {
+  let mark: Infer.TypeMark = {
+    reason: Infer.TypeMismatch,
+    origin: Constraints.makeOrigin(10, "binding annotation"),
+    blame: Some(Constraints.makeOrigin(20, "binding value")),
+    related: [],
+    mark: CoreAst.Inconsistent,
+    message: "Type error (binding annotation): cannot unify Int with Bool",
+  }
+  let diagnostics = Analysis.typeInferenceDiagnostics([mark], Map.make())
+  match (diagnostics) {
+    [diag] => {
+      let hasOrigin = List.some(
+        (clue: Error.ErrorClue) => clue == Error.Note("node=10 binding annotation"),
+        diag.clues
+      )
+      let hasBlame = List.some(
+        (clue: Error.ErrorClue) => clue == Error.Note("node=20 binding value"),
+        diag.clues
+      )
+      all([
+        assertTrue(hasOrigin),
+        assertTrue(hasBlame),
+      ])
+    },
+    _ => fail("expected exactly one diagnostic"),
+  }
+})
+
+test("match scrutinee mismatch reports the scrutinee span", () => {
+  Error.clearErrors()
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let bad = () => {
+  let y = 1;
+  match(y) {
+    Some(v) => { v }
+    None => { 0 }
+  }
+};
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findMismatch = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (diag.stage == Error.TypeInference && String.contains("match scrutinee", diag.message)) {
+          Some(diag)
+        } else {
+          findMismatch(rest)
+        },
+    }
+  match (findMismatch(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("y", excerpt),
+        assertEquals(5, diag.span.line),
+      ])
+    },
+    None => fail("expected match scrutinee diagnostic"),
+  }
+})
+
+test("lowered match function application reports the branch argument span", () => {
+  Error.clearErrors()
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let takesInt = (x) => { x + 1 };
+let forceSome = () => {
+  let y = 1;
+  match(y) {
+    Some(v) => { takesInt(v) }
+    None => { 0 }
+  }
+};
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findMismatch = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("Type error (function application)", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findMismatch(rest)
+        },
+    }
+  match (findMismatch(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("v", excerpt),
+        assertEquals(7, diag.span.line),
+      ])
+    },
+    None => fail("expected function application diagnostic"),
+  }
+})
+
+test("function application with non-callable callee prefers the callee span", () => {
+  Error.clearErrors()
+  let source =
+    "
+let f = true;
+let bad = f(1);
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findMismatch = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("Type error (function application)", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findMismatch(rest)
+        },
+    }
+  match (findMismatch(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("f", excerpt),
+        assertEquals(3, diag.span.line),
+      ])
+    },
+    None => fail("expected function application diagnostic"),
+  }
+})
+
+test("match scrutinee mismatch prefers the constraining use-site", () => {
+  Error.clearErrors()
+  let source =
+    "
+type Option<T> = Some<T> | None;
+let takesInt = (x) => { x + 1 };
+let read = (x) => {
+  let file = x;
+  let _n = takesInt(file);
+  match(file) {
+    Some(file) => {
+      file
+    }
+    None => { 1 }
+  }
+};
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findMismatch = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("Type error (match scrutinee)", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findMismatch(rest)
+        },
+    }
+  match (findMismatch(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("file", excerpt),
+        assertEquals(7, diag.span.line),
+      ])
+    },
+    None => fail("expected match scrutinee diagnostic"),
+  }
+})
+
+test("expression annotation mismatch prefers the annotated expression span", () => {
+  Error.clearErrors()
+let source =
+  "
+let bad = true: Int;
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findMismatch = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("Type error (expression annotation)", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findMismatch(rest)
+        },
+    }
+  match (findMismatch(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("true", excerpt),
+        assertEquals(2, diag.span.line),
+      ])
+    },
+    None => fail("expected expression annotation diagnostic"),
+  }
+})
+
+test("if condition mismatch prefers the condition span", () => {
+  Error.clearErrors()
+let source =
+  "
+let bad = if (\"x\") { 2 } else { 3 };
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findMismatch = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("Type error (if condition)", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findMismatch(rest)
+        },
+    }
+  match (findMismatch(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("\"x\"", excerpt),
+        assertEquals(2, diag.span.line),
+      ])
+    },
+    None => fail("expected if condition diagnostic"),
+  }
+})
+
+test("explicit record projection on a non-record prefers the target span", () => {
+  Error.clearErrors()
+  let source =
+    "
+let bad = project(1, \"x\");
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findProjection = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("projection expects a nominal record value", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findProjection(rest)
+        },
+    }
+  match (findProjection(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("1", excerpt),
+        assertEquals(2, diag.span.line),
+      ])
+    },
+    None => fail("expected record projection diagnostic"),
+  }
+})
+
+test("dot record projection on a non-record prefers the target span", () => {
+  Error.clearErrors()
+  let source =
+    "
+let n = 1;
+let bad = n.x;
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findProjection = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("projection expects a nominal record value", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findProjection(rest)
+        },
+    }
+  match (findProjection(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("n", excerpt),
+        assertEquals(3, diag.span.line),
+      ])
+    },
+    None => fail("expected dot record projection diagnostic"),
+  }
+})
+
+test("record projection with a bad field argument prefers the field span", () => {
+  Error.clearErrors()
+  let source =
+    "
+record Location = { x: Int, y: Int };
+let r: Location = .{ x = 1, y = 2 };
+let bad = project(r, 1);
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findProjection = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("record projection expects string field name", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findProjection(rest)
+        },
+    }
+  match (findProjection(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("1", excerpt),
+        assertEquals(4, diag.span.line),
+      ])
+    },
+    None => fail("expected record projection field diagnostic"),
+  }
+})
+
+test("annotated record literal field mismatch prefers the field value span", () => {
+  Error.clearErrors()
+  let source =
+    "
+record Location = { x: Int, y: Int };
+let bad: Location = .{ x = \"x\", y = 1 };
+"
+  let _ = Analysis.analyze(source)
+  let diagnostics = Error.getErrors()
+  let rec findRecordField = (remaining: List<Error.CompilerError>) =>
+    match (remaining) {
+      [] => None,
+      [diag, ...rest] =>
+        if (
+          diag.stage == Error.TypeInference
+            && String.contains("Type error (record field)", diag.message)
+        ) {
+          Some(diag)
+        } else {
+          findRecordField(rest)
+        },
+    }
+  match (findRecordField(diagnostics)) {
+    Some(diag) => {
+      let excerpt = Source.slice(source, diag.span)
+      all([
+        assertEquals("\"x\"", excerpt),
+        assertEquals(3, diag.span.line),
+      ])
+    },
+    None => fail("expected record field diagnostic"),
   }
 })
 
