@@ -7,8 +7,10 @@ from "../core_ast.gr" include CoreAst
 from "../constraints.gr" include Constraints
 from "../env.gr" include Env
 from "../types.gr" include Types
+from "../layer2/infection.gr" include Layer2Infection
 from "./expr_utils.gr" include Layer1ExprUtils
 from "./marks.gr" include Layer1Marks
+from "./unify.gr" include Layer1Unify
 from "./infer_state.gr" include InferState as Layer1InferState
 
 record NominalRecordCandidate {
@@ -86,13 +88,6 @@ provide let inferNominalRecordContext = (
   literalNodeId: Number,
   providedFields: List<ProvidedRecordField>,
   state: Layer1InferState.InferState,
-  unifyBlameFn: (
-    Types.Type,
-    Types.Type,
-    Constraints.Origin,
-    Option<Constraints.Origin>,
-    Layer1InferState.InferState,
-  ) => Layer1InferState.InferState,
 ) => {
   let rec buildCandidates = (
     remaining: List<(String, Env.TypeInfo)>,
@@ -173,7 +168,7 @@ provide let inferNominalRecordContext = (
               Some(expectedType) =>
                 unifyProvided(
                   rest,
-                  unifyBlameFn(
+                  Layer1Unify.unifyBlaming(
                     field.valueType,
                     expectedType,
                     Layer1Marks.originForNode(literalNodeId, "record literal field"),
@@ -248,13 +243,6 @@ provide let inferProjectionFromFieldContext = (
   fieldType: Types.Type,
   fieldBlame: Option<Constraints.Origin>,
   state: Layer1InferState.InferState,
-  unifyBlameFn: (
-    Types.Type,
-    Types.Type,
-    Constraints.Origin,
-    Option<Constraints.Origin>,
-    Layer1InferState.InferState,
-  ) => Layer1InferState.InferState,
 ) => {
   let rec collectCandidates = (
     remaining: List<(String, Env.TypeInfo)>,
@@ -295,14 +283,14 @@ provide let inferProjectionFromFieldContext = (
     [candidate] =>
       match (findRecordFieldType(candidate.fields, fieldName)) {
         Some(expectedFieldType) => {
-          let state2 = unifyBlameFn(
+          let state2 = Layer1Unify.unifyBlaming(
             targetType,
             candidate.nominalType,
             Layer1Marks.originForNode(literalNodeId, "record projection target"),
             targetBlame,
             state1
           )
-          unifyBlameFn(
+          Layer1Unify.unifyBlaming(
             fieldType,
             expectedFieldType,
             Layer1Marks.originForNode(literalNodeId, "record projection field"),
@@ -349,50 +337,22 @@ provide let inferProjectionFromCarrierContext = (
   fieldType: Types.Type,
   fieldBlame: Option<Constraints.Origin>,
   state: Layer1InferState.InferState,
-  unifyBlameFn: (
-    Types.Type,
-    Types.Type,
-    Constraints.Origin,
-    Option<Constraints.Origin>,
-    Layer1InferState.InferState,
-  ) => Layer1InferState.InferState,
-  classifyCarrierValueType: (
-    Types.Type,
-    Layer1InferState.InferState,
-  ) => Option<Types.Type>,
-  wrapFieldTypeForCarrier: (
-    Types.Type,
-    Types.Type,
-    Layer1InferState.InferState,
-  ) => Option<Types.Type>,
 ) =>
-  match (classifyCarrierValueType(targetType, state)) {
-    Some(valueType) =>
+  match (Layer2Infection.classifyInfectiousNominal(targetType, state)) {
+    Some((valueType, wrap)) =>
       match (Layer1InferState.apply(state, valueType)) {
         Types.TNominal(valueName, valueArgs) =>
           match (resolveNominalRecordFields(valueName, valueArgs, state)) {
             Some(fields) =>
               match (findRecordFieldType(fields, fieldName)) {
                 Some(existingType) =>
-                  match (wrapFieldTypeForCarrier(targetType, existingType, state)) {
-                    Some(wrappedFieldType) =>
-                      unifyBlameFn(
-                        fieldType,
-                        wrappedFieldType,
-                        Layer1Marks.originForNode(literalNodeId, "record projection field"),
-                        fieldBlame,
-                        state
-                      ),
-                    None =>
-                      Layer1Marks.addTypeMarkWithBlame(
-                        state,
-                        Layer1InferState.TypeMismatch,
-                        Layer1Marks.originForNode(literalNodeId, "record projection nominal"),
-                        targetBlame,
-                        CoreAst.Inconsistent,
-                        "Type error: projection expects a nominal record value"
-                      ),
-                  },
+                  Layer1Unify.unifyBlaming(
+                    fieldType,
+                    Layer2Infection.wrapResultWithCarrier(existingType, wrap, state),
+                    Layer1Marks.originForNode(literalNodeId, "record projection field"),
+                    fieldBlame,
+                    state
+                  ),
                 None =>
                   Layer1Marks.addTypeMarkWithBlame(
                     state,
@@ -439,13 +399,6 @@ provide let validateRecordLiteralAgainstNominal = (
   fields: List<ProvidedRecordField>,
   expectedType: Types.Type,
   state: Layer1InferState.InferState,
-  unifyBlameFn: (
-    Types.Type,
-    Types.Type,
-    Constraints.Origin,
-    Option<Constraints.Origin>,
-    Layer1InferState.InferState,
-  ) => Layer1InferState.InferState,
 ) =>
   match (Layer1InferState.apply(state, expectedType)) {
     Types.TNominal(typeName, typeArgs) =>
@@ -464,7 +417,7 @@ provide let validateRecordLiteralAgainstNominal = (
                   Some(nominalTy) =>
                     unifyFields(
                       rest,
-                      unifyBlameFn(
+                      Layer1Unify.unifyBlaming(
                         field.valueType,
                         nominalTy,
                         Layer1Marks.originForNode(literalNodeId, "record field"),

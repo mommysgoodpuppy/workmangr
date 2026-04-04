@@ -64,11 +64,6 @@ provide let rec isZeroValidType = (
   ty: Types.Type,
   state: Layer1InferState.InferState,
   seenNominals: List<String>,
-  resolveNominalRecordFields: (
-    String,
-    List<Types.Type>,
-    Layer1InferState.InferState,
-  ) => Option<List<(String, Types.Type)>>,
 ) => {
   let resolved = Layer1InferState.apply(state, ty)
   if (isPrimitiveZeroValidType(resolved)) {
@@ -80,7 +75,7 @@ provide let rec isZeroValidType = (
           match (rest) {
             [] => true,
             [item, ...tail] =>
-              isZeroValidType(item, state, seenNominals, resolveNominalRecordFields)
+              isZeroValidType(item, state, seenNominals)
                 && allItemsZeroValid(tail),
           }
         allItemsZeroValid(items)
@@ -89,7 +84,7 @@ provide let rec isZeroValidType = (
         if (containsString(seenNominals, name)) {
           true
         } else {
-          match (resolveNominalRecordFields(name, args, state)) {
+          match (Layer1RecordCtx.resolveNominalRecordFields(name, args, state)) {
             Some(fields) => {
               let rec allFieldsZeroValid = (rest: List<(String, Types.Type)>) =>
                 match (rest) {
@@ -98,8 +93,7 @@ provide let rec isZeroValidType = (
                     isZeroValidType(
                       fieldTy,
                       state,
-                      [name, ...seenNominals],
-                      resolveNominalRecordFields
+                      [name, ...seenNominals]
                     )
                       && allFieldsZeroValid(tail),
                 }
@@ -148,8 +142,7 @@ provide let rec inferZerosRecordConstructorCast = (
     isZeroValidType(
       ty,
       st,
-      seenNominals,
-      Layer1RecordCtx.resolveNominalRecordFields
+      seenNominals
     )
   match (Env.lookupType(state.env, typeName.text)) {
     Some(typeInfo) =>
