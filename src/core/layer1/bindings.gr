@@ -1,8 +1,11 @@
 module Layer1Bindings
 
 from "list" include List
+from "map" include Map
 
 from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../flow.gr" include Flow
 from "../types.gr" include Types
 from "./expr.gr" include Layer1Expr
 
@@ -55,3 +58,260 @@ provide let rec inferLetBindingsSequential = (
     [binding, ...rest] =>
       inferLetBindingsSequential(rest, inferBinding(binding, state), inferBinding),
   }
+
+provide let inferLetBinding = (
+  binding: CoreAst.LetBinding,
+  state,
+  inferBindingValue: (CoreAst.LetBinding, state) => (Types.Type, state),
+  normalizeNumericTypeForGeneralize: (Types.Type, state) => Types.Type,
+  logState: (String, state, Number) => Void,
+  snapshotValuesOf: state => Types.Env,
+  substOf: state => Types.Subst,
+  isReservedValueName: String => Bool,
+  addReservedNameMark: (state, CoreAst.Node, String) => state,
+  exprIdentitiesForNode: (state, Number) => Flow.DomainIdentities,
+  functionNodeIdForExpr: CoreAst.Expr => Option<Number>,
+  flowOf: state => Flow.FlowState,
+  envOf: state => Env.TypingEnv,
+  withFlowEnvAndTopBindings: (
+    state,
+    Flow.FlowState,
+    Env.TypingEnv,
+    Map.Map<String, Types.Scheme>,
+    Map.Map<String, Types.Type>,
+  ) => state,
+  topBindingsOf: state => Map.Map<String, Types.Scheme>,
+  topBindingRawTypesOf: state => Map.Map<String, Types.Type>,
+) => {
+  let declaredNameOpt = match (binding.name.kind) {
+    CoreAst.Var(name) => Some(name),
+    CoreAst.Pin(name) => Some(name),
+    CoreAst.Constructor(name, _) => Some(name),
+    _ => None,
+  }
+  let (tValue, state1) = inferBindingValue(binding, state)
+  let tValueFinal = normalizeNumericTypeForGeneralize(tValue, state1)
+  logState("letBinding.preGeneralize", state1, binding.node.id)
+  let scheme = Types.generalize(
+    snapshotValuesOf(state1),
+    substOf(state1),
+    tValueFinal
+  )
+  let name = Layer1Expr.bindingName(binding)
+  match (declaredNameOpt) {
+    Some(nameDecl) when isReservedValueName(nameDecl.text) =>
+      addReservedNameMark(state1, nameDecl.node, nameDecl.text),
+    _ =>
+      if (isReservedValueName(name)) {
+        addReservedNameMark(state1, binding.name.node, name)
+      } else {
+        let identities = exprIdentitiesForNode(state1, binding.value.node.id)
+        let (entry, flow1) = Flow.bindScheme(
+          flowOf(state1),
+          scheme,
+          Flow.LetBinding,
+          identities=identities,
+          functionNodeId=functionNodeIdForExpr(binding.value)
+        )
+        let flow2 = Flow.registerBindingInfo(
+          flow1,
+          entry.bindingId,
+          name,
+          entry.scopeId,
+          entry.bindingKind
+        )
+        let env1 = Env.defineValueEntry(envOf(state1), name, entry)
+        let topBindings = topBindingsOf(state1)
+        let topBindingRawTypes = topBindingRawTypesOf(state1)
+        Map.set(name, scheme, topBindings)
+        Map.set(name, tValue, topBindingRawTypes)
+        withFlowEnvAndTopBindings(state1, flow2, env1, topBindings, topBindingRawTypes)
+      },
+  }
+}
+
+provide let rec findBindingByName = (
+  name: String,
+  bindings: List<CoreAst.LetBinding>,
+) =>
+  match (bindings) {
+    [] => None,
+    [binding, ...rest] =>
+      if (Layer1Expr.bindingName(binding) == name) {
+        Some(binding)
+      } else {
+        findBindingByName(name, rest)
+      },
+  }
+
+provide let inferRecursiveBindings = (
+  bindings: List<CoreAst.LetBinding>,
+  state,
+  isReservedValueName: String => Bool,
+  addReservedNameMark: (state, CoreAst.Node, String) => state,
+  nextVarOf: state => Number,
+  withNextVar: (state, Number) => state,
+  cloneEnvValues: Types.Env => Types.Env,
+  snapshotValuesOf: state => Types.Env,
+  flowOf: state => Flow.FlowState,
+  envOf: state => Env.TypingEnv,
+  withFlowEnv: (state, Flow.FlowState, Env.TypingEnv) => state,
+  inferBindingValue: (CoreAst.LetBinding, state) => (Types.Type, state),
+  freshVar: state => (Types.Type, state),
+  addTypeMark: (state, Number, CoreAst.Mark, String) => state,
+  unifyRecursiveBinding: (CoreAst.LetBinding, Types.Type, Types.Type, state) => state,
+  logStateSimple: (String, state) => Void,
+  normalizeNumericTypeForGeneralize: (Types.Type, state) => Types.Type,
+  substOf: state => Types.Subst,
+  exprIdentitiesForNode: (state, Number) => Flow.DomainIdentities,
+  functionNodeIdForExpr: CoreAst.Expr => Option<Number>,
+  topBindingsOf: state => Map.Map<String, Types.Scheme>,
+  topBindingRawTypesOf: state => Map.Map<String, Types.Type>,
+  withFlowEnvAndTopBindings: (
+    state,
+    Flow.FlowState,
+    Env.TypingEnv,
+    Map.Map<String, Types.Scheme>,
+    Map.Map<String, Types.Type>,
+  ) => state,
+) => {
+  let rec collectAllowed = (
+    remaining: List<CoreAst.LetBinding>,
+    keptRev: List<CoreAst.LetBinding>,
+    st,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(keptRev), st),
+      [binding, ...rest] => {
+        let declaredNameOpt = match (binding.name.kind) {
+          CoreAst.Var(nameDecl) => Some(nameDecl),
+          CoreAst.Pin(nameDecl) => Some(nameDecl),
+          CoreAst.Constructor(nameDecl, _) => Some(nameDecl),
+          _ => None,
+        }
+        match (declaredNameOpt) {
+          Some(nameDecl) when isReservedValueName(nameDecl.text) =>
+            collectAllowed(
+              rest,
+              keptRev,
+              addReservedNameMark(st, nameDecl.node, nameDecl.text)
+            ),
+          _ => {
+            let name = Layer1Expr.bindingName(binding)
+            if (isReservedValueName(name)) {
+              collectAllowed(
+                rest,
+                keptRev,
+                addReservedNameMark(st, binding.name.node, name)
+              )
+            } else {
+              collectAllowed(rest, [binding, ...keptRev], st)
+            }
+          },
+        }
+      },
+    }
+
+  let (allowedBindings, state0) = collectAllowed(bindings, [], state)
+  if (allowedBindings == []) {
+    state0
+  } else {
+    let baseValues = cloneEnvValues(snapshotValuesOf(state0))
+    let seed = seedRecursivePlaceholders(allowedBindings, nextVarOf(state0))
+    let placeholders = seed.placeholders
+    let state1 = List.reduce(
+      (stAcc, pair: (String, Types.Type)) => {
+        let (name, placeholderType) = pair
+        let (entry, flow1) = Flow.bindScheme(
+          flowOf(stAcc),
+          { quantifiers: [], ty: placeholderType }: Types.Scheme,
+          Flow.RecBinding,
+          identities=Flow.emptyDomainIdentities(),
+          functionNodeId=match (findBindingByName(name, allowedBindings)) {
+            Some(binding) => functionNodeIdForExpr(binding.value),
+            None => None,
+          }
+        )
+        let flow2 = Flow.registerBindingInfo(
+          flow1,
+          entry.bindingId,
+          name,
+          entry.scopeId,
+          entry.bindingKind
+        )
+        let env1 = Env.defineValueEntry(envOf(stAcc), name, entry)
+        withFlowEnv(stAcc, flow2, env1)
+      },
+      withNextVar(state0, seed.nextVar),
+      placeholders
+    )
+
+    let rec inferBodies = (remaining: List<CoreAst.LetBinding>, st) =>
+      match (remaining) {
+        [] => st,
+        [binding, ...rest] => {
+          let name = Layer1Expr.bindingName(binding)
+          let (placeholderType, st0) = match (lookupPlaceholder(name, placeholders)) {
+            Some(t) => (t, st),
+            None => {
+              let (fallback, st1) = freshVar(st)
+              let st2 = addTypeMark(
+                st1,
+                binding.node.id,
+                CoreAst.Internal("missing recursive placeholder"),
+                "Type error: missing placeholder for recursive binding " ++ name
+              )
+              (fallback, st2)
+            },
+          }
+          let (valueType, st1) = inferBindingValue(binding, st0)
+          let st2 = unifyRecursiveBinding(binding, placeholderType, valueType, st1)
+          inferBodies(rest, st2)
+        },
+      }
+
+    let state2 = inferBodies(allowedBindings, state1)
+    logStateSimple("rec.preFinalize", state2)
+
+    let rec finalize = (remaining: List<(String, Types.Type)>, st) =>
+      match (remaining) {
+        [] => st,
+        [(name, placeholderType), ...rest] => {
+          let schemeType = normalizeNumericTypeForGeneralize(placeholderType, st)
+          let scheme = Types.generalize(baseValues, substOf(st), schemeType)
+          let identities = match (findBindingByName(name, allowedBindings)) {
+            Some(binding) => exprIdentitiesForNode(st, binding.value.node.id),
+            None => Flow.emptyDomainIdentities(),
+          }
+          let (entry, flow1) = Flow.bindScheme(
+            flowOf(st),
+            scheme,
+            Flow.RecBinding,
+            identities=identities,
+            functionNodeId=match (findBindingByName(name, allowedBindings)) {
+              Some(binding) => functionNodeIdForExpr(binding.value),
+              None => None,
+            }
+          )
+          let flow2 = Flow.registerBindingInfo(
+            flow1,
+            entry.bindingId,
+            name,
+            entry.scopeId,
+            entry.bindingKind
+          )
+          let env1 = Env.defineValueEntry(envOf(st), name, entry)
+          let topBindings = topBindingsOf(st)
+          let topBindingRawTypes = topBindingRawTypesOf(st)
+          Map.set(name, scheme, topBindings)
+          Map.set(name, placeholderType, topBindingRawTypes)
+          finalize(
+            rest,
+            withFlowEnvAndTopBindings(st, flow2, env1, topBindings, topBindingRawTypes)
+          )
+        },
+      }
+
+    finalize(placeholders, state2)
+  }
+}

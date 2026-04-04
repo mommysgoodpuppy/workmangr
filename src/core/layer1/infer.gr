@@ -2620,49 +2620,32 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
 }
 
 let inferLetBinding = (binding: CoreAst.LetBinding, state: InferState) => {
-  let declaredNameOpt = match (binding.name.kind) {
-    CoreAst.Var(name) => Some(name),
-    CoreAst.Pin(name) => Some(name),
-    CoreAst.Constructor(name, _) => Some(name),
-    _ => None,
-  }
-  let (tValue, state1) = inferBindingValue(binding, state)
-  let tValueFinal = normalizeNumericTypeForGeneralize(tValue, state1)
-  logState("letBinding.preGeneralize", state1, nodeId=binding.node.id)
-  let scheme = Types.generalize(
-    Env.snapshotValues(state1.env),
-    state1.subst,
-    tValueFinal
+  Layer1Bindings.inferLetBinding(
+    binding,
+    state,
+    inferBindingValue,
+    normalizeNumericTypeForGeneralize,
+    (label, st, nodeId) => logState(label, st, nodeId=nodeId),
+    st => Env.snapshotValues(st.env),
+    st => st.subst,
+    isReservedValueName,
+    addReservedNameMark,
+    exprIdentitiesForNode,
+    functionNodeIdForExpr,
+    st => st.flow,
+    st => st.env,
+    (st, flow, env, topBindings, topBindingRawTypes) => {
+      {
+        ...st,
+        flow,
+        env,
+        topBindings,
+        topBindingRawTypes,
+      }
+    },
+    st => st.topBindings,
+    st => st.topBindingRawTypes,
   )
-  let name = Layer1Expr.bindingName(binding)
-  match (declaredNameOpt) {
-    Some(nameDecl) when isReservedValueName(nameDecl.text) =>
-      addReservedNameMark(state1, nameDecl.node, nameDecl.text),
-    _ =>
-      if (isReservedValueName(name)) {
-        addReservedNameMark(state1, binding.name.node, name)
-      } else {
-        let identities = exprIdentitiesForNode(state1, binding.value.node.id)
-        let (entry, flow1) = Flow.bindScheme(
-          state1.flow,
-          scheme,
-          Flow.LetBinding,
-          identities=identities,
-          functionNodeId=functionNodeIdForExpr(binding.value)
-        )
-        let flow2 = Flow.registerBindingInfo(
-          flow1,
-          entry.bindingId,
-          name,
-          entry.scopeId,
-          entry.bindingKind
-        )
-        Env.defineValueEntry(state1.env, name, entry)
-        Map.set(name, scheme, state1.topBindings)
-        Map.set(name, tValue, state1.topBindingRawTypes)
-        { ...state1, flow: flow2, topBindingRawTypes: state1.topBindingRawTypes }
-      },
-  }
 }
 
 let rec withPatternBindings = (
@@ -2672,164 +2655,56 @@ let rec withPatternBindings = (
   fn: InferState => (Types.Type, InferState),
 ) => withPatternBindingsKind(pattern, expectedType, Flow.PatternBinding, state, fn)
 
-let rec findBindingByName = (
-  name: String,
-  bindings: List<CoreAst.LetBinding>,
-) =>
-  match (bindings) {
-    [] => None,
-    [binding, ...rest] =>
-      if (Layer1Expr.bindingName(binding) == name) {
-        Some(binding)
-      } else {
-        findBindingByName(name, rest)
-      },
-  }
-
 let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferState) => {
-  let rec collectAllowed = (
-    remaining: List<CoreAst.LetBinding>,
-    keptRev: List<CoreAst.LetBinding>,
-    st: InferState,
-  ) =>
-    match (remaining) {
-      [] => (List.reverse(keptRev), st),
-      [binding, ...rest] => {
-        let declaredNameOpt = match (binding.name.kind) {
-          CoreAst.Var(nameDecl) => Some(nameDecl),
-          CoreAst.Pin(nameDecl) => Some(nameDecl),
-          CoreAst.Constructor(nameDecl, _) => Some(nameDecl),
-          _ => None,
-        }
-        match (declaredNameOpt) {
-          Some(nameDecl) when isReservedValueName(nameDecl.text) =>
-            collectAllowed(
-              rest,
-              keptRev,
-              addReservedNameMark(st, nameDecl.node, nameDecl.text)
-            ),
-          _ => {
-            let name = Layer1Expr.bindingName(binding)
-            if (isReservedValueName(name)) {
-              collectAllowed(
-                rest,
-                keptRev,
-                addReservedNameMark(st, binding.name.node, name)
-              )
-            } else {
-              collectAllowed(rest, [binding, ...keptRev], st)
-            }
-          },
-        }
-      },
-    }
-
-  let (allowedBindings, state0) = collectAllowed(bindings, [], state)
-  if (allowedBindings == []) {
-    state0
-  } else {
-  let baseValues = cloneEnvValues(Env.snapshotValues(state.env))
-  let seed = Layer1Bindings.seedRecursivePlaceholders(allowedBindings, state0.nextVar)
-  let placeholders = seed.placeholders
-  let state1 = List.reduce(
-    (stAcc: InferState, pair: (String, Types.Type)) => {
-      let (name, placeholderType) = pair
-        let (entry, flow1) = Flow.bindScheme(
-          stAcc.flow,
-          { quantifiers: [], ty: placeholderType }: Types.Scheme,
-          Flow.RecBinding,
-          identities=Flow.emptyDomainIdentities(),
-          functionNodeId=match (findBindingByName(name, allowedBindings)) {
-            Some(binding) => functionNodeIdForExpr(binding.value),
-            None => None,
-          }
-        )
-      let flow2 = Flow.registerBindingInfo(
-        flow1,
-        entry.bindingId,
-        name,
-        entry.scopeId,
-        entry.bindingKind
-      )
-      let env1 = Env.defineValueEntry(stAcc.env, name, entry)
-      { ...stAcc, env: env1, flow: flow2 }
+  Layer1Bindings.inferRecursiveBindings(
+    bindings,
+    state,
+    isReservedValueName,
+    addReservedNameMark,
+    st => st.nextVar,
+    (st, nextVar) => { ...st, nextVar },
+    cloneEnvValues,
+    st => Env.snapshotValues(st.env),
+    st => st.flow,
+    st => st.env,
+    (st, flow, env) => { ...st, flow, env },
+    inferBindingValue,
+    freshVar,
+    (st, nodeId, mark, message) =>
+      addTypeMark(
+        st,
+        Layer1InferState.Internal,
+        originForNode(nodeId, "recursive placeholder"),
+        mark,
+        message
+      ),
+    (binding, placeholderType, valueType, st) =>
+      unifyForExprWithBlame(
+        binding.node.id,
+        "recursive binding",
+        placeholderType,
+        valueType,
+        binding.value,
+        "recursive binding value",
+        st
+      ),
+    (label, st) => logState(label, st),
+    normalizeNumericTypeForGeneralize,
+    st => st.subst,
+    exprIdentitiesForNode,
+    functionNodeIdForExpr,
+    st => st.topBindings,
+    st => st.topBindingRawTypes,
+    (st, flow, env, topBindings, topBindingRawTypes) => {
+      {
+        ...st,
+        flow,
+        env,
+        topBindings,
+        topBindingRawTypes,
+      }
     },
-    { ...state0, nextVar: seed.nextVar },
-    placeholders
   )
-
-  let rec inferBodies = (remaining: List<CoreAst.LetBinding>, st: InferState) =>
-    match (remaining) {
-      [] => st,
-      [binding, ...rest] => {
-        let name = Layer1Expr.bindingName(binding)
-        let (placeholderType, st0) = match (Layer1Bindings.lookupPlaceholder(name, placeholders)) {
-          Some(t) => (t, st),
-          None => {
-            let (fallback, st1) = freshVar(st)
-            let st2 = addTypeMark(
-              st1,
-              Layer1InferState.Internal,
-              originForNode(binding.node.id, "recursive placeholder"),
-              CoreAst.Internal("missing recursive placeholder"),
-              "Type error: missing placeholder for recursive binding " ++ name
-            )
-            (fallback, st2)
-          },
-        }
-        let (valueType, st1) = inferBindingValue(binding, st0)
-        let st2 = unifyForExprWithBlame(
-          binding.node.id,
-          "recursive binding",
-          placeholderType,
-          valueType,
-          binding.value,
-          "recursive binding value",
-          st1
-        )
-        inferBodies(rest, st2)
-      },
-    }
-
-  let state2 = inferBodies(allowedBindings, state1)
-  logState("rec.preFinalize", state2)
-
-  let rec finalize = (remaining: List<(String, Types.Type)>, st: InferState) =>
-    match (remaining) {
-      [] => st,
-      [(name, placeholderType), ...rest] => {
-        let schemeType = normalizeNumericTypeForGeneralize(placeholderType, st)
-        let scheme = Types.generalize(baseValues, st.subst, schemeType)
-        let identities = match (findBindingByName(name, allowedBindings)) {
-          Some(binding) => exprIdentitiesForNode(st, binding.value.node.id),
-          None => Flow.emptyDomainIdentities(),
-        }
-        let (entry, flow1) = Flow.bindScheme(
-          st.flow,
-          scheme,
-          Flow.RecBinding,
-          identities=identities,
-          functionNodeId=match (findBindingByName(name, allowedBindings)) {
-            Some(binding) => functionNodeIdForExpr(binding.value),
-            None => None,
-          }
-        )
-        let flow2 = Flow.registerBindingInfo(
-          flow1,
-          entry.bindingId,
-          name,
-          entry.scopeId,
-          entry.bindingKind
-        )
-        Env.defineValueEntry(st.env, name, entry)
-        Map.set(name, scheme, st.topBindings)
-        Map.set(name, placeholderType, st.topBindingRawTypes)
-        finalize(rest, { ...st, flow: flow2, topBindingRawTypes: st.topBindingRawTypes })
-      },
-    }
-
-  finalize(placeholders, state2)
-  }
 }
 
 let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
