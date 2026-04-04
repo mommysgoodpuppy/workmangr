@@ -477,3 +477,80 @@ provide let validateRecordLiteralAgainstNominal = (
         "Type error: record literal requires nominal type context"
       ),
   }
+
+// Infer record-literal field payloads and normalize spread operands into explicit fields
+// when their nominal record shape is known.
+provide let collectRecordLiteralFields = (
+  literalNodeId: Number,
+  items: List<CoreAst.RecordItem>,
+  state: Layer1InferState.InferState,
+  inferExpr: (
+    CoreAst.Expr,
+    Layer1InferState.InferState,
+  ) => (Types.Type, Layer1InferState.InferState),
+) => {
+  let rec collect = (
+    remaining: List<CoreAst.RecordItem>,
+    st: Layer1InferState.InferState,
+    acc: List<ProvidedRecordField>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(acc), st),
+      [item, ...rest] => match (item) {
+        CoreAst.Field(fieldName, valueExpr) => {
+          let (valueType, st1) = inferExpr(valueExpr, st)
+          let field: ProvidedRecordField = {
+            name: fieldName.text,
+            nameOrigin: Layer1Marks.originForNode(fieldName.node.id, "record literal field"),
+            valueType,
+            valueOrigin: Layer1Marks.exprOrigin(valueExpr, "record literal field"),
+          }
+          collect(rest, st1, [field, ...acc])
+        },
+        CoreAst.Spread(valueExpr) => {
+          let (spreadType, st1) = inferExpr(valueExpr, st)
+          match (Layer1InferState.apply(st1, spreadType)) {
+            Types.TNominal(typeName, typeArgs) =>
+              match (resolveNominalRecordFields(typeName, typeArgs, st1)) {
+                Some(spreadFields) => {
+                  let spreadOrigin = Layer1Marks.exprOrigin(valueExpr, "record spread")
+                  let spreadProvided = List.map(
+                    ((fieldName, fieldType): (String, Types.Type)) => ({
+                      name: fieldName,
+                      nameOrigin: spreadOrigin,
+                      valueType: fieldType,
+                      valueOrigin: spreadOrigin,
+                    }: ProvidedRecordField),
+                    spreadFields
+                  )
+                  collect(rest, st1, List.append(List.reverse(spreadProvided), acc))
+                },
+                None => {
+                  let st2 = Layer1Marks.addTypeMarkWithBlame(
+                    st1,
+                    Layer1InferState.TypeMismatch,
+                    Layer1Marks.originForNode(literalNodeId, "record spread"),
+                    Some(Layer1Marks.exprOrigin(valueExpr, "record spread")),
+                    CoreAst.Inconsistent,
+                    "Type error: record spread expects a nominal record value"
+                  )
+                  collect(rest, st2, acc)
+                },
+              },
+            _ => {
+              let st2 = Layer1Marks.addTypeMarkWithBlame(
+                st1,
+                Layer1InferState.TypeMismatch,
+                Layer1Marks.originForNode(literalNodeId, "record spread"),
+                Some(Layer1Marks.exprOrigin(valueExpr, "record spread")),
+                CoreAst.Inconsistent,
+                "Type error: record spread expects a nominal record value"
+              )
+              collect(rest, st2, acc)
+            },
+          }
+        },
+      },
+    }
+  collect(items, state, [])
+}

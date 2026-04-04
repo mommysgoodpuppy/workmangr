@@ -1264,74 +1264,12 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                   )
                   let nominalType = Types.TNominal(typeInfo.name, paramTypes)
                   let state0 = { ...state, nextVar }
-                  let rec collectFields = (
-                    remaining: List<CoreAst.RecordItem>,
-                    st: InferState,
-                    acc: List<Layer1RecordCtx.ProvidedRecordField>,
-                  ) =>
-                    match (remaining) {
-                      [] => (List.reverse(acc), st),
-                      [item, ...rest] => match (item) {
-                        CoreAst.Field(fieldName, valueExpr) => {
-                          let (valueType, st1) = inferExpr(valueExpr, st)
-                          let field: Layer1RecordCtx.ProvidedRecordField = {
-                            name: fieldName.text,
-                            nameOrigin: originForNode(fieldName.node.id, "record literal field"),
-                            valueType,
-                            valueOrigin: exprOrigin(valueExpr, "record literal field"),
-                          }
-                          collectFields(rest, st1, [field, ...acc])
-                        },
-                        CoreAst.Spread(valueExpr) => {
-                          let (spreadType, st1) = inferExpr(valueExpr, st)
-                          match (apply(st1, spreadType)) {
-                            Types.TNominal(typeName, typeArgs) =>
-                              match (recordCtxResolveNominalRecordFields(typeName, typeArgs, st1)) {
-                                Some(spreadFields) => {
-                                  let spreadOrigin = exprOrigin(valueExpr, "record spread")
-                                  let spreadProvided = List.map(
-                                    ((fieldName, fieldType): (String, Types.Type)) => ({
-                                      name: fieldName,
-                                      nameOrigin: spreadOrigin,
-                                      valueType: fieldType,
-                                      valueOrigin: spreadOrigin,
-                                    }: Layer1RecordCtx.ProvidedRecordField),
-                                    spreadFields
-                                  )
-                                  collectFields(
-                                    rest,
-                                    st1,
-                                    List.append(List.reverse(spreadProvided), acc)
-                                  )
-                                },
-                                None => {
-                                  let st2 = addTypeMarkWithBlame(
-                                    st1,
-                                    Layer1InferState.TypeMismatch,
-                                    originForNode(expr.node.id, "record spread"),
-                                    Some(exprOrigin(valueExpr, "record spread")),
-                                    CoreAst.Inconsistent,
-                                    "Type error: record spread expects a nominal record value"
-                                  )
-                                  collectFields(rest, st2, acc)
-                                },
-                              },
-                            _ => {
-                              let st2 = addTypeMarkWithBlame(
-                                st1,
-                                Layer1InferState.TypeMismatch,
-                                originForNode(expr.node.id, "record spread"),
-                                Some(exprOrigin(valueExpr, "record spread")),
-                                CoreAst.Inconsistent,
-                                "Type error: record spread expects a nominal record value"
-                              )
-                              collectFields(rest, st2, acc)
-                            },
-                          }
-                        },
-                      },
-                    }
-                  let (fields, state1) = collectFields(items, state0, [])
+                  let (fields, state1) = Layer1RecordCtx.collectRecordLiteralFields(
+                    expr.node.id,
+                    items,
+                    state0,
+                    inferExpr
+                  )
                   let state2 = recordCtxValidateRecordLiteralAgainstNominal(
                     expr.node.id,
                     fields,
@@ -1709,70 +1647,12 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
   }
   let (valueType, state1) = match ((annotationTypeOpt, binding.value.kind)) {
     (Some(expectedType), CoreAst.RecordLit(items)) => {
-      let rec collectFields = (
-        remaining: List<CoreAst.RecordItem>,
-        st: InferState,
-        acc: List<Layer1RecordCtx.ProvidedRecordField>,
-      ) =>
-        match (remaining) {
-          [] => (List.reverse(acc), st),
-          [item, ...rest] => match (item) {
-            CoreAst.Field(fieldName, valueExpr) => {
-              let (valueType, st1) = inferExpr(valueExpr, st)
-              let field: Layer1RecordCtx.ProvidedRecordField = {
-                name: fieldName.text,
-                nameOrigin: originForNode(fieldName.node.id, "record literal field"),
-                valueType,
-                valueOrigin: exprOrigin(valueExpr, "record literal field"),
-              }
-              collectFields(rest, st1, [field, ...acc])
-            },
-            CoreAst.Spread(valueExpr) => {
-              let (spreadType, st1) = inferExpr(valueExpr, st)
-              match (apply(st1, spreadType)) {
-                Types.TNominal(typeName, typeArgs) =>
-                  match (recordCtxResolveNominalRecordFields(typeName, typeArgs, st1)) {
-                    Some(spreadFields) => {
-                      let spreadOrigin = exprOrigin(valueExpr, "record spread")
-                      let spreadProvided = List.map(
-                        ((fieldName, fieldType): (String, Types.Type)) => ({
-                          name: fieldName,
-                          nameOrigin: spreadOrigin,
-                          valueType: fieldType,
-                          valueOrigin: spreadOrigin,
-                        }: Layer1RecordCtx.ProvidedRecordField),
-                        spreadFields
-                      )
-                      collectFields(rest, st1, List.append(List.reverse(spreadProvided), acc))
-                    },
-                    None => {
-                      let st2 = addTypeMarkWithBlame(
-                        st1,
-                        Layer1InferState.TypeMismatch,
-                        originForNode(binding.value.node.id, "record spread"),
-                        Some(exprOrigin(valueExpr, "record spread")),
-                        CoreAst.Inconsistent,
-                        "Type error: record spread expects a nominal record value"
-                      )
-                      collectFields(rest, st2, acc)
-                    },
-                  },
-                _ => {
-                  let st2 = addTypeMarkWithBlame(
-                    st1,
-                    Layer1InferState.TypeMismatch,
-                    originForNode(binding.value.node.id, "record spread"),
-                    Some(exprOrigin(valueExpr, "record spread")),
-                    CoreAst.Inconsistent,
-                    "Type error: record spread expects a nominal record value"
-                  )
-                  collectFields(rest, st2, acc)
-                },
-              }
-            },
-          },
-        }
-      let (fields, st1) = collectFields(items, state, [])
+      let (fields, st1) = Layer1RecordCtx.collectRecordLiteralFields(
+        binding.value.node.id,
+        items,
+        state,
+        inferExpr
+      )
       let st2 = recordCtxValidateRecordLiteralAgainstNominal(
         binding.value.node.id,
         fields,
