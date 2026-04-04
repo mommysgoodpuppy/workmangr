@@ -7,7 +7,7 @@ from "../core_ast.gr" include CoreAst
 from "../constraints.gr" include Constraints
 from "../env.gr" include Env
 from "../types.gr" include Types
-from "./expr.gr" include Layer1Expr
+from "./expr_utils.gr" include Layer1ExprUtils
 from "./marks.gr" include Layer1Marks
 from "./infer_state.gr" include InferState as Layer1InferState
 
@@ -66,7 +66,7 @@ provide let resolveNominalRecordFields = (
           Some(
             List.map(
               ((fieldName, fieldTypeExpr): (CoreAst.Name, CoreAst.TypeExpr)) =>
-                (fieldName.text, Layer1Expr.typeExprToType(fieldTypeExpr, paramMap)),
+                (fieldName.text, Layer1ExprUtils.typeExprToType(fieldTypeExpr, paramMap)),
               recordFields
             )
           )
@@ -105,7 +105,7 @@ provide let inferNominalRecordContext = (
         match (info.recordFields) {
           None => buildCandidates(rest, nextVar, acc),
           Some(_recordFields) => {
-            let (paramTypes, _paramMap, nextVar1) = Layer1Expr.instantiateTypeParams(
+            let (paramTypes, _paramMap, nextVar1) = Layer1ExprUtils.instantiateTypeParams(
               info.typeParams,
               nextVar
             )
@@ -267,7 +267,7 @@ provide let inferProjectionFromFieldContext = (
         match (info.recordFields) {
           None => collectCandidates(rest, nextVar, acc),
           Some(_) => {
-            let (paramTypes, _paramMap, nextVar1) = Layer1Expr.instantiateTypeParams(
+            let (paramTypes, _paramMap, nextVar1) = Layer1ExprUtils.instantiateTypeParams(
               info.typeParams,
               nextVar
             )

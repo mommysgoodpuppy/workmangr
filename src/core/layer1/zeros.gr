@@ -6,14 +6,14 @@ from "map" include Map
 from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
 from "../types.gr" include Types
-from "./expr.gr" include Layer1Expr
+from "./expr_utils.gr" include Layer1ExprUtils
 from "./marks.gr" include Layer1Marks
 from "./record_ctx.gr" include Layer1RecordCtx
 from "./unify.gr" include Layer1Unify
 from "./infer_state.gr" include InferState as Layer1InferState
 
 provide let typeFromAnnotation = (annotation: CoreAst.TypeExpr) =>
-  Layer1Expr.typeExprToType(annotation, Map.make())
+  Layer1ExprUtils.typeExprToType(annotation, Map.make())
 
 provide let isZerosCastTarget = (target: CoreAst.TypeExpr) =>
   match (target.kind) {
@@ -155,7 +155,7 @@ provide let rec inferZerosRecordConstructorCast = (
     Some(typeInfo) =>
       match (typeInfo.recordFields) {
         Some(_recordFields) => {
-          let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
+          let (paramTypes, _paramMap, nextVar) = Layer1ExprUtils.instantiateTypeParams(
             typeInfo.typeParams,
             state.nextVar
           )

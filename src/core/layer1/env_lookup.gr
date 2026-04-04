@@ -8,7 +8,7 @@ from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
 from "../flow.gr" include Flow
 from "../types.gr" include Types
-from "./expr.gr" include Layer1Expr
+from "./expr_utils.gr" include Layer1ExprUtils
 from "./marks.gr" include Layer1Marks
 from "./infer_state.gr" include InferState as Layer1InferState
 
@@ -131,16 +131,16 @@ provide let registerImportedTypeInfo = (
 ) => {
   if (Env.lookupType(env, typeName) == None) {
     Env.registerType(env, info)
-    let (paramTypes, paramMap, _nextVar) = Layer1Expr.instantiateTypeParams(
+    let (paramTypes, paramMap, _nextVar) = Layer1ExprUtils.instantiateTypeParams(
       info.typeParams,
       10000
     )
-    let quantifiers = Layer1Expr.typeVarIdsFromTypes(paramTypes)
+    let quantifiers = Layer1ExprUtils.typeVarIdsFromTypes(paramTypes)
     let resultType = Types.TNominal(typeName, paramTypes)
     List.forEach((ctor: Env.ConstructorInfo) => {
       let ctorType = match (ctor.payload) {
         Some(payloadType) =>
-          Types.TFun(Layer1Expr.typeExprToType(payloadType, paramMap), resultType),
+          Types.TFun(Layer1ExprUtils.typeExprToType(payloadType, paramMap), resultType),
         None => resultType,
       }
       let scheme: Types.Scheme = { quantifiers, ty: ctorType }

@@ -23,7 +23,7 @@ from "../surface_ast.gr" include SurfaceAst
 from "../types.gr" include Types
 from "../../frontend/lower.gr" include Lower
 from "../module/module_system.gr" include ModuleSystem
-from "../layer1/expr.gr" include Layer1Expr
+from "../layer1/expr_utils.gr" include Layer1ExprUtils
 from "../foreign_types/c_type_map.gr" include CTypeMap
 
 provide record TypeAtOffset {
@@ -496,7 +496,7 @@ let collectExplicitExports = (program: CoreAst.Program) => {
             CoreAst.LetDecl(letDecl) =>
               List.forEach(
                 (binding: CoreAst.LetBinding) => {
-                  let name = Layer1Expr.bindingName(binding)
+                  let name = Layer1ExprUtils.bindingName(binding)
                   if (name != "_") {
                     Map.set(name, true, exportedValues)
                   } else {
