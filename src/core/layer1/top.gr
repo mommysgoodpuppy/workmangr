@@ -1,7 +1,9 @@
 module Layer1Top
 
 from "list" include List
+
 from "../core_ast.gr" include CoreAst
+from "./bindings.gr" include Layer1Bindings
 
 // Layer 1 top-level traversal helper: keeps group/decl recursion out of infer.gr.
 provide let inferDeclGroup = (
@@ -46,3 +48,39 @@ provide let inferTopItems = (
     }
   loop(items, state)
 }
+
+// Default Layer 1 top-level orchestration: decl-group traversal plus let/type/record dispatch.
+provide let inferTopItemsDefault = (
+  items: List<CoreAst.TopItem>,
+  state,
+  inferRecursiveBindings: (List<CoreAst.LetBinding>, state) => state,
+  inferLetBinding: (CoreAst.LetBinding, state) => state,
+  registerTypeDecl: (CoreAst.TypeDecl, state) => state,
+  registerRecordDecl: (CoreAst.RecordDecl, state) => state,
+  mergeOtherDecl: (CoreAst.Decl, state) => state,
+) =>
+  inferTopItems(
+    items,
+    state,
+    (group, st) =>
+      inferDeclGroup(
+        group,
+        st,
+        (letDecl, groupKind, stDecl) => match (groupKind) {
+          CoreAst.LetGroup(CoreAst.Rec) =>
+            inferRecursiveBindings(letDecl.bindings, stDecl),
+          _ =>
+            Layer1Bindings.inferLetBindingsSequential(
+              letDecl.bindings,
+              stDecl,
+              inferLetBinding
+            ),
+        },
+        registerTypeDecl,
+        (decl, stDecl) => match (decl) {
+          CoreAst.RecordDecl(recordDecl) => registerRecordDecl(recordDecl, stDecl),
+          _ => mergeOtherDecl(decl, stDecl),
+        }
+      ),
+    (_item, st) => st
+  )

@@ -2731,36 +2731,20 @@ let registerRecordDecl = (decl: CoreAst.RecordDecl, state: InferState) => {
 }
 
 let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
-  Layer1Top.inferTopItems(
+  Layer1Top.inferTopItemsDefault(
     items,
     state,
-    (dg, st) =>
-      Layer1Top.inferDeclGroup(
-        dg,
-        st,
-        (ld, groupKind, stDecl) => match (groupKind) {
-          CoreAst.LetGroup(CoreAst.Rec) =>
-            inferRecursiveBindings(ld.bindings, stDecl),
-          _ =>
-            Layer1Bindings.inferLetBindingsSequential(
-              ld.bindings,
-              stDecl,
-              inferLetBinding
-            ),
-        },
-        registerTypeDecl,
-        (decl, stDecl) => match (decl) {
-          CoreAst.RecordDecl(recordDecl) => registerRecordDecl(recordDecl, stDecl),
-          _ =>
-            Layer1Decl.mergeDeclInfectionRegistry(
-              decl,
-              stDecl,
-              st => st.infectionRegistry,
-              (st, infectionRegistry) => { ...st, infectionRegistry }
-            ),
-        }
-      ),
-    (_item, st) => st
+    inferRecursiveBindings,
+    inferLetBinding,
+    registerTypeDecl,
+    registerRecordDecl,
+    (decl, stDecl) =>
+      Layer1Decl.mergeDeclInfectionRegistry(
+        decl,
+        stDecl,
+        st => st.infectionRegistry,
+        (st, infectionRegistry) => { ...st, infectionRegistry }
+      )
   )
 
 provide let inferProgramLayer1 = (program: CoreAst.Program) => {
