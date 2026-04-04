@@ -18,11 +18,31 @@ let expectSingleDeclGroup = (program: CoreAst.Program) => {
   }
 }
 
+let expectNthDeclGroup = (program: CoreAst.Program, index: Number) => {
+  let rec loop = (items: List<CoreAst.TopItem>, current: Number) =>
+    match (items) {
+      [] => Err("expected decl group at index " ++ toString(index)),
+      [CoreAst.DeclGroup(dg), ..._] when current == index => Ok(dg),
+      [_head, ...tail] => loop(tail, current + 1),
+    }
+  loop(program.items, 0)
+}
+
 let expectSingleLetDecl = (dg: CoreAst.DeclGroup) => {
   match (dg.decls) {
     [CoreAst.LetDecl(ld)] => Ok(ld),
     _ => Err("expected single let decl"),
   }
+}
+
+let expectNthLetDecl = (dg: CoreAst.DeclGroup, index: Number) => {
+  let rec loop = (decls: List<CoreAst.Decl>, current: Number) =>
+    match (decls) {
+      [] => Err("expected let decl at index " ++ toString(index)),
+      [CoreAst.LetDecl(ld), ..._] when current == index => Ok(ld),
+      [_head, ...tail] => loop(tail, current + 1),
+    }
+  loop(dg.decls, 0)
 }
 
 let expectSingleBinding = (ld: CoreAst.LetDecl) => {
@@ -767,8 +787,8 @@ test("expression cast lowers to core cast node", () => {
   bind(
     bind(
       bind(
-        expectSingleDeclGroup(program),
-        (dg) => expectNthLetDecl(dg, 1),
+        expectNthDeclGroup(program, 1),
+        (dg) => expectSingleLetDecl(dg),
       ),
       (ld) => expectSingleBinding(ld),
     ),

@@ -6,13 +6,14 @@ from "map" include Map
 from "../../../core/analysis.gr" include Analysis
 from "../../../core/error.gr" include Error
 from "../../../core/layer1/infer.gr" include Infer
+from "../../../core/layer1/infer_state.gr" include InferState as Layer1InferState
 from "../../../core/layer2/solve.gr" include Layer2Solve
 from "../../../core/source.gr" include Source
 from "../../../core/types.gr" include Types
 from "../../../frontend/frontend.gr" include Frontend
 
 provide record Snapshot {
-  infer: Infer.Layer2Result,
+  infer: Layer1InferState.Layer2Result,
   nodeSpans: Map.Map<Number, Source.Span>,
   diagnostics: List<Error.CompilerError>,
 }
@@ -37,7 +38,7 @@ provide let analyzeSource = (source: String) => {
   Error.clearErrors()
   let program = Frontend.parseAndLower(source)
   let layer1 = Infer.inferProgramLayer1(program)
-  let infer = Layer2Solve.solveConstraints(layer1)
+  let infer: Layer1InferState.Layer2Result = Layer2Solve.solveConstraints(layer1)
   let nodeSpans = Analysis.buildNodeSpans(program)
   let diagnostics = Analysis.typeInferenceDiagnostics(infer.marks, nodeSpans)
   Error.clearErrors()
