@@ -4,6 +4,7 @@ from "list" include List
 
 from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
+from "../infection_registry.gr" include InfectionRegistry
 from "../types.gr" include Types
 from "./expr.gr" include Layer1Expr
 
@@ -77,4 +78,94 @@ provide let prepareRecordDecl = (decl: CoreAst.RecordDecl) => {
     recordFields: Some(decl.fields),
     infection: None,
   }: Env.TypeInfo
+}
+
+provide let registerTypeDecl = (
+  decl: CoreAst.TypeDecl,
+  state,
+  isReservedValueName: String => Bool,
+  addReservedNameMark: (state, CoreAst.Node, String) => state,
+  infectiousDomainDeclared: (state, String) => Bool,
+  localInfectionDomainError: (state, CoreAst.Node, String, String) => state,
+  nextVarOf: state => Number,
+  envOf: state => Env.TypingEnv,
+  withNextVarAndEnv: (state, Number, Env.TypingEnv) => state,
+) => {
+  if (isReservedValueName(decl.name.text)) {
+    addReservedNameMark(state, decl.name.node, decl.name.text)
+  } else {
+    let hasReservedCtor = match (decl.body) {
+      CoreAst.Variant(ctors) => {
+        let rec existsReservedCtor = (
+          items: List<(CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)>
+        ) =>
+          match (items) {
+            [] => false,
+            [(ctorName, _payload, _ann), ...rest] =>
+              isReservedValueName(ctorName.text) || existsReservedCtor(rest),
+          }
+        existsReservedCtor(ctors)
+      },
+      _ => false,
+    }
+    if (hasReservedCtor) {
+      let offendingNode = match (decl.body) {
+        CoreAst.Variant(ctors) => {
+          let rec firstReservedCtorNode = (
+            items: List<(CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)>
+          ) =>
+            match (items) {
+              [] => decl.name.node,
+              [(ctorName, _payload, _ann), ...rest] =>
+                if (isReservedValueName(ctorName.text)) {
+                  ctorName.node
+                } else {
+                  firstReservedCtorNode(rest)
+                },
+            }
+          firstReservedCtorNode(ctors)
+        },
+        _ => decl.name.node,
+      }
+      addReservedNameMark(state, offendingNode, "Panic")
+    } else {
+      let prepared = prepareTypeDecl(decl, nextVarOf(state))
+      let env1 = Env.registerType(envOf(state), prepared.info)
+      List.forEach(((name, scheme): (String, Types.Scheme)) => {
+        Env.defineValue(env1, name, scheme)
+        void
+      }, prepared.constructorSchemes)
+      let state1 = withNextVarAndEnv(state, prepared.nextVar, env1)
+      match (prepared.info.infection) {
+        Some(domain) =>
+          if (infectiousDomainDeclared(state1, domain)) {
+            state1
+          } else {
+            localInfectionDomainError(state1, decl.node, prepared.info.name, domain)
+          },
+        None => state1,
+      }
+    }
+  }
+}
+
+provide let registerRecordDecl = (
+  decl: CoreAst.RecordDecl,
+  state,
+  envOf: state => Env.TypingEnv,
+  withEnv: (state, Env.TypingEnv) => state,
+) => {
+  let info = prepareRecordDecl(decl)
+  let env1 = Env.registerType(envOf(state), info)
+  withEnv(state, env1)
+}
+
+provide let mergeDeclInfectionRegistry = (
+  decl: CoreAst.Decl,
+  state,
+  registryOf: state => InfectionRegistry.Registry,
+  withRegistry: (state, InfectionRegistry.Registry) => state,
+) => {
+  let nextRegistry = InfectionRegistry.mergeDecl(registryOf(state), decl)
+  withRegistry(state, nextRegistry)
 }

@@ -2833,68 +2833,26 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
 }
 
 let registerTypeDecl = (decl: CoreAst.TypeDecl, state: InferState) => {
-  if (isReservedValueName(decl.name.text)) {
-    addReservedNameMark(state, decl.name.node, decl.name.text)
-  } else {
-    let hasReservedCtor = match (decl.body) {
-      CoreAst.Variant(ctors) => {
-        let rec existsReservedCtor = (
-          items: List<(CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)>
-        ) =>
-          match (items) {
-            [] => false,
-            [(ctorName, _payload, _ann), ...rest] =>
-              isReservedValueName(ctorName.text) || existsReservedCtor(rest),
-          }
-        existsReservedCtor(ctors)
-      },
-      _ => false,
-    }
-    if (hasReservedCtor) {
-      let offendingNode = match (decl.body) {
-        CoreAst.Variant(ctors) => {
-          let rec firstReservedCtorNode = (
-            items: List<(CoreAst.Name, Option<CoreAst.TypeExpr>, Option<CoreAst.Annotation>)>
-          ) =>
-            match (items) {
-              [] => decl.name.node,
-              [(ctorName, _payload, _ann), ...rest] =>
-                if (isReservedValueName(ctorName.text)) {
-                  ctorName.node
-                } else {
-                  firstReservedCtorNode(rest)
-                },
-            }
-          firstReservedCtorNode(ctors)
-        },
-        _ => decl.name.node,
-      }
-      addReservedNameMark(state, offendingNode, "Panic")
-    } else {
-  let prepared = Layer1Decl.prepareTypeDecl(decl, state.nextVar)
-  let env1 = Env.registerType(state.env, prepared.info)
-  List.forEach(((name, scheme): (String, Types.Scheme)) => {
-    Env.defineValue(env1, name, scheme)
-    void
-  }, prepared.constructorSchemes)
-  let state1 = { ...state, nextVar: prepared.nextVar, env: env1 }
-  match (prepared.info.infection) {
-    Some(domain) =>
-      if (infectiousDomainDeclared(state1, domain)) {
-        state1
-      } else {
-        localInfectionDomainError(state1, decl.node, prepared.info.name, domain)
-      },
-    None => state1,
-  }
-    }
-  }
+  Layer1Decl.registerTypeDecl(
+    decl,
+    state,
+    isReservedValueName,
+    addReservedNameMark,
+    infectiousDomainDeclared,
+    localInfectionDomainError,
+    st => st.nextVar,
+    st => st.env,
+    (st, nextVar, env) => { ...st, nextVar, env }
+  )
 }
 
 let registerRecordDecl = (decl: CoreAst.RecordDecl, state: InferState) => {
-  let info = Layer1Decl.prepareRecordDecl(decl)
-  let env1 = Env.registerType(state.env, info)
-  { ...state, env: env1 }
+  Layer1Decl.registerRecordDecl(
+    decl,
+    state,
+    st => st.env,
+    (st, env) => { ...st, env }
+  )
 }
 
 let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
@@ -2918,10 +2876,13 @@ let inferTopItems = (items: List<CoreAst.TopItem>, state: InferState) =>
         registerTypeDecl,
         (decl, stDecl) => match (decl) {
           CoreAst.RecordDecl(recordDecl) => registerRecordDecl(recordDecl, stDecl),
-          _ => {
-            let nextRegistry = InfectionRegistry.mergeDecl(stDecl.infectionRegistry, decl)
-            { ...stDecl, infectionRegistry: nextRegistry }
-          },
+          _ =>
+            Layer1Decl.mergeDeclInfectionRegistry(
+              decl,
+              stDecl,
+              st => st.infectionRegistry,
+              (st, infectionRegistry) => { ...st, infectionRegistry }
+            ),
         }
       ),
     (_item, st) => st
