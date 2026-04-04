@@ -15,6 +15,7 @@ from "../flow.gr" include Flow
 from "../infection_registry.gr" include InfectionRegistry
 from "../solver.gr" include Solver
 from "../types.gr" include Types
+from "../layer2/infection.gr" include Layer2Infection
 from "./expr.gr" include Layer1Expr
 from "./patterns.gr" include Layer1Patterns
 from "./marks.gr" include Layer1Marks
@@ -645,33 +646,28 @@ let freshVar = (state: InferState) => {
 let apply = (state: InferState, t: Types.Type) =>
   Types.applySubstType(state.subst, t)
 
-let collectTypeInfectionDomains = (ty: Types.Type, state: InferState) => {
-  let domains = Map.make()
-  let rec visit = (current: Types.Type) =>
-    match (apply(state, current)) {
-      Types.TNominal(name, args) => {
-        List.forEach(visit, args)
-        match (Env.lookupType(state.env, name)) {
-          Some(typeInfo) => match (typeInfo.infection) {
-            Some(domain) => {
-              Map.set(domain, true, domains)
-              void
-            },
-            None => void,
-          },
-          None => void,
-        }
-      },
-      Types.TFun(argTy, resultTy) => {
-        visit(argTy)
-        visit(resultTy)
-      },
-      Types.TTuple(items) => List.forEach(visit, items),
-      _ => void,
-    }
-  visit(ty)
-  domains
+let toLayer2Wrap = (wrap: InfectionCarrierWrap) => {
+  let out: Layer2Infection.InfectionCarrierWrap = {
+    domain: wrap.domain,
+    typeName: wrap.typeName,
+    stateArg: wrap.stateArg,
+    extraArgs: wrap.extraArgs,
+  }
+  out
 }
+
+let fromLayer2Wrap = (wrap: Layer2Infection.InfectionCarrierWrap) => {
+  let out: InfectionCarrierWrap = {
+    domain: wrap.domain,
+    typeName: wrap.typeName,
+    stateArg: wrap.stateArg,
+    extraArgs: wrap.extraArgs,
+  }
+  out
+}
+
+let collectTypeInfectionDomains = (ty: Types.Type, state: InferState) =>
+  Layer2Infection.collectTypeInfectionDomains(ty, toMarksState(state))
 
 let emitDomainLabels = (
   labels: List<String>,
@@ -679,11 +675,8 @@ let emitDomainLabels = (
   description: String,
   state: InferState,
 ) =>
-  List.reduce(
-    (st: InferState, label: String) =>
-      recordConstraint(st, Constraints.domain(label, originForNode(nodeId, description))),
-    state,
-    labels
+  fromMarksState(
+    Layer2Infection.emitDomainLabels(labels, nodeId, description, toMarksState(state))
   )
 
 let emitTypeInfectionConstraints = (
@@ -691,54 +684,16 @@ let emitTypeInfectionConstraints = (
   description: String,
   ty: Types.Type,
   state: InferState,
-) => {
-  let seenDomains = collectTypeInfectionDomains(ty, state)
-  emitDomainLabels(
-    List.map(((domain, _): (String, Bool)) => domain, Map.toList(seenDomains)),
-    nodeId,
-    description ++ " domain",
-    state
+) =>
+  fromMarksState(
+    Layer2Infection.emitTypeInfectionConstraints(nodeId, description, ty, toMarksState(state))
   )
-}
 
-let hasDomain = (domains: Map.Map<String, Bool>, label: String) =>
-  match (Map.get(label, domains)) {
-    Some(_) => true,
-    None => false,
-  }
+let hasDomain = Layer2Infection.hasDomain
 
-let parseTargetIndex = (target: String) =>
-  if (String.startsWith("arg", target)) {
-    match (String.slice(3, target)) {
-      "0" => Some(0),
-      "1" => Some(1),
-      "2" => Some(2),
-      "3" => Some(3),
-      "4" => Some(4),
-      "5" => Some(5),
-      "6" => Some(6),
-      "7" => Some(7),
-      "8" => Some(8),
-      "9" => Some(9),
-      _ => None,
-    }
-  } else {
-    None
-  }
+let parseTargetIndex = Layer2Infection.parseTargetIndex
 
-let tupleItemAt = (index: Number, items: List<Types.Type>) => {
-  let rec go = (i: Number, rest: List<Types.Type>) =>
-    match (rest) {
-      [] => None,
-      [head, ...tail] =>
-        if (i == 0) {
-          Some(head)
-        } else {
-          go(i - 1, tail)
-        },
-    }
-  go(index, items)
-}
+let tupleItemAt = Layer2Infection.tupleItemAt
 
 let selectTargetType = (
   target: String,
@@ -747,116 +702,44 @@ let selectTargetType = (
   resultType: Types.Type,
   state: InferState,
 ) =>
-  match (target) {
-    "callee" => Some(apply(state, calleeType)),
-    "result" => Some(apply(state, resultType)),
-    "arg" => Some(apply(state, argType)),
-    _ =>
-      match (parseTargetIndex(target)) {
-        Some(0) => Some(apply(state, argType)),
-        Some(idx) =>
-          match (apply(state, argType)) {
-            Types.TTuple(items) => tupleItemAt(idx, items),
-            _ => None,
-          },
-        None => None,
-      },
-  }
+  Layer2Infection.selectTargetType(
+    target,
+    calleeType,
+    argType,
+    resultType,
+    toMarksState(state)
+  )
 
-let domainMapFromLabels = (labels: List<String>) => {
-  let map = Map.make()
-  List.forEach((label: String) => {
-    Map.set(label, true, map)
-    void
-  }, labels)
-  map
-}
+let domainMapFromLabels = Layer2Infection.domainMapFromLabels
 
-let cloneDomains = (domains: Map.Map<String, Bool>) => {
-  let out = Map.make()
-  List.forEach(((label, _): (String, Bool)) => {
-    Map.set(label, true, out)
-    void
-  }, Map.toList(domains))
-  out
-}
+let cloneDomains = Layer2Infection.cloneDomains
 
-let labelsFromDomains = (domains: Map.Map<String, Bool>) =>
-  List.map(((label, _): (String, Bool)) => label, Map.toList(domains))
+let labelsFromDomains = Layer2Infection.labelsFromDomains
 
-let applyDomainRemoves = (domains: Map.Map<String, Bool>, removes: List<String>) => {
-  let out = cloneDomains(domains)
-  List.forEach((label: String) => {
-    Map.remove(label, out)
-    void
-  }, removes)
-  out
-}
+let applyDomainRemoves = Layer2Infection.applyDomainRemoves
 
-let applyDomainAdds = (domains: Map.Map<String, Bool>, adds: List<String>) => {
-  let out = cloneDomains(domains)
-  List.forEach((label: String) => {
-    Map.set(label, true, out)
-    void
-  }, adds)
-  out
-}
+let applyDomainAdds = Layer2Infection.applyDomainAdds
 
-let sameDomainSet = (left: Map.Map<String, Bool>, right: Map.Map<String, Bool>) => {
-  let leftKeys = labelsFromDomains(left)
-  let rightKeys = labelsFromDomains(right)
-  let leftInRight = List.every((label: String) => hasDomain(right, label), leftKeys)
-  let rightInLeft = List.every((label: String) => hasDomain(left, label), rightKeys)
-  leftInRight && rightInLeft
-}
+let sameDomainSet = Layer2Infection.sameDomainSet
 
-let containsLabel = (labels: List<String>, target: String) =>
-  List.some((label: String) => label == target, labels)
+let containsLabel = Layer2Infection.containsLabel
 
 let classifyInfectiousNominal = (ty: Types.Type, state: InferState) =>
-  match (apply(state, ty)) {
-    Types.TNominal(typeName, [valueArg, stateArg, ...extraArgs]) =>
-      match (Env.lookupType(state.env, typeName)) {
-        Some(typeInfo) => match (typeInfo.infection) {
-          Some(domain) =>
-            Some((valueArg, { domain, typeName, stateArg: Some(stateArg), extraArgs }: InfectionCarrierWrap)),
-          None => None,
-        },
-        None => None,
-      },
-    Types.TNominal(typeName, [valueArg]) =>
-      match (Env.lookupType(state.env, typeName)) {
-        Some(typeInfo) => match (typeInfo.infection) {
-          Some(domain) =>
-            Some((valueArg, { domain, typeName, stateArg: None, extraArgs: [] }: InfectionCarrierWrap)),
-          None => None,
-        },
-        None => None,
-      },
-    _ => None,
+  match (Layer2Infection.classifyInfectiousNominal(ty, toMarksState(state))) {
+    Some((valueType, wrap)) => Some((valueType, fromLayer2Wrap(wrap))),
+    None => None,
   }
 
 let isInfectiousType = (ty: Types.Type, state: InferState) =>
-  match (classifyInfectiousNominal(ty, state)) {
-    Some(_) => true,
-    None => false,
-  }
+  Layer2Infection.isInfectiousType(ty, toMarksState(state))
 
 let lookupInfectionDomain = (state: InferState, domain: String) =>
-  Map.get(domain, state.infectionRegistry.domains)
+  Layer2Infection.lookupInfectionDomain(toMarksState(state), domain)
 
-let domainDetachesCarrierState = (domainDef: InfectionRegistry.DomainRuleDefinition) =>
-  match (domainDef.mergeRow) {
-    Some("union") => true,
-    Some("bagUnion") => true,
-    _ => false,
-  }
+let domainDetachesCarrierState = Layer2Infection.domainDetachesCarrierState
 
 let infectiousDomainDeclared = (state: InferState, domain: String) =>
-  match (lookupInfectionDomain(state, domain)) {
-    Some(_) => true,
-    None => false,
-  }
+  Layer2Infection.infectiousDomainDeclared(toMarksState(state), domain)
 
 let localInfectionDomainError = (
   state: InferState,
@@ -864,135 +747,59 @@ let localInfectionDomainError = (
   typeName: String,
   domain: String,
 ) =>
-  addTypeMark(
-    state,
-    TypeMismatch,
-    originForNode(node.id, "infection domain"),
-    CoreAst.Inconsistent,
-    "Type error: infectious type " ++ typeName ++ " uses undefined infection domain " ++ domain
+  fromMarksState(
+    Layer2Infection.localInfectionDomainError(
+      toMarksState(state),
+      node,
+      typeName,
+      domain
+    )
   )
 
-let rec normalizeArgAgainstParam = (
+let normalizeArgAgainstParam = (
   paramTy: Types.Type,
   argTy: Types.Type,
   state: InferState,
 ) => {
-  let isCStringElementType = (ty: Types.Type) =>
-    match (ty) {
-      Types.TNominal(name, []) =>
-        name == "CChar" || name == "U8" || name == "I8",
-      _ => false,
-    }
-  let stringCoercionTarget = (ty: Types.Type) =>
-    match (ty) {
-      Types.TNominal("Ptr", [elemTy, ..._]) => isCStringElementType(elemTy),
-      Types.TNominal("ManyPtr", [elemTy, ..._]) => isCStringElementType(elemTy),
-      Types.TNominal("Slice", [elemTy, ..._]) => isCStringElementType(elemTy),
-      _ => false,
-    }
-  match ((apply(state, paramTy), apply(state, argTy))) {
-    (expected, Types.TString) when stringCoercionTarget(expected) => (expected, []),
-    (expected, appliedArg) when isInfectiousType(expected, state) => (appliedArg, []),
-    (_expected, appliedArg) =>
-      match (classifyInfectiousNominal(appliedArg, state)) {
-        Some((valueType, wrap)) => (valueType, [wrap]),
-        None =>
-          match (apply(state, paramTy)) {
-            Types.TVar(_) => (appliedArg, []),
-            Types.TTuple(expectedItems) =>
-              match (appliedArg) {
-                Types.TTuple(argItems) when List.length(expectedItems) == List.length(argItems) => {
-                  let rec zipNormalize = (
-                    expectedRest: List<Types.Type>,
-                    argRest: List<Types.Type>,
-                    normalizedRev: List<Types.Type>,
-                    wrapsRev: List<InfectionCarrierWrap>,
-                  ) =>
-                    match ((expectedRest, argRest)) {
-                      ([], []) => (Types.TTuple(List.reverse(normalizedRev)), List.reverse(wrapsRev)),
-                      ([expectedHead, ...expectedTail], [argHead, ...argTail]) => {
-                        let (normalizedHead, headWraps) = normalizeArgAgainstParam(expectedHead, argHead, state)
-                        zipNormalize(
-                          expectedTail,
-                          argTail,
-                          [normalizedHead, ...normalizedRev],
-                          List.append(List.reverse(headWraps), wrapsRev)
-                        )
-                      },
-                      _ => (Types.TTuple(argItems), []),
-                    }
-                  zipNormalize(expectedItems, argItems, [], [])
-                },
-                _ => (appliedArg, []),
-              },
-            _ => (appliedArg, []),
-          },
-      },
-  }
+  let (normalizedType, wraps) =
+    Layer2Infection.normalizeArgAgainstParam(paramTy, argTy, toMarksState(state))
+  (normalizedType, List.map(fromLayer2Wrap, wraps))
 }
 
 let normalizeArgForCallee = (
   calleeTy: Types.Type,
   argTy: Types.Type,
   state: InferState,
-) =>
-  match (apply(state, calleeTy)) {
-    Types.TFun(paramTy, _resultTy) => normalizeArgAgainstParam(paramTy, argTy, state),
-    _ => (apply(state, argTy), []),
-  }
+) => {
+  let (normalizedType, wraps) =
+    Layer2Infection.normalizeArgForCallee(calleeTy, argTy, toMarksState(state))
+  (normalizedType, List.map(fromLayer2Wrap, wraps))
+}
 
 let wrapsCompatible = (left: InfectionCarrierWrap, right: InfectionCarrierWrap) =>
-  left.domain == right.domain
-    && left.typeName == right.typeName
+  Layer2Infection.wrapsCompatible(toLayer2Wrap(left), toLayer2Wrap(right))
 
 let chooseCarrierWrap = (
   wraps: List<InfectionCarrierWrap>,
   callNodeId: Number,
   state: InferState,
-) =>
-  match (wraps) {
-    [] => (None, state),
-    [first, ...rest] => {
-      let compatible = List.every((w: InfectionCarrierWrap) => wrapsCompatible(first, w), rest)
-      if (compatible) {
-        (Some(first), state)
-      } else {
-        (
-          None,
-          addTypeMark(
-            state,
-            TypeMismatch,
-            originForNode(callNodeId, "infection propagation"),
-            CoreAst.Inconsistent,
-            "Type error: incompatible infectious argument carriers"
-          ),
-        )
-      }
+) => {
+  let (selectedWrap, nextState) = Layer2Infection.chooseCarrierWrap(
+    List.map(toLayer2Wrap, wraps),
+    callNodeId,
+    toMarksState(state)
+  )
+  (
+    match (selectedWrap) {
+      Some(wrap) => Some(fromLayer2Wrap(wrap)),
+      None => None,
     },
-  }
-
-let wrapResultWithCarrier = (resultTy: Types.Type, wrap: InfectionCarrierWrap, state: InferState) => {
-  let carrierArgs = match (wrap.stateArg) {
-    Some(stateArg) => [apply(state, resultTy), stateArg, ...wrap.extraArgs],
-    None => [apply(state, resultTy), ...wrap.extraArgs],
-  }
-  match (apply(state, resultTy)) {
-    Types.TNominal(typeName, _args) =>
-      match (Env.lookupType(state.env, typeName)) {
-        Some(typeInfo) => match (typeInfo.infection) {
-          Some(existingDomain) =>
-            if (existingDomain == wrap.domain) {
-              apply(state, resultTy)
-            } else {
-              Types.TNominal(wrap.typeName, carrierArgs)
-            },
-          None => Types.TNominal(wrap.typeName, carrierArgs),
-        },
-        None => Types.TNominal(wrap.typeName, carrierArgs),
-      },
-    _ => Types.TNominal(wrap.typeName, carrierArgs),
-  }
+    fromMarksState(nextState),
+  )
 }
+
+let wrapResultWithCarrier = (resultTy: Types.Type, wrap: InfectionCarrierWrap, state: InferState) =>
+  Layer2Infection.wrapResultWithCarrier(resultTy, toLayer2Wrap(wrap), toMarksState(state))
 
 let applyOpRuleAtCall = (
   callNodeId: Number,
@@ -1002,164 +809,20 @@ let applyOpRuleAtCall = (
   resultType: Types.Type,
   state: InferState,
 ) =>
-  match (Map.get(opName, state.infectionRegistry.opRules)) {
-    None => state,
-    Some(opRule) => {
-      let targetTypeOpt = match (opRule.target) {
-        Some(target) => selectTargetType(target, calleeType, argType, resultType, state),
-        None => None,
-      }
-      let requiresTargetTypeOpt = match (targetTypeOpt) {
-        Some(ty) => Some(ty),
-        None =>
-          if (
-            opRule.requiresExact != None
-              || opRule.requiresAny != None
-              || opRule.requiresNot != None
-          ) {
-            selectTargetType("arg0", calleeType, argType, resultType, state)
-          } else {
-            None
-          },
-      }
-      let requiresDomains = match (requiresTargetTypeOpt) {
-        Some(targetTy) => collectTypeInfectionDomains(targetTy, state),
-        None => Map.make(),
-      }
-      let stateReq1 = match (opRule.requiresExact) {
-        None => state,
-        Some(required) =>
-          if (sameDomainSet(requiresDomains, domainMapFromLabels(required))) {
-            state
-          } else {
-            addTypeMark(
-              state,
-              TypeMismatch,
-              originForNode(callNodeId, "op requiresExact"),
-              CoreAst.Inconsistent,
-              "Type error: op " ++ opRule.name ++ " requires exact infection state"
-            )
-          },
-      }
-      let stateReq2 = match (opRule.requiresAny) {
-        None => stateReq1,
-        Some(requiredAny) =>
-          if (List.some((label: String) => hasDomain(requiresDomains, label), requiredAny)) {
-            stateReq1
-          } else {
-            addTypeMark(
-              stateReq1,
-              TypeMismatch,
-              originForNode(callNodeId, "op requiresAny"),
-              CoreAst.Inconsistent,
-              "Type error: op " ++ opRule.name ++ " requires one matching infection state"
-            )
-          },
-      }
-      let stateReq3 = match (opRule.requiresNot) {
-        None => stateReq2,
-        Some(forbidden) =>
-          if (!List.some((label: String) => hasDomain(requiresDomains, label), forbidden)) {
-            stateReq2
-          } else {
-            addTypeMark(
-              stateReq2,
-              TypeMismatch,
-              originForNode(callNodeId, "op requiresNot"),
-              CoreAst.Inconsistent,
-              "Type error: op " ++ opRule.name ++ " forbids current infection state"
-            )
-          },
-      }
-      let state1 = match (opRule.domain) {
-        Some(domain) =>
-          recordConstraint(
-            stateReq3,
-            Constraints.domain(domain, originForNode(callNodeId, "op rule domain"))
-          ),
-        None => stateReq3,
-      }
-      let policyBaseType = match (targetTypeOpt) {
-        Some(targetTy) => targetTy,
-        None => Types.TTuple([argType, resultType]),
-      }
-      let policyDomains0 = collectTypeInfectionDomains(policyBaseType, state1)
-      let policyDomains1 = match (opRule.removes) {
-        Some(removes) => applyDomainRemoves(policyDomains0, removes),
-        None => policyDomains0,
-      }
-      let policyDomains2 = match (opRule.adds) {
-        Some(adds) => applyDomainAdds(policyDomains1, adds),
-        None => policyDomains1,
-      }
-      let netAdds = match (opRule.adds) {
-        None => [],
-        Some(adds) =>
-          match (opRule.removes) {
-            None => adds,
-            Some(removes) =>
-              List.filter((label: String) => !containsLabel(removes, label), adds),
-          },
-      }
-      let state2 = match (opRule.adds) {
-        Some(_labels) => emitDomainLabels(netAdds, callNodeId, "op rule adds", state1),
-        None => state1,
-      }
-      let state3 = match (opRule.callPolicy) {
-        None => state2,
-        Some(policyName) =>
-          match (Map.get(policyName, state2.infectionRegistry.policies)) {
-            None => state2,
-            Some(policy) => {
-              let activeDomains = policyDomains2
-              let policyState1 = if (
-                policy.rejectsAllDomains && Map.toList(activeDomains) != []
-              ) {
-                addTypeMark(
-                  state2,
-                  TypeMismatch,
-                  originForNode(callNodeId, "op call policy"),
-                  CoreAst.Inconsistent,
-                  "Type error: policy " ++ policy.name ++ " rejects all infection domains"
-                )
-              } else {
-                state2
-              }
-              match (policy.rejectDomains) {
-                None => policyState1,
-                Some(rejected) =>
-                  List.reduce(
-                    (st, rejectedLabel) =>
-                      if (hasDomain(activeDomains, rejectedLabel)) {
-                        addTypeMark(
-                          st,
-                          TypeMismatch,
-                          originForNode(callNodeId, "op call policy"),
-                          CoreAst.Inconsistent,
-                          "Type error: policy "
-                            ++ policy.name
-                            ++ " rejects infection domain "
-                            ++ rejectedLabel
-                        )
-                      } else {
-                        st
-                      },
-                    policyState1,
-                    rejected
-                  ),
-              }
-            },
-          },
-      }
-      state3
-    },
-  }
+  fromMarksState(
+    Layer2Infection.applyOpRuleAtCall(
+      callNodeId,
+      opName,
+      calleeType,
+      argType,
+      resultType,
+      toMarksState(state)
+    )
+  )
 
-let isNumericBinaryOp = (name: String) =>
-  name == "+" || name == "-" || name == "*" || name == "/" || name == "%"
+let isNumericBinaryOp = Layer2Infection.isNumericBinaryOp
 
-let isNumericComparisonOp = (name: String) =>
-  name == "==" || name == "!=" || name == ">" || name == "<" || name == ">=" || name == "<="
+let isNumericComparisonOp = Layer2Infection.isNumericComparisonOp
 
 let applyNumericDomainAtCall = (
   callNodeId: Number,
@@ -1167,28 +830,16 @@ let applyNumericDomainAtCall = (
   argType: Types.Type,
   resultType: Types.Type,
   state: InferState,
-) => {
-  if (!(isNumericBinaryOp(opName) || isNumericComparisonOp(opName))) {
-    state
-  } else {
-    let origin = originForNode(callNodeId, "numeric domain")
-    let argApplied = apply(state, argType)
-    let rec constrainItems = (items: List<Types.Type>, st: InferState) =>
-      match (items) {
-        [] => st,
-        [head, ...tail] => constrainItems(tail, recordNumericIs(st, head, origin)),
-      }
-    let state1 = match (argApplied) {
-      Types.TTuple(items) => constrainItems(items, state),
-      _ => recordNumericIs(state, argApplied, origin),
-    }
-    if (isNumericBinaryOp(opName)) {
-      recordNumericIs(state1, apply(state1, resultType), origin)
-    } else {
-      state1
-    }
-  }
-}
+) =>
+  fromMarksState(
+    Layer2Infection.applyNumericDomainAtCall(
+      callNodeId,
+      opName,
+      argType,
+      resultType,
+      toMarksState(state)
+    )
+  )
 
 record ProvidedRecordField {
   name: String,
