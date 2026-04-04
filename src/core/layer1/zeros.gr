@@ -1,0 +1,110 @@
+module Layer1Zeros
+
+from "list" include List
+from "map" include Map
+
+from "../core_ast.gr" include CoreAst
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+from "./infer_state.gr" include InferState as Layer1InferState
+
+provide let typeFromAnnotation = (annotation: CoreAst.TypeExpr) =>
+  Layer1Expr.typeExprToType(annotation, Map.make())
+
+provide let isZerosCastTarget = (target: CoreAst.TypeExpr) =>
+  match (target.kind) {
+    CoreAst.Var(name) => name.text == "Zeros",
+    CoreAst.Ref(name, args) => name.text == "Zeros" && args == [],
+    _ => false,
+  }
+
+provide let isPrimitiveZeroValidType = (ty: Types.Type) =>
+  match (ty) {
+    Types.TNumber |
+    Types.TBool |
+    Types.TByte |
+    Types.TChar => true,
+    Types.TNominal(name, []) =>
+      name == "U8"
+        || name == "U16"
+        || name == "U32"
+        || name == "U64"
+        || name == "Usize"
+        || name == "I8"
+        || name == "I16"
+        || name == "I32"
+        || name == "I64"
+        || name == "Isize"
+        || name == "CChar"
+        || name == "CUchar"
+        || name == "CShort"
+        || name == "CUshort"
+        || name == "CInt"
+        || name == "CUint"
+        || name == "CLong"
+        || name == "CUlong"
+        || name == "CLongLong"
+        || name == "CULongLong",
+    Types.TNominal(name, [_elemTy, ..._rest]) =>
+      name == "Ptr" || name == "ManyPtr" || name == "Slice",
+    _ => false,
+  }
+
+provide let rec containsString = (items: List<String>, target: String) =>
+  match (items) {
+    [] => false,
+    [item, ...rest] => item == target || containsString(rest, target),
+  }
+
+provide let rec isZeroValidType = (
+  ty: Types.Type,
+  state: Layer1InferState.InferState,
+  seenNominals: List<String>,
+  resolveNominalRecordFields: (
+    String,
+    List<Types.Type>,
+    Layer1InferState.InferState,
+  ) => Option<List<(String, Types.Type)>>,
+) => {
+  let resolved = Layer1InferState.apply(state, ty)
+  if (isPrimitiveZeroValidType(resolved)) {
+    true
+  } else {
+    match (resolved) {
+      Types.TTuple(items) => {
+        let rec allItemsZeroValid = (rest: List<Types.Type>) =>
+          match (rest) {
+            [] => true,
+            [item, ...tail] =>
+              isZeroValidType(item, state, seenNominals, resolveNominalRecordFields)
+                && allItemsZeroValid(tail),
+          }
+        allItemsZeroValid(items)
+      },
+      Types.TNominal(name, args) =>
+        if (containsString(seenNominals, name)) {
+          true
+        } else {
+          match (resolveNominalRecordFields(name, args, state)) {
+            Some(fields) => {
+              let rec allFieldsZeroValid = (rest: List<(String, Types.Type)>) =>
+                match (rest) {
+                  [] => true,
+                  [(_fieldName, fieldTy), ...tail] =>
+                    isZeroValidType(
+                      fieldTy,
+                      state,
+                      [name, ...seenNominals],
+                      resolveNominalRecordFields
+                    )
+                      && allFieldsZeroValid(tail),
+                }
+              allFieldsZeroValid(fields)
+            },
+            None => false,
+          }
+        },
+      _ => false,
+    }
+  }
+}

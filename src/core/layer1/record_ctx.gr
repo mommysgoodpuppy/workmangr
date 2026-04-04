@@ -1,0 +1,526 @@
+module Layer1RecordCtx
+
+from "list" include List
+from "map" include Map
+
+from "../core_ast.gr" include CoreAst
+from "../constraints.gr" include Constraints
+from "../env.gr" include Env
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+from "./marks.gr" include Layer1Marks
+from "./infer_state.gr" include InferState as Layer1InferState
+
+record NominalRecordCandidate {
+  typeName: String,
+  nominalType: Types.Type,
+  fields: List<(String, Types.Type)>,
+}
+
+provide record ProvidedRecordField {
+  name: String,
+  nameOrigin: Constraints.Origin,
+  valueType: Types.Type,
+  valueOrigin: Constraints.Origin,
+}
+
+provide let findRecordFieldType = (
+  fields: List<(String, Types.Type)>,
+  fieldName: String,
+) => {
+  let rec loop = (remaining: List<(String, Types.Type)>) =>
+    match (remaining) {
+      [] => None,
+      [(name, fieldTy), ...rest] =>
+        if (name == fieldName) {
+          Some(fieldTy)
+        } else {
+          loop(rest)
+        },
+    }
+  loop(fields)
+}
+
+provide let resolveNominalRecordFields = (
+  typeName: String,
+  args: List<Types.Type>,
+  state: Layer1InferState.InferState,
+) => {
+  match (Env.lookupType(state.env, typeName)) {
+    Some(typeInfo) =>
+      match (typeInfo.recordFields) {
+        None => None,
+        Some(recordFields) => {
+          let paramMap = Map.make()
+          let rec bindParams = (
+            params: List<String>,
+            values: List<Types.Type>,
+          ) => match ((params, values)) {
+            ([paramName, ...paramRest], [argType, ...argRest]) => {
+              Map.set(paramName, argType, paramMap)
+              bindParams(paramRest, argRest)
+            },
+            _ => void,
+          }
+          bindParams(typeInfo.typeParams, args)
+          Some(
+            List.map(
+              ((fieldName, fieldTypeExpr): (CoreAst.Name, CoreAst.TypeExpr)) =>
+                (fieldName.text, Layer1Expr.typeExprToType(fieldTypeExpr, paramMap)),
+              recordFields
+            )
+          )
+        },
+      },
+    None => None,
+  }
+}
+
+provide let hasRecordField = (fields: List<(String, Types.Type)>, fieldName: String) =>
+  match (findRecordFieldType(fields, fieldName)) {
+    Some(_) => true,
+    None => false,
+  }
+
+provide let inferNominalRecordContext = (
+  literalNodeId: Number,
+  providedFields: List<ProvidedRecordField>,
+  state: Layer1InferState.InferState,
+  unifyBlameFn: (
+    Types.Type,
+    Types.Type,
+    Constraints.Origin,
+    Option<Constraints.Origin>,
+    Layer1InferState.InferState,
+  ) => Layer1InferState.InferState,
+) => {
+  let rec buildCandidates = (
+    remaining: List<(String, Env.TypeInfo)>,
+    nextVar: Number,
+    acc: List<NominalRecordCandidate>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(acc), nextVar),
+      [(_name, info), ...rest] =>
+        match (info.recordFields) {
+          None => buildCandidates(rest, nextVar, acc),
+          Some(_recordFields) => {
+            let (paramTypes, _paramMap, nextVar1) = Layer1Expr.instantiateTypeParams(
+              info.typeParams,
+              nextVar
+            )
+            let nominalType = Types.TNominal(info.name, paramTypes)
+            match (resolveNominalRecordFields(info.name, paramTypes, state)) {
+              Some(fields) => {
+                let candidate: NominalRecordCandidate = {
+                  typeName: info.name,
+                  nominalType,
+                  fields,
+                }
+                buildCandidates(rest, nextVar1, [candidate, ...acc])
+              },
+              None => buildCandidates(rest, nextVar1, acc),
+            }
+          },
+        },
+    }
+  let (allCandidates, nextVarAfterCandidates) = buildCandidates(
+    Map.toList(state.env.types),
+    state.nextVar,
+    [],
+  )
+  let state1 = { ...state, nextVar: nextVarAfterCandidates }
+  let rec filterByProvided = (
+    candidates: List<NominalRecordCandidate>,
+    acc: List<NominalRecordCandidate>,
+  ) =>
+    match (candidates) {
+      [] => List.reverse(acc),
+      [candidate, ...rest] => {
+        let allKnown = List.every(
+          (field: ProvidedRecordField) => hasRecordField(candidate.fields, field.name),
+          providedFields
+        )
+        if (allKnown) {
+          filterByProvided(rest, [candidate, ...acc])
+        } else {
+          filterByProvided(rest, acc)
+        }
+      },
+    }
+  let candidates = filterByProvided(allCandidates, [])
+  match (candidates) {
+    [] => {
+      let holeTy = Types.THole(literalNodeId)
+      let marked = Layer1Marks.addTypeMark(
+        state1,
+        Layer1InferState.TypeMismatch,
+        Layer1Marks.originForNode(literalNodeId, "record literal context"),
+        CoreAst.Inconsistent,
+        "Type error: record literal requires nominal type context"
+      )
+      (holeTy, marked)
+    },
+    [candidate] => {
+      let rec unifyProvided = (
+        remaining: List<ProvidedRecordField>,
+        st: Layer1InferState.InferState,
+      ) =>
+        match (remaining) {
+          [] => st,
+          [field, ...rest] =>
+            match (findRecordFieldType(candidate.fields, field.name)) {
+              Some(expectedType) =>
+                unifyProvided(
+                  rest,
+                  unifyBlameFn(
+                    field.valueType,
+                    expectedType,
+                    Layer1Marks.originForNode(literalNodeId, "record literal field"),
+                    Some(field.valueOrigin),
+                    st
+                  )
+                ),
+              None =>
+                unifyProvided(
+                  rest,
+                  Layer1Marks.addTypeMarkWithBlame(
+                    st,
+                    Layer1InferState.TypeMismatch,
+                    Layer1Marks.originForNode(literalNodeId, "record literal field"),
+                    Some(field.nameOrigin),
+                    CoreAst.Inconsistent,
+                    "Type error: unknown record field " ++ field.name
+                  )
+                ),
+            },
+        }
+      let st2 = unifyProvided(providedFields, state1)
+      let rec markMissingFields = (
+        remaining: List<(String, Types.Type)>,
+        st: Layer1InferState.InferState,
+      ) =>
+        match (remaining) {
+          [] => st,
+          [(expectedName, _), ...rest] =>
+            if (
+              List.some(
+                (provided: ProvidedRecordField) => provided.name == expectedName,
+                providedFields
+              )
+            ) {
+              markMissingFields(rest, st)
+            } else {
+              markMissingFields(
+                rest,
+                Layer1Marks.addTypeMark(
+                  st,
+                  Layer1InferState.TypeMismatch,
+                  Layer1Marks.originForNode(literalNodeId, "record literal missing field"),
+                  CoreAst.Inconsistent,
+                  "Type error: missing record field " ++ expectedName
+                )
+              )
+            },
+        }
+      let st3 = markMissingFields(candidate.fields, st2)
+      (candidate.nominalType, st3)
+    },
+    _ => {
+      let holeTy = Types.THole(literalNodeId)
+      let marked = Layer1Marks.addTypeMark(
+        state1,
+        Layer1InferState.TypeMismatch,
+        Layer1Marks.originForNode(literalNodeId, "record literal ambiguous context"),
+        CoreAst.Inconsistent,
+        "Type error: record literal has ambiguous nominal context"
+      )
+      (holeTy, marked)
+    },
+  }
+}
+
+provide let inferProjectionFromFieldContext = (
+  literalNodeId: Number,
+  targetType: Types.Type,
+  targetBlame: Option<Constraints.Origin>,
+  fieldName: String,
+  fieldType: Types.Type,
+  fieldBlame: Option<Constraints.Origin>,
+  state: Layer1InferState.InferState,
+  unifyBlameFn: (
+    Types.Type,
+    Types.Type,
+    Constraints.Origin,
+    Option<Constraints.Origin>,
+    Layer1InferState.InferState,
+  ) => Layer1InferState.InferState,
+) => {
+  let rec collectCandidates = (
+    remaining: List<(String, Env.TypeInfo)>,
+    nextVar: Number,
+    acc: List<NominalRecordCandidate>,
+  ) =>
+    match (remaining) {
+      [] => (List.reverse(acc), nextVar),
+      [(_name, info), ...rest] =>
+        match (info.recordFields) {
+          None => collectCandidates(rest, nextVar, acc),
+          Some(_) => {
+            let (paramTypes, _paramMap, nextVar1) = Layer1Expr.instantiateTypeParams(
+              info.typeParams,
+              nextVar
+            )
+            let nominalType = Types.TNominal(info.name, paramTypes)
+            match (resolveNominalRecordFields(info.name, paramTypes, state)) {
+              Some(fields) =>
+                if (hasRecordField(fields, fieldName)) {
+                  let candidate: NominalRecordCandidate = {
+                    typeName: info.name,
+                    nominalType,
+                    fields,
+                  }
+                  collectCandidates(rest, nextVar1, [candidate, ...acc])
+                } else {
+                  collectCandidates(rest, nextVar1, acc)
+                },
+              None => collectCandidates(rest, nextVar1, acc),
+            }
+          },
+        },
+    }
+  let (candidates, nextVar) = collectCandidates(Map.toList(state.env.types), state.nextVar, [])
+  let state1 = { ...state, nextVar }
+  match (candidates) {
+    [candidate] =>
+      match (findRecordFieldType(candidate.fields, fieldName)) {
+        Some(expectedFieldType) => {
+          let state2 = unifyBlameFn(
+            targetType,
+            candidate.nominalType,
+            Layer1Marks.originForNode(literalNodeId, "record projection target"),
+            targetBlame,
+            state1
+          )
+          unifyBlameFn(
+            fieldType,
+            expectedFieldType,
+            Layer1Marks.originForNode(literalNodeId, "record projection field"),
+            fieldBlame,
+            state2
+          )
+        },
+        None =>
+          Layer1Marks.addTypeMarkWithBlame(
+            state1,
+            Layer1InferState.TypeMismatch,
+            Layer1Marks.originForNode(literalNodeId, "record projection missing field"),
+            fieldBlame,
+            CoreAst.Inconsistent,
+            "Type error: unknown record field " ++ fieldName
+          ),
+      },
+    [] =>
+      Layer1Marks.addTypeMarkWithBlame(
+        state1,
+        Layer1InferState.TypeMismatch,
+        Layer1Marks.originForNode(literalNodeId, "record projection"),
+        targetBlame,
+        CoreAst.Inconsistent,
+        "Type error: projection expects a nominal record value"
+      ),
+    _ =>
+      Layer1Marks.addTypeMarkWithBlame(
+        state1,
+        Layer1InferState.TypeMismatch,
+        Layer1Marks.originForNode(literalNodeId, "record projection ambiguous"),
+        targetBlame,
+        CoreAst.Inconsistent,
+        "Type error: record projection has ambiguous nominal context"
+      ),
+  }
+}
+
+provide let inferProjectionFromCarrierContext = (
+  literalNodeId: Number,
+  targetType: Types.Type,
+  targetBlame: Option<Constraints.Origin>,
+  fieldName: String,
+  fieldType: Types.Type,
+  fieldBlame: Option<Constraints.Origin>,
+  state: Layer1InferState.InferState,
+  unifyBlameFn: (
+    Types.Type,
+    Types.Type,
+    Constraints.Origin,
+    Option<Constraints.Origin>,
+    Layer1InferState.InferState,
+  ) => Layer1InferState.InferState,
+  classifyCarrierValueType: (
+    Types.Type,
+    Layer1InferState.InferState,
+  ) => Option<Types.Type>,
+  wrapFieldTypeForCarrier: (
+    Types.Type,
+    Types.Type,
+    Layer1InferState.InferState,
+  ) => Option<Types.Type>,
+) =>
+  match (classifyCarrierValueType(targetType, state)) {
+    Some(valueType) =>
+      match (Layer1InferState.apply(state, valueType)) {
+        Types.TNominal(valueName, valueArgs) =>
+          match (resolveNominalRecordFields(valueName, valueArgs, state)) {
+            Some(fields) =>
+              match (findRecordFieldType(fields, fieldName)) {
+                Some(existingType) =>
+                  match (wrapFieldTypeForCarrier(targetType, existingType, state)) {
+                    Some(wrappedFieldType) =>
+                      unifyBlameFn(
+                        fieldType,
+                        wrappedFieldType,
+                        Layer1Marks.originForNode(literalNodeId, "record projection field"),
+                        fieldBlame,
+                        state
+                      ),
+                    None =>
+                      Layer1Marks.addTypeMarkWithBlame(
+                        state,
+                        Layer1InferState.TypeMismatch,
+                        Layer1Marks.originForNode(literalNodeId, "record projection nominal"),
+                        targetBlame,
+                        CoreAst.Inconsistent,
+                        "Type error: projection expects a nominal record value"
+                      ),
+                  },
+                None =>
+                  Layer1Marks.addTypeMarkWithBlame(
+                    state,
+                    Layer1InferState.TypeMismatch,
+                    Layer1Marks.originForNode(literalNodeId, "record projection missing field"),
+                    fieldBlame,
+                    CoreAst.Inconsistent,
+                    "Type error: unknown record field " ++ fieldName
+                  ),
+              },
+            None =>
+              Layer1Marks.addTypeMarkWithBlame(
+                state,
+                Layer1InferState.TypeMismatch,
+                Layer1Marks.originForNode(literalNodeId, "record projection nominal"),
+                targetBlame,
+                CoreAst.Inconsistent,
+                "Type error: projection expects a nominal record value"
+              ),
+          },
+        _ =>
+          Layer1Marks.addTypeMarkWithBlame(
+            state,
+            Layer1InferState.TypeMismatch,
+            Layer1Marks.originForNode(literalNodeId, "record projection nominal"),
+            targetBlame,
+            CoreAst.Inconsistent,
+            "Type error: projection expects a nominal record value"
+          ),
+      },
+    None =>
+      Layer1Marks.addTypeMarkWithBlame(
+        state,
+        Layer1InferState.TypeMismatch,
+        Layer1Marks.originForNode(literalNodeId, "record projection nominal"),
+        targetBlame,
+        CoreAst.Inconsistent,
+        "Type error: projection expects a nominal record value"
+      ),
+  }
+
+provide let validateRecordLiteralAgainstNominal = (
+  literalNodeId: Number,
+  fields: List<ProvidedRecordField>,
+  expectedType: Types.Type,
+  state: Layer1InferState.InferState,
+  unifyBlameFn: (
+    Types.Type,
+    Types.Type,
+    Constraints.Origin,
+    Option<Constraints.Origin>,
+    Layer1InferState.InferState,
+  ) => Layer1InferState.InferState,
+) =>
+  match (Layer1InferState.apply(state, expectedType)) {
+    Types.TNominal(typeName, typeArgs) =>
+      match (resolveNominalRecordFields(typeName, typeArgs, state)) {
+        Some(nominalFields) => {
+          let hasProvidedField = (fieldName: String) =>
+            List.some((field: ProvidedRecordField) => field.name == fieldName, fields)
+          let rec unifyFields = (
+            remaining: List<ProvidedRecordField>,
+            st: Layer1InferState.InferState,
+          ) =>
+            match (remaining) {
+              [] => st,
+              [field, ...rest] =>
+                match (findRecordFieldType(nominalFields, field.name)) {
+                  Some(nominalTy) =>
+                    unifyFields(
+                      rest,
+                      unifyBlameFn(
+                        field.valueType,
+                        nominalTy,
+                        Layer1Marks.originForNode(literalNodeId, "record field"),
+                        Some(field.valueOrigin),
+                        st
+                      )
+                    ),
+                  None =>
+                    Layer1Marks.addTypeMarkWithBlame(
+                      st,
+                      Layer1InferState.TypeMismatch,
+                      Layer1Marks.originForNode(literalNodeId, "record literal field"),
+                      Some(field.nameOrigin),
+                      CoreAst.Inconsistent,
+                      "Type error: unknown record field " ++ field.name
+                    ),
+                },
+            }
+          let state1 = unifyFields(fields, state)
+          let rec markMissingFields = (
+            remaining: List<(String, Types.Type)>,
+            st: Layer1InferState.InferState,
+          ) =>
+            match (remaining) {
+              [] => st,
+              [(name, _ty), ...rest] =>
+                if (hasProvidedField(name)) {
+                  markMissingFields(rest, st)
+                } else {
+                  let st1 = Layer1Marks.addTypeMark(
+                    st,
+                    Layer1InferState.TypeMismatch,
+                    Layer1Marks.originForNode(literalNodeId, "record literal field"),
+                    CoreAst.Inconsistent,
+                    "Type error: missing record field " ++ name
+                  )
+                  markMissingFields(rest, st1)
+                },
+            }
+          markMissingFields(nominalFields, state1)
+        },
+        None =>
+          Layer1Marks.addTypeMark(
+            state,
+            Layer1InferState.TypeMismatch,
+            Layer1Marks.originForNode(literalNodeId, "record literal annotation"),
+            CoreAst.Inconsistent,
+            "Type error: record literal requires nominal type context"
+          ),
+      },
+    _ =>
+      Layer1Marks.addTypeMark(
+        state,
+        Layer1InferState.TypeMismatch,
+        Layer1Marks.originForNode(literalNodeId, "record literal annotation"),
+        CoreAst.Inconsistent,
+        "Type error: record literal requires nominal type context"
+      ),
+  }

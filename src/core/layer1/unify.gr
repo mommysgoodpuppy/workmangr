@@ -1,0 +1,251 @@
+module Layer1Unify
+
+from "list" include List
+from "map" include Map
+from "../core_ast.gr" include CoreAst
+from "../constraints.gr" include Constraints
+from "../env.gr" include Env
+from "../infection_registry.gr" include InfectionRegistry
+from "../types.gr" include Types
+from "./infer_state.gr" include InferState as Layer1InferState
+from "./marks.gr" include Layer1Marks
+
+let classifyCarrier = (ty: Types.Type, state: Layer1InferState.InferState) =>
+  match (Layer1InferState.apply(state, ty)) {
+    Types.TNominal(typeName, [valueArg, _stateArg, ..._extraArgs]) =>
+      match (Env.lookupType(state.env, typeName)) {
+        Some(typeInfo) => match (typeInfo.infection) {
+          Some(domain) => Some((valueArg, domain, typeName)),
+          None => None,
+        },
+        None => None,
+      },
+    Types.TNominal(typeName, [valueArg]) =>
+      match (Env.lookupType(state.env, typeName)) {
+        Some(typeInfo) => match (typeInfo.infection) {
+          Some(domain) => Some((valueArg, domain, typeName)),
+          None => None,
+        },
+        None => None,
+      },
+    _ => None,
+  }
+
+let domainDetachesCarrierState = (state: Layer1InferState.InferState, domain: String) =>
+  match (Map.get(domain, state.infectionRegistry.domains)) {
+    Some(domainDef) =>
+      match (domainDef.mergeRow) {
+        Some("union") => true,
+        Some("bagUnion") => true,
+        _ => false,
+      },
+    None => false,
+  }
+
+provide let rec unifyBlaming = (
+  left: Types.Type,
+  right: Types.Type,
+  origin: Constraints.Origin,
+  blame: Option<Constraints.Origin>,
+  state: Layer1InferState.InferState,
+) => {
+  let leftRaw = left
+  let rightRaw = right
+  let detachedState = match ((classifyCarrier(left, state), classifyCarrier(right, state))) {
+    (
+      Some((leftValue, leftDomain, leftName)),
+      Some((rightValue, rightDomain, rightName)),
+    ) =>
+      if (leftName == rightName && leftDomain == rightDomain && domainDetachesCarrierState(state, leftDomain)) {
+        Some(unifyBlaming(leftValue, rightValue, origin, blame, state))
+      } else {
+        None
+      },
+    _ => None,
+  }
+  match (detachedState) {
+    Some(nextState) => nextState,
+    None => {
+      let constraint = Constraints.Equality(left, right, origin)
+      let state1 = Layer1InferState.recordConstraint(state, constraint)
+      let l = Layer1InferState.apply(state1, left)
+      let r = Layer1InferState.apply(state1, right)
+
+      match ((l, r)) {
+        (Types.TNumber, Types.TNumber) => state1,
+        (Types.TNumber, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => state1,
+        (Types.TNominal(name, []), Types.TNumber) when Types.isNumericNominalName(name) => state1,
+        (Types.TNumber, Types.TChar) => state1,
+        (Types.TChar, Types.TNumber) => state1,
+        (Types.TChar, Types.TNominal(name, [])) when Types.isNumericNominalName(name) => state1,
+        (Types.TNominal(name, []), Types.TChar) when Types.isNumericNominalName(name) => state1,
+        (Types.TBool, Types.TBool) => state1,
+        (Types.TString, Types.TString) => state1,
+        (Types.TByte, Types.TByte) => state1,
+        (Types.TChar, Types.TChar) => state1,
+        (Types.TVoid, Types.TVoid) => state1,
+        (Types.THole(holeId), observed) =>
+          Layer1Marks.noteHoleObservation(state1, holeId, observed, origin),
+        (observed, Types.THole(holeId)) =>
+          Layer1Marks.noteHoleObservation(state1, holeId, observed, origin),
+        (Types.TVar(id), t) =>
+          Layer1InferState.bindVar(
+            id,
+            t,
+            state1,
+            origin,
+            blame,
+            Layer1Marks.addTypeMarkWithBlame
+          ),
+        (t, Types.TVar(id)) =>
+          Layer1InferState.bindVar(
+            id,
+            t,
+            state1,
+            origin,
+            blame,
+            Layer1Marks.addTypeMarkWithBlame
+          ),
+        (Types.TFun(a1, b1), Types.TFun(a2, b2)) => {
+          let state2 = unifyBlaming(a1, a2, origin, blame, state1)
+          unifyBlaming(b1, b2, origin, blame, state2)
+        },
+        (Types.TTuple(leftItems), Types.TTuple(rightItems)) => {
+          let rec unifyTuple = (
+            xs: List<Types.Type>,
+            ys: List<Types.Type>,
+            st: Layer1InferState.InferState,
+          ) => match ((xs, ys)) {
+            ([], []) => st,
+            ([x, ...xRest], [y, ...yRest]) =>
+              unifyTuple(xRest, yRest, unifyBlaming(x, y, origin, blame, st)),
+            _ =>
+              Layer1Marks.addTypeMarkWithBlame(
+                st,
+                Layer1InferState.TypeMismatch,
+                origin,
+                blame,
+                CoreAst.Inconsistent,
+                "Type error: cannot unify tuple/argument arity"
+              ),
+          }
+          unifyTuple(leftItems, rightItems, state1)
+        },
+        (Types.TNominal(nameL, argsL), Types.TNominal(nameR, argsR)) =>
+          if (nameL == nameR) {
+            let rec unifyNominalArgs = (
+              xs: List<Types.Type>,
+              ys: List<Types.Type>,
+              st: Layer1InferState.InferState,
+            ) => match ((xs, ys)) {
+              ([], []) => st,
+              ([x, ...xRest], [y, ...yRest]) =>
+                unifyNominalArgs(xRest, yRest, unifyBlaming(x, y, origin, blame, st)),
+              _ =>
+                Layer1Marks.addTypeMarkWithBlame(
+                  st,
+                  Layer1InferState.TypeMismatch,
+                  origin,
+                  blame,
+                  CoreAst.Inconsistent,
+                  "Type error: nominal arity mismatch"
+                ),
+            }
+            unifyNominalArgs(argsL, argsR, state1)
+          } else {
+            let blameOrigin = Layer1Marks.selectBlameOrigin(leftRaw, rightRaw, origin, blame, state1)
+            Layer1InferState.traceNominalMismatch(l, r, origin, state1)
+            Layer1Marks.addTypeMarkWithBlame(
+              state1,
+              Layer1InferState.TypeMismatch,
+              origin,
+              Some(blameOrigin),
+              CoreAst.Inconsistent,
+              Layer1InferState.nominalTypeMismatchMessage(l, r, blameOrigin, state1)
+            )
+          },
+        _ => {
+          let blameOrigin = Layer1Marks.selectBlameOrigin(leftRaw, rightRaw, origin, blame, state1)
+          Layer1Marks.addTypeMarkWithBlame(
+            state1,
+            Layer1InferState.TypeMismatch,
+            origin,
+            Some(blameOrigin),
+            CoreAst.Inconsistent,
+            "Type error (" ++ origin.description ++ "): cannot unify "
+              ++ Layer1InferState.renderType(l, state1)
+              ++ " with "
+              ++ Layer1InferState.renderType(r, state1)
+          )
+        },
+      }
+    },
+  }
+}
+
+provide let unify = (
+  left: Types.Type,
+  right: Types.Type,
+  origin: Constraints.Origin,
+  state: Layer1InferState.InferState,
+) => unifyBlaming(left, right, origin, None, state)
+
+provide let unifyForNode = (
+  nodeId: Number,
+  description: String,
+  left: Types.Type,
+  right: Types.Type,
+  state: Layer1InferState.InferState,
+) => unify(left, right, Layer1Marks.originForNode(nodeId, description), state)
+
+provide let unifyForNodeWithBlame = (
+  nodeId: Number,
+  description: String,
+  left: Types.Type,
+  right: Types.Type,
+  blame: Option<Constraints.Origin>,
+  state: Layer1InferState.InferState,
+) =>
+  unifyBlaming(
+    left,
+    right,
+    Layer1Marks.originForNode(nodeId, description),
+    blame,
+    state
+  )
+
+provide let unifyForExprWithBlame = (
+  originNodeId: Number,
+  description: String,
+  left: Types.Type,
+  right: Types.Type,
+  blameExpr: CoreAst.Expr,
+  blameDescription: String,
+  state: Layer1InferState.InferState,
+) =>
+  unifyForNodeWithBlame(
+    originNodeId,
+    description,
+    left,
+    right,
+    Some(Layer1Marks.blameExprOrigin(blameExpr, blameDescription)),
+    state
+  )
+
+provide let unifyForPatternWithBlame = (
+  originNodeId: Number,
+  description: String,
+  left: Types.Type,
+  right: Types.Type,
+  blamePattern: CoreAst.Pattern,
+  blameDescription: String,
+  state: Layer1InferState.InferState,
+) =>
+  unifyForNodeWithBlame(
+    originNodeId,
+    description,
+    left,
+    right,
+    Some(Layer1Marks.patternOrigin(blamePattern, blameDescription)),
+    state
+  )

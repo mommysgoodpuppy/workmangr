@@ -2,55 +2,42 @@ module Layer1Marks
 
 from "list" include List
 from "map" include Map
-from "array" include Array
 
 from "../core_ast.gr" include CoreAst
 from "../constraints.gr" include Constraints
 from "../env.gr" include Env
 from "../flow.gr" include Flow
 from "../types.gr" include Types
-from "./expr.gr" include Layer1Expr
 from "./patterns.gr" include Layer1Patterns
 from "./infer_state.gr" include InferState as Layer1InferState
 
-let apply = (state: Layer1InferState.InferState, t: Types.Type) =>
-  Types.applySubstType(state.subst, t)
-
-let renderType = (t: Types.Type, state: Layer1InferState.InferState) =>
-  Types.typeToReadableString(apply(state, t))
-
-let renderOrigin = (origin: Constraints.Origin) =>
-  Constraints.originToString(origin)
-
-let renderOriginTrail = (origins: List<Constraints.Origin>) =>
-  match (origins) {
-    [] => "<none>",
-    _ => Array.join(" <= ", Array.fromList(List.map(renderOrigin, origins))),
-  }
-
-let recentOrigins = (state: Layer1InferState.InferState, n: Number) => {
-  let recent = List.filterMap((constraint: Constraints.Constraint) =>
-    match (constraint) {
-      Constraints.Equality(_, _, o) => Some(o),
-      Constraints.Domain(_, o) => Some(o),
-      Constraints.Numeric(_, o) => Some(o),
-    }, state.constraints)
-  let rec take = (items: List<Constraints.Origin>, count: Number, acc: List<Constraints.Origin>) =>
-    if (count <= 0) {
-      List.reverse(acc)
-    } else {
-      match (items) {
-        [] => List.reverse(acc),
-        [head, ...tail] => take(tail, count - 1, [head, ...acc]),
-      }
-    }
-  take(recent, n, [])
-}
-
-let inferDebug = (_message: String) => void
+let apply = Layer1InferState.apply
+let renderType = Layer1InferState.renderType
+let renderOrigin = Layer1InferState.renderOrigin
+let renderOriginTrail = Layer1InferState.renderOriginTrail
+let recentOrigins = Layer1InferState.recentOrigins
+let inferDebug = Layer1InferState.inferDebug
 
 let reservedNameError = (name: String) =>
-  "Type error: reserved identifier " ++ name ++ " cannot be declared"
+  Layer1InferState.reservedNameError(name)
+
+let instantiateTypeParams = (typeParams: List<String>, nextVarStart: Number) => {
+  let paramMap: Map.Map<String, Types.Type> = Map.make()
+  let rec loop = (
+    params: List<String>,
+    nextVar: Number,
+    acc: List<Types.Type>,
+  ) =>
+    match (params) {
+      [] => (List.reverse(acc), paramMap, nextVar),
+      [name, ...rest] => {
+        let tVar: Types.Type = Types.TVar(nextVar)
+        Map.set(name, tVar, paramMap)
+        loop(rest, nextVar + 1, [tVar, ...acc])
+      },
+    }
+  loop(typeParams, nextVarStart, [])
+}
 
 provide let originForNode = (nodeId: Number, description: String) =>
   Constraints.makeOrigin(nodeId, description)
@@ -374,7 +361,7 @@ provide let handleMatchApplication = (
               "Type error: unknown nominal type " ++ first.typeName
             ),
           Some(typeInfo) => {
-            let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
+            let (paramTypes, _paramMap, nextVar) = instantiateTypeParams(
               typeInfo.typeParams,
               state.nextVar
             )

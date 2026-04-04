@@ -1,0 +1,184 @@
+module Layer1EnvLookup
+
+from "list" include List
+from "map" include Map
+from "string" include String
+
+from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../flow.gr" include Flow
+from "../types.gr" include Types
+from "./expr.gr" include Layer1Expr
+from "./marks.gr" include Layer1Marks
+from "./infer_state.gr" include InferState as Layer1InferState
+
+provide record LookupResult {
+  ty: Types.Type,
+  bindingId: Number,
+  scopeId: Number,
+  identities: Flow.DomainIdentities,
+  functionNodeId: Option<Number>,
+}
+
+provide let lookupEnv = (name: CoreAst.Name, state: Layer1InferState.InferState) => {
+  match (Env.lookupValue(state.env, name.text)) {
+    Some(entry) => {
+      let (inst, nextVar) = Types.instantiate(entry.scheme, state.nextVar)
+      let flow1 = Flow.recordExprIdentities(state.flow, name.node.id, entry.identities)
+      let flow1b =
+        if (entry.scopeId != state.flow.currentScopeId && entry.bindingKind != Flow.BuiltinBinding) {
+          Flow.noteCapture(flow1, entry.bindingId)
+        } else {
+          flow1
+        }
+      let flow2 = List.reduce(
+        (flowAcc: Flow.FlowState, domainEntry: (String, List<Number>)) => {
+          let (domain, identityIds) = domainEntry
+          List.reduce(
+            (flowInner: Flow.FlowState, identityId: Number) =>
+              Flow.recordIdentityUsage(
+                flowInner,
+                domain,
+                identityId,
+                name.node.id,
+                entry.bindingId
+              ),
+            flowAcc,
+            identityIds
+          )
+        },
+        flow1b,
+        Map.toList(entry.identities)
+      )
+      (
+        {
+          ty: Types.applySubstType(state.subst, inst),
+          bindingId: entry.bindingId,
+          scopeId: entry.scopeId,
+          identities: entry.identities,
+          functionNodeId: entry.functionNodeId,
+        }: LookupResult,
+        { ...state, nextVar, flow: flow2 },
+      )
+    },
+    None => {
+      let dotIdx = {
+        let rec findDot = (i: Number) =>
+          if (i >= String.length(name.text)) { -1 }
+          else if (String.charAt(i, name.text) == '.') { i }
+          else { findDot(i + 1) }
+        findDot(0)
+      }
+      let unknownLookup = (st: Layer1InferState.InferState) => {
+        let (unknownType, st1) = Layer1InferState.freshVar(st)
+        let marked = Layer1Marks.addTypeMark(
+          st1,
+          Layer1InferState.UnknownIdentifier,
+          Layer1Marks.originForNode(name.node.id, "unknown identifier"),
+          CoreAst.FreeVar(name),
+          "Type error: unknown identifier " ++ name.text
+        )
+        (
+          {
+            ty: unknownType,
+            bindingId: -1,
+            scopeId: st.flow.currentScopeId,
+            identities: Flow.emptyDomainIdentities(),
+            functionNodeId: None,
+          }: LookupResult,
+          marked,
+        )
+      }
+      if (dotIdx > 0) {
+        let baseName = String.slice(0, end=dotIdx, name.text)
+        match (Env.lookupValue(state.env, baseName)) {
+          Some(baseEntry) =>
+            match (Types.applySubstType(state.subst, baseEntry.scheme.ty)) {
+              Types.THole(holeId) => {
+                let t = Types.THole(name.node.id)
+                let state1 = Layer1Marks.noteHoleObservation(
+                  state,
+                  holeId,
+                  t,
+                  Layer1Marks.originForNode(name.node.id, "hole projection")
+                )
+                (
+                  {
+                    ty: t,
+                    bindingId: -1,
+                    scopeId: state.flow.currentScopeId,
+                    identities: Flow.emptyDomainIdentities(),
+                    functionNodeId: None,
+                  }: LookupResult,
+                  state1,
+                )
+              },
+              _ => unknownLookup(state),
+            },
+          None => unknownLookup(state),
+        }
+      } else {
+        unknownLookup(state)
+      }
+    },
+  }
+}
+
+provide let registerImportedTypeInfo = (
+  env: Env.TypingEnv,
+  typeName: String,
+  info: Env.TypeInfo,
+) => {
+  if (Env.lookupType(env, typeName) == None) {
+    Env.registerType(env, info)
+    let (paramTypes, paramMap, _nextVar) = Layer1Expr.instantiateTypeParams(
+      info.typeParams,
+      10000
+    )
+    let quantifiers = Layer1Expr.typeVarIdsFromTypes(paramTypes)
+    let resultType = Types.TNominal(typeName, paramTypes)
+    List.forEach((ctor: Env.ConstructorInfo) => {
+      let ctorType = match (ctor.payload) {
+        Some(payloadType) =>
+          Types.TFun(Layer1Expr.typeExprToType(payloadType, paramMap), resultType),
+        None => resultType,
+      }
+      let scheme: Types.Scheme = { quantifiers, ty: ctorType }
+      Env.defineValue(env, ctor.name, scheme)
+      void
+    }, info.constructors)
+    void
+  } else {
+    void
+  }
+}
+
+provide let lookupQualifiedProjection = (
+  baseName: CoreAst.Name,
+  fieldName: String,
+  state: Layer1InferState.InferState,
+) =>
+  match (Env.lookupValue(state.env, baseName.text ++ "." ++ fieldName)) {
+    Some(entry) => {
+      let (inst, nextVar) = Types.instantiate(entry.scheme, state.nextVar)
+      Some((
+        {
+          ty: Types.applySubstType(state.subst, inst),
+          bindingId: entry.bindingId,
+          scopeId: entry.scopeId,
+          identities: entry.identities,
+          functionNodeId: entry.functionNodeId,
+        }: LookupResult,
+        { ...state, nextVar }
+      ))
+    },
+    None => None,
+  }
+
+provide let cloneEnvValues = (values: Types.Env) => {
+  let cloned = Types.emptyEnv()
+  Map.forEach((name, scheme) => {
+    Map.set(name, scheme, cloned)
+  }, values)
+  cloned
+}
