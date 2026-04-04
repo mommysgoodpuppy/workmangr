@@ -8,6 +8,7 @@ from "../constraints.gr" include Constraints
 from "../env.gr" include Env
 from "../flow.gr" include Flow
 from "../types.gr" include Types
+from "./expr_utils.gr" include Layer1ExprUtils
 from "./patterns.gr" include Layer1Patterns
 from "./infer_state.gr" include InferState as Layer1InferState
 
@@ -20,24 +21,6 @@ let inferDebug = Layer1InferState.inferDebug
 
 let reservedNameError = (name: String) =>
   Layer1InferState.reservedNameError(name)
-
-let instantiateTypeParams = (typeParams: List<String>, nextVarStart: Number) => {
-  let paramMap: Map.Map<String, Types.Type> = Map.make()
-  let rec loop = (
-    params: List<String>,
-    nextVar: Number,
-    acc: List<Types.Type>,
-  ) =>
-    match (params) {
-      [] => (List.reverse(acc), paramMap, nextVar),
-      [name, ...rest] => {
-        let tVar: Types.Type = Types.TVar(nextVar)
-        Map.set(name, tVar, paramMap)
-        loop(rest, nextVar + 1, [tVar, ...acc])
-      },
-    }
-  loop(typeParams, nextVarStart, [])
-}
 
 provide let originForNode = (nodeId: Number, description: String) =>
   Constraints.makeOrigin(nodeId, description)
@@ -361,7 +344,7 @@ provide let handleMatchApplication = (
               "Type error: unknown nominal type " ++ first.typeName
             ),
           Some(typeInfo) => {
-            let (paramTypes, _paramMap, nextVar) = instantiateTypeParams(
+            let (paramTypes, _paramMap, nextVar) = Layer1ExprUtils.instantiateTypeParams(
               typeInfo.typeParams,
               state.nextVar
             )

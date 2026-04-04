@@ -375,7 +375,6 @@ let handleMatchApplication = (
 }
 
 let lookupEnv = Layer1EnvLookup.lookupEnv
-let registerImportedTypeInfo = Layer1EnvLookup.registerImportedTypeInfo
 let lookupQualifiedProjection = Layer1EnvLookup.lookupQualifiedProjection
 let cloneEnvValues = Layer1EnvLookup.cloneEnvValues
 
