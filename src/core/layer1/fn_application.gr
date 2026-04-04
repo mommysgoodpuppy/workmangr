@@ -1,0 +1,169 @@
+module Layer1FnApplication
+
+from "list" include List
+
+from "../core_ast.gr" include CoreAst
+from "../flow.gr" include Flow
+from "../types.gr" include Types
+from "../layer2/infection.gr" include Layer2Infection
+from "./marks.gr" include Layer1Marks
+from "./unify.gr" include Layer1Unify
+from "./infer_state.gr" include InferState as Layer1InferState
+from "./expr_utils.gr" include Layer1ExprUtils
+
+provide type InferState = Layer1InferState.InferState
+
+provide let inferFunctionApplication = (
+  exprNodeId: Number,
+  callee: CoreAst.Expr,
+  arg: CoreAst.Expr,
+  state: InferState,
+  inferExpr: (CoreAst.Expr, InferState) => (Types.Type, InferState),
+  handleMatchApplication: (CoreAst.FnExpr, Number, Types.Type, InferState) => InferState,
+) => {
+  let rec calleeIsFnLiteral = (expr: CoreAst.Expr) =>
+    match (expr.kind) {
+      CoreAst.Fn(_) => true,
+      CoreAst.Mark(_, inner) => calleeIsFnLiteral(inner),
+      _ => false,
+    }
+  let (tCallee, state1) = inferExpr(callee, state)
+  let (tArg, state2) = inferExpr(arg, state1)
+  let applicationOriginNodeId = arg.node.id
+  let argIdentities = Layer1ExprUtils.exprIdentitiesForNode(state2, arg.node.id)
+  let (normalizedArgType, wraps) = Layer2Infection.normalizeArgForCallee(tCallee, tArg, state2)
+  Layer1InferState.inferDebug(
+    "Layer1InferState.apply.enter node="
+      ++ toString(exprNodeId)
+      ++ " calleeType="
+      ++ Layer1InferState.renderType(tCallee, state2)
+      ++ " argType="
+      ++ Layer1InferState.renderType(tArg, state2)
+      ++ " normalizedArgType="
+      ++ Layer1InferState.renderType(normalizedArgType, state2)
+      ++ " wraps="
+      ++ toString(List.length(wraps))
+  )
+  let (selectedWrapOpt, state2a) =
+    if (calleeIsFnLiteral(callee)) {
+      (None, state2)
+    } else {
+      Layer2Infection.chooseCarrierWrap(wraps, exprNodeId, state2)
+    }
+  let (blameExpr, blameDescription, explicitBlame) =
+    Layer1ExprUtils.functionApplicationBlame(callee, arg, tCallee, state2a)
+  let (tRes, state3) = Layer1InferState.freshVar(state2a)
+  let state4 = match (explicitBlame) {
+    Some(blameOrigin) =>
+      Layer1Unify.unifyForNodeWithBlame(
+        exprNodeId,
+        "function application",
+        tCallee,
+        Types.TFun(normalizedArgType, tRes),
+        Some(blameOrigin),
+        state3
+      ),
+    None =>
+      Layer1Unify.unifyForExprWithBlame(
+        exprNodeId,
+        "function application",
+        tCallee,
+        Types.TFun(normalizedArgType, tRes),
+        blameExpr,
+        blameDescription,
+        state3
+      ),
+  }
+  let state4a = Layer1Marks.noteBindingBlameForExpr(
+    state4,
+    blameExpr,
+    blameDescription
+  )
+  let state5 = match (callee.kind) {
+    CoreAst.Fn(fnExpr) => handleMatchApplication(fnExpr, arg.node.id, normalizedArgType, state4a),
+    _ => state4a,
+  }
+  let state6 = match (callee.kind) {
+    CoreAst.Ident(name) =>
+      Layer2Infection.applyOpRuleAtCall(exprNodeId, name.text, tCallee, tArg, tRes, state5),
+    _ => state5,
+  }
+  let state6a = match (callee.kind) {
+    CoreAst.Ident(name) =>
+      Layer2Infection.applyNumericDomainAtCall(exprNodeId, name.text, normalizedArgType, tRes, state6),
+    _ => state6,
+  }
+  let state6b = match (callee.kind) {
+    CoreAst.Ident(name) when Layer2Infection.isNumericBinaryOp(name.text) =>
+      Layer1Unify.unifyForNode(
+        exprNodeId,
+        "numeric arithmetic default",
+        tRes,
+        Types.TNumber,
+        state6a
+      ),
+    _ => state6a,
+  }
+  let state6c = match (Layer1ExprUtils.functionNodeIdForCallee(callee, state6b)) {
+    Some(functionNodeId) =>
+      match (Flow.functionInfoForNode(state6b.flow, functionNodeId)) {
+        Some(info) =>
+          match (info.paramBindingId) {
+            Some(paramBindingId) =>
+              {
+                ...state6b,
+                flow: Flow.recordArgToParamFlow(
+                  state6b.flow,
+                  exprNodeId,
+                  arg.node.id,
+                  paramBindingId,
+                  argIdentities
+                ),
+              },
+            None => state6b,
+          },
+        None => state6b,
+      },
+    None => state6b,
+  }
+  let resultIdentities = match (Layer1ExprUtils.functionNodeIdForCallee(callee, state6c)) {
+    Some(functionNodeId) =>
+      match (Flow.functionInfoForNode(state6c.flow, functionNodeId)) {
+        Some(info) => {
+          let dynamicParamIdentities = match (info.paramBindingId) {
+            Some(paramBindingId) =>
+              if (List.some((bindingId: Number) => bindingId == paramBindingId, info.resultBindingIds)) {
+                argIdentities
+              } else {
+                Flow.emptyDomainIdentities()
+              },
+            None => Flow.emptyDomainIdentities(),
+          }
+          Flow.mergeDomainIdentities(info.resultIdentities, dynamicParamIdentities)
+        },
+        None => Flow.emptyDomainIdentities(),
+      },
+    None => Flow.emptyDomainIdentities(),
+  }
+  let tAppliedBase = Layer1InferState.apply(state6c, tRes)
+  let (tApplied, state7) = match (selectedWrapOpt) {
+    Some(wrap) => (
+      Layer2Infection.wrapResultWithCarrier(tAppliedBase, wrap, state6c),
+      Layer1Marks.noteEffectEvent(
+        state6c,
+        exprNodeId,
+        "propagation",
+        "charged by "
+          ++ wrap.typeName
+          ++ " (domain "
+          ++ wrap.domain
+          ++ ") via argument propagation"
+      ),
+    ),
+    None => (tAppliedBase, state6c),
+  }
+  let flow7 = Flow.recordExprIdentities(state7.flow, exprNodeId, resultIdentities)
+  let state8 = { ...state7, flow: flow7 }
+  let tRecorded = Layer1InferState.recordNodeType(exprNodeId, tApplied, state8)
+  (tRecorded, state8)
+}

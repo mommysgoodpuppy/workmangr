@@ -1,0 +1,125 @@
+module Layer1FieldProjection
+
+from "../core_ast.gr" include CoreAst
+from "../types.gr" include Types
+from "./infer_state.gr" include InferState as Layer1InferState
+from "./env_lookup.gr" include Layer1EnvLookup
+from "./unify.gr" include Layer1Unify
+from "./marks.gr" include Layer1Marks
+from "./record_ctx.gr" include Layer1RecordCtx
+
+provide type InferState = Layer1InferState.InferState
+
+provide let inferProjectFieldAccess = (
+  exprNodeId: Number,
+  targetExpr: CoreAst.Expr,
+  fieldName: String,
+  fieldExprForBlame: CoreAst.Expr,
+  allowCarrierProjectionFallback: Bool,
+  state: InferState,
+  inferExpr: (CoreAst.Expr, InferState) => (Types.Type, InferState),
+) => {
+  let inferFromInferredTarget = (
+    targetType: Types.Type,
+    state1: InferState,
+  ) => {
+    let (fieldType, state2) = Layer1InferState.freshVar(state1)
+    let targetBlame = Some(Layer1Marks.blameExprOrigin(targetExpr, "record projection target"))
+    let fieldBlame = Some(Layer1Marks.blameExprOrigin(fieldExprForBlame, "record projection field"))
+    let state3 = match (Layer1InferState.apply(state2, targetType)) {
+      Types.TNominal(typeName, typeArgs) =>
+        match (Layer1RecordCtx.resolveNominalRecordFields(typeName, typeArgs, state2)) {
+          Some(fields) =>
+            match (Layer1RecordCtx.findRecordFieldType(fields, fieldName)) {
+              Some(existingType) =>
+                Layer1Unify.unifyForNodeWithBlame(
+                  exprNodeId,
+                  "record projection field",
+                  fieldType,
+                  existingType,
+                  fieldBlame,
+                  state2
+                ),
+              None =>
+                Layer1Marks.addTypeMarkWithBlame(
+                  state2,
+                  Layer1InferState.TypeMismatch,
+                  Layer1Marks.originForNode(exprNodeId, "record projection missing field"),
+                  fieldBlame,
+                  CoreAst.Inconsistent,
+                  "Type error: unknown record field " ++ fieldName
+                ),
+            },
+          None =>
+            if (allowCarrierProjectionFallback) {
+              Layer1RecordCtx.inferProjectionFromCarrierContext(
+                exprNodeId,
+                targetType,
+                targetBlame,
+                fieldName,
+                fieldType,
+                fieldBlame,
+                state2
+              )
+            } else {
+              Layer1Marks.addTypeMarkWithBlame(
+                state2,
+                Layer1InferState.TypeMismatch,
+                Layer1Marks.originForNode(exprNodeId, "record projection nominal"),
+                targetBlame,
+                CoreAst.Inconsistent,
+                "Type error: projection expects a nominal record value"
+              )
+            },
+        },
+      Types.TVar(_) => Layer1RecordCtx.inferProjectionFromFieldContext(
+        exprNodeId,
+        targetType,
+        targetBlame,
+        fieldName,
+        fieldType,
+        fieldBlame,
+        state2
+      ),
+      Types.THole(_) => Layer1RecordCtx.inferProjectionFromFieldContext(
+        exprNodeId,
+        targetType,
+        targetBlame,
+        fieldName,
+        fieldType,
+        fieldBlame,
+        state2
+      ),
+      _ =>
+        Layer1Marks.addTypeMarkWithBlame(
+          state2,
+          Layer1InferState.TypeMismatch,
+          Layer1Marks.originForNode(exprNodeId, "record projection"),
+          targetBlame,
+          CoreAst.Inconsistent,
+          "Type error: projection expects a nominal record value"
+        ),
+    }
+    let resolved = Layer1InferState.apply(state3, fieldType)
+    let tRecorded = Layer1InferState.recordNodeType(exprNodeId, resolved, state3)
+    (tRecorded, state3)
+  }
+
+  match (targetExpr.kind) {
+    CoreAst.Ident(baseName) =>
+      match (Layer1EnvLookup.lookupQualifiedProjection(baseName, fieldName, state)) {
+        Some((qualifiedLookup, state1)) => {
+          let tRecorded = Layer1InferState.recordNodeType(exprNodeId, qualifiedLookup.ty, state1)
+          (tRecorded, state1)
+        },
+        None => {
+          let (targetType, state1) = inferExpr(targetExpr, state)
+          inferFromInferredTarget(targetType, state1)
+        },
+      },
+    _ => {
+      let (targetType, state1) = inferExpr(targetExpr, state)
+      inferFromInferredTarget(targetType, state1)
+    },
+  }
+}

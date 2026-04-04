@@ -1,0 +1,271 @@
+module Layer1PatternBindings
+
+from "list" include List
+from "map" include Map
+from "array" include Array
+
+from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../flow.gr" include Flow
+from "../types.gr" include Types
+from "./infer_state.gr" include InferState as Layer1InferState
+from "./env_lookup.gr" include Layer1EnvLookup
+from "./unify.gr" include Layer1Unify
+from "./marks.gr" include Layer1Marks
+from "./patterns.gr" include Layer1Patterns
+from "./expr_utils.gr" include Layer1ExprUtils
+
+provide type InferState = Layer1InferState.InferState
+
+provide let rec withPatternBindingsKind = (
+  pattern: CoreAst.Pattern,
+  expectedType: Types.Type,
+  bindingKind: Flow.BindingKind,
+  state: InferState,
+  fn: InferState => (Types.Type, InferState),
+) => {
+  let monoScheme: Types.Scheme = { quantifiers: [], ty: expectedType }
+  match (pattern.kind) {
+    CoreAst.Var(name) => {
+      let applied = Layer1InferState.apply(state, expectedType)
+      Map.set(pattern.node.id, applied, state.nodeTypes)
+      Map.set(name.node.id, applied, state.nodeTypes)
+      Layer1ExprUtils.withBinding(
+        name.text,
+        monoScheme,
+        bindingKind,
+        Flow.emptyDomainIdentities(),
+        None,
+        state,
+        st => {
+          let st1 = if (bindingKind == Flow.ParamBinding) {
+            match (Env.lookupValue(st.env, name.text)) {
+              Some(entry) => {
+                let flowNext = Flow.noteFunctionParamBinding(st.flow, entry.bindingId)
+                { ...st, flow: flowNext }
+              },
+              None => st,
+            }
+          } else {
+            st
+          }
+          fn(st1)
+        }
+      )
+    },
+    CoreAst.Pin(name) => {
+      let (pinLookup, state1) = Layer1EnvLookup.lookupEnv(name, state)
+      let state2 = Layer1Unify.unifyForPatternWithBlame(
+        pattern.node.id,
+        "pinned pattern",
+        expectedType,
+        pinLookup.ty,
+        pattern,
+        "pinned pattern",
+        state1
+      )
+      let appliedPattern = Layer1InferState.apply(state2, expectedType)
+      let appliedName = Layer1InferState.apply(state2, pinLookup.ty)
+      Map.set(pattern.node.id, appliedPattern, state2.nodeTypes)
+      Map.set(name.node.id, appliedName, state2.nodeTypes)
+      fn(state2)
+    },
+    CoreAst.Lit(_) => {
+      let (litType, stateLit) = match (pattern.kind) {
+        CoreAst.Lit(CoreAst.Int(value)) => {
+          let (numericTy, st1) = Layer1InferState.freshVar(state)
+          let st2 = Layer1InferState.recordNumericIntLiteral(
+            st1,
+            numericTy,
+            value,
+            Layer1Marks.originForNode(pattern.node.id, "literal pattern numeric")
+          )
+          (numericTy, st2)
+        },
+        CoreAst.Lit(CoreAst.Bool(_)) => (Types.TBool, state),
+        CoreAst.Lit(CoreAst.Str(_)) => (Types.TString, state),
+        CoreAst.Lit(CoreAst.Byte(_)) => (Types.TByte, state),
+        CoreAst.Lit(CoreAst.Char(_)) => (Types.TChar, state),
+        CoreAst.Lit(CoreAst.Unit) => (Types.TVoid, state),
+        _ => (Types.TNumber, state),
+      }
+      let state1 = Layer1Unify.unifyForPatternWithBlame(
+        pattern.node.id,
+        "literal pattern",
+        expectedType,
+        litType,
+        pattern,
+        "literal pattern",
+        stateLit
+      )
+      fn(state1)
+    },
+    CoreAst.Tuple(items) => {
+      let rec freshTupleTypes = (
+        remaining: List<CoreAst.Pattern>,
+        st: InferState,
+        acc: List<(CoreAst.Pattern, Types.Type)>,
+      ) =>
+        match (remaining) {
+          [] => (List.reverse(acc), st),
+          [item, ...rest] => {
+            let (itemType, st1) = Layer1InferState.freshVar(st)
+            freshTupleTypes(rest, st1, [(item, itemType), ...acc])
+          },
+        }
+
+      let (itemPairs, state1) = freshTupleTypes(items, state, [])
+      let tupleType = Types.TTuple(List.map(((_item, itemType)) => itemType, itemPairs))
+      let state2 = Layer1Unify.unifyForPatternWithBlame(
+        pattern.node.id,
+        "tuple pattern",
+        expectedType,
+        tupleType,
+        pattern,
+        "tuple pattern",
+        state1
+      )
+
+      let rec bindTupleItems = (
+        pairs: List<(CoreAst.Pattern, Types.Type)>,
+        st: InferState,
+      ) =>
+        match (pairs) {
+          [] => fn(st),
+          [(itemPattern, itemType), ...rest] =>
+            withPatternBindingsKind(
+              itemPattern,
+              itemType,
+              bindingKind,
+              st,
+              stNext => bindTupleItems(rest, stNext)
+            ),
+        }
+
+      bindTupleItems(itemPairs, state2)
+    },
+    CoreAst.Constructor(name, items) => {
+      Layer1InferState.tracePatternStep("pattern.constructor.enter", pattern, expectedType, state)
+      let (ctorLookup, state1) = Layer1EnvLookup.lookupEnv(name, state)
+      let ctorType = ctorLookup.ty
+      let (ctorArgs, ctorResult) = Layer1Patterns.flattenFunctionType(ctorType)
+      Layer1InferState.inferDebug(
+        "pattern.constructor.lookup patternNode="
+          ++ toString(pattern.node.id)
+          ++ " ctor="
+          ++ name.text
+          ++ " ctorType="
+          ++ Layer1InferState.renderType(ctorType, state1)
+          ++ " ctorResult="
+          ++ Layer1InferState.renderType(ctorResult, state1)
+          ++ " ctorArgs="
+          ++ Array.join(", ", Array.fromList(List.map((ty: Types.Type) => Layer1InferState.renderType(ty, state1), ctorArgs)))
+      )
+      let state2 = Layer1Unify.unifyForPatternWithBlame(
+        pattern.node.id,
+        "constructor pattern",
+        expectedType,
+        ctorResult,
+        pattern,
+        "constructor pattern",
+        state1
+      )
+      Layer1InferState.inferDebug(
+        "pattern.constructor.after-Layer1Unify.unify patternNode="
+          ++ toString(pattern.node.id)
+          ++ " ctor="
+          ++ name.text
+          ++ " expectedNow="
+          ++ Layer1InferState.renderType(expectedType, state2)
+          ++ " ctorResultNow="
+          ++ Layer1InferState.renderType(ctorResult, state2)
+      )
+
+      let baseItemTypes = match ((ctorArgs, items)) {
+        ([], []) => [],
+        ([only], _) when List.length(items) > 1 => match (Layer1InferState.apply(state2, only)) {
+          Types.TTuple(tupleItems) when List.length(tupleItems) == List.length(items) =>
+            tupleItems,
+          _ => [only],
+        },
+        _ => ctorArgs,
+      }
+      Layer1InferState.inferDebug(
+        "pattern.constructor.items patternNode="
+          ++ toString(pattern.node.id)
+          ++ " ctor="
+          ++ name.text
+          ++ " baseItemTypes="
+          ++ Array.join(", ", Array.fromList(List.map((ty: Types.Type) => Layer1InferState.renderType(ty, state2), baseItemTypes)))
+      )
+
+      let arityMessage =
+        "Constructor pattern arity mismatch for "
+          ++ name.text
+          ++ " (expected "
+          ++ toString(List.length(baseItemTypes))
+          ++ ", got "
+          ++ toString(List.length(items))
+          ++ ")"
+
+      let rec freshTypes = (
+        remaining: List<CoreAst.Pattern>,
+        st: InferState,
+        acc: List<Types.Type>,
+      ) =>
+        match (remaining) {
+          [] => (List.reverse(acc), st),
+          [_item, ...rest] => {
+            let (ty, st1) = Layer1InferState.freshVar(st)
+            freshTypes(rest, st1, [ty, ...acc])
+          },
+        }
+
+      let (itemTypes, state3) = if (
+        List.length(baseItemTypes) == List.length(items)
+      ) {
+        (baseItemTypes, state2)
+      } else {
+        let marked = Layer1Marks.addTypeMark(
+          state2,
+          Layer1InferState.TypeMismatch,
+          Layer1Marks.originForNode(pattern.node.id, "constructor pattern arity"),
+          CoreAst.PatternError,
+          arityMessage
+        )
+        freshTypes(items, marked, [])
+      }
+
+      let rec zip = (
+        pats: List<CoreAst.Pattern>,
+        tys: List<Types.Type>,
+        acc: List<(CoreAst.Pattern, Types.Type)>,
+      ) => match ((pats, tys)) {
+        ([], []) => List.reverse(acc),
+        ([pat, ...patRest], [ty, ...tyRest]) =>
+          zip(patRest, tyRest, [(pat, ty), ...acc]),
+        _ => [],
+      }
+
+      let itemPairs = zip(items, itemTypes, [])
+
+      let rec bindItems = (
+        pairs: List<(CoreAst.Pattern, Types.Type)>,
+        st: InferState,
+      ) => match (pairs) {
+        [] => fn(st),
+        [(itemPattern, itemType), ...rest] =>
+          withPatternBindingsKind(
+            itemPattern,
+            itemType,
+            bindingKind,
+            st,
+            stNext => bindItems(rest, stNext)
+          ),
+      }
+
+      bindItems(itemPairs, state3)
+    },
+    _ => fn(state),
+  }
+}

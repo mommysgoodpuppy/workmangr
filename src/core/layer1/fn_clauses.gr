@@ -1,0 +1,138 @@
+module Layer1FnClauses
+
+from "list" include List
+
+from "../core_ast.gr" include CoreAst
+from "../flow.gr" include Flow
+from "../types.gr" include Types
+from "./marks.gr" include Layer1Marks
+from "./unify.gr" include Layer1Unify
+from "./infer_state.gr" include InferState as Layer1InferState
+from "./expr_utils.gr" include Layer1ExprUtils
+from "./pattern_bindings.gr" include Layer1PatternBindings
+
+provide type InferState = Layer1InferState.InferState
+
+provide let inferFnExpr = (
+  expr: CoreAst.Expr,
+  fnExpr: CoreAst.FnExpr,
+  state: InferState,
+  inferExpr: (CoreAst.Expr, InferState) => (Types.Type, InferState),
+) => {
+  let stateWithMatch = Layer1Marks.recordMatchArms(fnExpr, state)
+  let clauses = List.filterMap(
+    (item: CoreAst.FnItem) => match (item.kind) {
+      CoreAst.Clause(clause) => Some(clause),
+      _ => None,
+    },
+    fnExpr.items
+  )
+  let stateFn = if (clauses == []) {
+    Layer1Marks.addTypeMark(
+      stateWithMatch,
+      Layer1InferState.Internal,
+      Layer1Marks.originForNode(expr.node.id, "function clauses"),
+      CoreAst.Internal("empty function clauses"),
+      "Type error: empty function clauses"
+    )
+  } else {
+    stateWithMatch
+  }
+  let (paramType, state1) = Layer1InferState.freshVar(stateFn)
+  let (resultType, state2) = Layer1InferState.freshVar(state1)
+  let callMode = Layer1ExprUtils.functionCallMode(clauses)
+  let (scopeId, flow1) = Flow.freshScopeId(state2.flow)
+  let previousScopeId = state2.flow.currentScopeId
+  let scopedState = { ...state2, flow: Flow.setCurrentScope(flow1, scopeId) }
+  let currentScopeId = scopedState.flow.currentScopeId
+  let (_fnId, scopedState1) = {
+    let (_newFnId, nextFlow) = Flow.beginFunction(
+      scopedState.flow,
+      expr.node.id,
+      currentScopeId,
+      callMode
+    )
+    (_newFnId, { ...scopedState, flow: nextFlow })
+  }
+  let rec inferClauses = (remaining: List<CoreAst.FnClause>, st: InferState) =>
+    match (remaining) {
+      [] => st,
+      [clause, ...rest] => {
+        Layer1InferState.inferDebug(
+          "fn.clause.enter fnNode="
+            ++ toString(expr.node.id)
+            ++ " clauseNode="
+            ++ toString(clause.node.id)
+            ++ " paramTypeBefore="
+            ++ Layer1InferState.renderType(paramType, st)
+            ++ " resultTypeBefore="
+            ++ Layer1InferState.renderType(resultType, st)
+        )
+        let (_ignoredType, nextState) = Layer1PatternBindings.withPatternBindingsKind(
+          clause.param,
+          paramType,
+          Flow.ParamBinding,
+          st,
+          st1 => {
+            let st2 = match (clause.guard) {
+              Some(guardExpr) => {
+                let (guardType, stGuard) = inferExpr(guardExpr, st1)
+                Layer1Unify.unifyForExprWithBlame(
+                  clause.node.id,
+                  "function clause guard",
+                  guardType,
+                  Types.TBool,
+                  guardExpr,
+                  "function clause guard",
+                  stGuard
+                )
+              },
+            None => st1,
+          }
+          let (bodyType, st3) = inferExpr(clause.body, st2)
+            let st3a = match (Layer1ExprUtils.exprBindingRefForNode(st3, clause.body.node.id)) {
+              Some(bindingId) => { ...st3, flow: Flow.noteFunctionResultBinding(st3.flow, bindingId) },
+              None => st3,
+            }
+            let st3b = {
+              ...st3a,
+              flow: Flow.noteFunctionResultIdentities(
+                st3a.flow,
+                Layer1ExprUtils.exprIdentitiesForNode(st3a, clause.body.node.id)
+              ),
+            }
+            let st4 = Layer1Unify.unifyForExprWithBlame(
+              clause.node.id,
+              "function clause result",
+              bodyType,
+              resultType,
+              clause.body,
+              "function clause body",
+              st3b
+            )
+            Layer1InferState.inferDebug(
+              "fn.clause.exit fnNode="
+                ++ toString(expr.node.id)
+                ++ " clauseNode="
+                ++ toString(clause.node.id)
+                ++ " paramTypeAfter="
+                ++ Layer1InferState.renderType(paramType, st4)
+                ++ " bodyType="
+                ++ Layer1InferState.renderType(bodyType, st4)
+                ++ " resultTypeAfter="
+                ++ Layer1InferState.renderType(resultType, st4)
+            )
+            let nextState = inferClauses(rest, st4)
+            (Layer1InferState.apply(nextState, resultType), nextState)
+          }
+        )
+        nextState
+      },
+    }
+  let nextState = inferClauses(clauses, scopedState1)
+  let flowFinal = Flow.endFunction(nextState.flow)
+  let stFn = { ...nextState, flow: Flow.setCurrentScope(flowFinal, previousScopeId) }
+  let fnType = Types.TFun(Layer1InferState.apply(stFn, paramType), Layer1InferState.apply(stFn, resultType))
+  let tRecorded = Layer1InferState.recordNodeType(expr.node.id, fnType, stFn)
+  (tRecorded, stFn)
+}
