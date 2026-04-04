@@ -4,8 +4,12 @@ from "list" include List
 from "map" include Map
 from "runtime/unsafe/panic" include Panic
 
+from "../constraints.gr" include Constraints
 from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
+from "../flow.gr" include Flow
 from "../types.gr" include Types
+from "./infer_state.gr" include InferState as Layer1InferState
 
 provide let instantiateTypeParams = (typeParams: List<String>, nextVarStart: Number) => {
   let paramMap: Map.Map<String, Types.Type> = Map.make()
@@ -91,3 +95,187 @@ provide let bindingName = (binding: CoreAst.LetBinding) =>
     CoreAst.Var(name) => name.text,
     _ => "_",
   }
+
+provide let exprIdentitiesForNode = (state: Layer1InferState.InferState, nodeId: Number) =>
+  match (Map.get(nodeId, state.flow.exprIdentities)) {
+    Some(identities) => identities,
+    None => Flow.emptyDomainIdentities(),
+  }
+
+provide let exprBindingRefForNode = (state: Layer1InferState.InferState, nodeId: Number) =>
+  Map.get(nodeId, state.flow.exprBindingRefs)
+
+provide let withBinding = (
+  name: String,
+  scheme: Types.Scheme,
+  bindingKind: Flow.BindingKind,
+  identities: Flow.DomainIdentities,
+  functionNodeId: Option<Number>,
+  state: Layer1InferState.InferState,
+  fn: Layer1InferState.InferState => (Types.Type, Layer1InferState.InferState),
+) => {
+  let previous = Env.lookupValue(state.env, name)
+  let (entry, flow1) = Flow.bindScheme(
+    state.flow,
+    scheme,
+    bindingKind,
+    identities=identities,
+    functionNodeId=functionNodeId
+  )
+  let flow2 = Flow.registerBindingInfo(
+    flow1,
+    entry.bindingId,
+    name,
+    entry.scopeId,
+    entry.bindingKind
+  )
+  let envWithBinding = Env.defineValueEntry(state.env, name, entry)
+  let stateWithBinding = { ...state, env: envWithBinding, flow: flow2 }
+  let (resultType, stateAfter) = fn(stateWithBinding)
+  let restoredEnv = match (previous) {
+    Some(prevEntry) => Env.defineValueEntry(stateAfter.env, name, prevEntry),
+    None => Env.removeValue(stateAfter.env, name),
+  }
+  (resultType, { ...stateAfter, env: restoredEnv })
+}
+
+provide let rec functionNodeIdForExpr = (expr: CoreAst.Expr) =>
+  match (expr.kind) {
+    CoreAst.Mark(_, inner) => functionNodeIdForExpr(inner),
+    CoreAst.Fn(fnExpr) => Some(fnExpr.node.id),
+    _ => None,
+  }
+
+provide let rec functionNodeIdForCallee = (
+  callee: CoreAst.Expr,
+  state: Layer1InferState.InferState,
+) =>
+  match (callee.kind) {
+    CoreAst.Mark(_, inner) => functionNodeIdForCallee(inner, state),
+    CoreAst.Fn(fnExpr) => Some(fnExpr.node.id),
+    CoreAst.Ident(name) =>
+      match (Env.lookupValue(state.env, name.text)) {
+        Some(entry) => entry.functionNodeId,
+        None => None,
+      },
+    _ => None,
+  }
+
+provide let functionParamBlameForCallee = (
+  callee: CoreAst.Expr,
+  state: Layer1InferState.InferState,
+) =>
+  match (functionNodeIdForCallee(callee, state)) {
+    Some(functionNodeId) =>
+      match (Flow.functionInfoForNode(state.flow, functionNodeId)) {
+        Some(info) =>
+          match (info.paramBindingId) {
+            Some(bindingId) => Map.get(bindingId, state.bindingBlames),
+            None => None,
+          },
+        None => None,
+      },
+    None => None,
+  }
+
+provide let isCallableTypeForBlame = (
+  ty: Types.Type,
+  state: Layer1InferState.InferState,
+) =>
+  match (Layer1InferState.apply(state, ty)) {
+    Types.TFun(_, _) => true,
+    Types.TVar(_) => true,
+    Types.THole(_) => true,
+    _ => false,
+  }
+
+provide let functionApplicationBlame = (
+  callee: CoreAst.Expr,
+  arg: CoreAst.Expr,
+  calleeType: Types.Type,
+  state: Layer1InferState.InferState,
+) =>
+  if (isCallableTypeForBlame(calleeType, state)) {
+    match (functionParamBlameForCallee(callee, state)) {
+      Some(origin) => (arg, "function argument", Some(origin)),
+      None => (arg, "function argument", None),
+    }
+  } else {
+    (callee, "function callee", None)
+  }
+
+provide let withFreshScope = (
+  state: Layer1InferState.InferState,
+  fn: Layer1InferState.InferState => (Types.Type, Layer1InferState.InferState),
+) => {
+  let (scopeId, flow1) = Flow.freshScopeId(state.flow)
+  let previousScopeId = state.flow.currentScopeId
+  let scopedState = { ...state, flow: Flow.setCurrentScope(flow1, scopeId) }
+  let (result, stateAfter) = fn(scopedState)
+  (
+    result,
+    { ...stateAfter, flow: Flow.setCurrentScope(stateAfter.flow, previousScopeId) }
+  )
+}
+
+provide let functionCallMode = (clauses: List<CoreAst.FnClause>) =>
+  match (clauses) {
+    [
+      {
+        param: { kind: CoreAst.Lit(CoreAst.Unit), _ },
+        _,
+      },
+    ] => Flow.UnitThunk,
+    _ => Flow.UnaryValue,
+  }
+
+provide let collectNumericConstraintVars = (state: Layer1InferState.InferState) => {
+  let seen: Map.Map<Number, Bool> = Map.make()
+  let addTypeVars = (ty: Types.Type) =>
+    List.forEach((id: Number) => {
+      Map.set(id, true, seen)
+      void
+    }, Types.freeVars(Types.applySubstType(state.subst, ty)))
+  List.forEach((constraint) => {
+    match (constraint) {
+      Constraints.Numeric(spec, _origin) =>
+        match (spec) {
+          Constraints.IsNumeric(ty) => addTypeVars(ty),
+          Constraints.IntLiteral(ty, _value) => addTypeVars(ty),
+        },
+      _ => void,
+    }
+  }, state.constraints)
+  seen
+}
+
+provide let normalizeNumericTypeWithVarSet = (
+  ty: Types.Type,
+  subst: Types.Subst,
+  numericVars: Map.Map<Number, Bool>,
+) => {
+  let rec rewrite = (current: Types.Type) =>
+    match (Types.applySubstType(subst, current)) {
+      Types.TVar(id) =>
+        if (Map.get(id, numericVars) != None) {
+          Types.TNumber
+        } else {
+          Types.TVar(id)
+        },
+      Types.TFun(a, b) => Types.TFun(rewrite(a), rewrite(b)),
+      Types.TTuple(items) => Types.TTuple(List.map(rewrite, items)),
+      Types.TNominal(name, args) => Types.TNominal(name, List.map(rewrite, args)),
+      other => other,
+    }
+  rewrite(ty)
+}
+
+provide let normalizeNumericTypeForGeneralize = (
+  ty: Types.Type,
+  state: Layer1InferState.InferState,
+) =>
+  normalizeNumericTypeWithVarSet(
+    ty,
+    state.subst,
+    collectNumericConstraintVars(state)
+  )

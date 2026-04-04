@@ -996,6 +996,20 @@ let invalidZerosCast = (expr: CoreAst.Expr, state: InferState, detail: String) =
   (ty, fromMarksState(nextState))
 }
 
+let exprIdentitiesForNode = Layer1Expr.exprIdentitiesForNode
+let exprBindingRefForNode = Layer1Expr.exprBindingRefForNode
+let withBinding = Layer1Expr.withBinding
+let functionNodeIdForExpr = Layer1Expr.functionNodeIdForExpr
+let functionNodeIdForCallee = Layer1Expr.functionNodeIdForCallee
+let functionParamBlameForCallee = Layer1Expr.functionParamBlameForCallee
+let isCallableTypeForBlame = Layer1Expr.isCallableTypeForBlame
+let functionApplicationBlame = Layer1Expr.functionApplicationBlame
+let withFreshScope = Layer1Expr.withFreshScope
+let collectNumericConstraintVars = Layer1Expr.collectNumericConstraintVars
+let normalizeNumericTypeForGeneralize = Layer1Expr.normalizeNumericTypeForGeneralize
+let functionCallMode = Layer1Expr.functionCallMode
+let normalizeNumericTypeWithVarSet = Layer1Expr.normalizeNumericTypeWithVarSet
+
 let rec inferZerosRecordConstructorCast = (
   castExpr: CoreAst.Expr,
   typeName: CoreAst.Name,
@@ -1014,119 +1028,6 @@ let rec inferZerosRecordConstructorCast = (
     inferExprBridge
   )
   (ty, fromMarksState(st))
-}
-
-and exprIdentitiesForNode = (state: InferState, nodeId: Number) =>
-  match (Map.get(nodeId, state.flow.exprIdentities)) {
-    Some(identities) => identities,
-    None => Flow.emptyDomainIdentities(),
-  }
-
-and exprBindingRefForNode = (state: InferState, nodeId: Number) =>
-  Map.get(nodeId, state.flow.exprBindingRefs)
-
-and withBinding = (
-  name: String,
-  scheme: Types.Scheme,
-  bindingKind: Flow.BindingKind,
-  identities: Flow.DomainIdentities,
-  functionNodeId: Option<Number>,
-  state: InferState,
-  fn: InferState => (Types.Type, InferState),
-) => {
-  let previous = Env.lookupValue(state.env, name)
-  let (entry, flow1) = Flow.bindScheme(
-    state.flow,
-    scheme,
-    bindingKind,
-    identities=identities,
-    functionNodeId=functionNodeId
-  )
-  let flow2 = Flow.registerBindingInfo(
-    flow1,
-    entry.bindingId,
-    name,
-    entry.scopeId,
-    entry.bindingKind
-  )
-  let envWithBinding = Env.defineValueEntry(state.env, name, entry)
-  let stateWithBinding = { ...state, env: envWithBinding, flow: flow2 }
-  let (resultType, stateAfter) = fn(stateWithBinding)
-  let restoredEnv = match (previous) {
-    Some(prevEntry) => Env.defineValueEntry(stateAfter.env, name, prevEntry),
-    None => Env.removeValue(stateAfter.env, name),
-  }
-  (resultType, { ...stateAfter, env: restoredEnv })
-}
-
-and functionNodeIdForExpr = (expr: CoreAst.Expr) =>
-  match (expr.kind) {
-    CoreAst.Mark(_, inner) => functionNodeIdForExpr(inner),
-    CoreAst.Fn(fnExpr) => Some(fnExpr.node.id),
-    _ => None,
-  }
-
-and functionNodeIdForCallee = (callee: CoreAst.Expr, state: InferState) =>
-  match (callee.kind) {
-    CoreAst.Mark(_, inner) => functionNodeIdForCallee(inner, state),
-    CoreAst.Fn(fnExpr) => Some(fnExpr.node.id),
-    CoreAst.Ident(name) =>
-      match (Env.lookupValue(state.env, name.text)) {
-        Some(entry) => entry.functionNodeId,
-        None => None,
-      },
-    _ => None,
-  }
-
-and functionParamBlameForCallee = (callee: CoreAst.Expr, state: InferState) =>
-  match (functionNodeIdForCallee(callee, state)) {
-    Some(functionNodeId) =>
-      match (Flow.functionInfoForNode(state.flow, functionNodeId)) {
-        Some(info) =>
-          match (info.paramBindingId) {
-            Some(bindingId) => Map.get(bindingId, state.bindingBlames),
-            None => None,
-          },
-        None => None,
-      },
-    None => None,
-  }
-
-and isCallableTypeForBlame = (ty: Types.Type, state: InferState) =>
-  match (apply(state, ty)) {
-    Types.TFun(_, _) => true,
-    Types.TVar(_) => true,
-    Types.THole(_) => true,
-    _ => false,
-  }
-
-and functionApplicationBlame = (
-  callee: CoreAst.Expr,
-  arg: CoreAst.Expr,
-  calleeType: Types.Type,
-  state: InferState,
-) =>
-  if (isCallableTypeForBlame(calleeType, state)) {
-    match (functionParamBlameForCallee(callee, state)) {
-      Some(origin) => (arg, "function argument", Some(origin)),
-      None => (arg, "function argument", None),
-    }
-  } else {
-    (callee, "function callee", None)
-  }
-
-and withFreshScope = (
-  state: InferState,
-  fn: InferState => (Types.Type, InferState),
-) => {
-  let (scopeId, flow1) = Flow.freshScopeId(state.flow)
-  let previousScopeId = state.flow.currentScopeId
-  let scopedState = { ...state, flow: Flow.setCurrentScope(flow1, scopeId) }
-  let (result, stateAfter) = fn(scopedState)
-  (
-    result,
-    { ...stateAfter, flow: Flow.setCurrentScope(stateAfter.flow, previousScopeId) }
-  )
 }
 
 and withPatternBindingsKind = (
@@ -1380,76 +1281,6 @@ and withPatternBindingsKind = (
     },
     _ => fn(state),
   }
-}
-
-and collectNumericConstraintVars = (state: InferState) => {
-  let seen: Map.Map<Number, Bool> = Map.make()
-  let addTypeVars = (ty: Types.Type) =>
-    List.forEach((id: Number) => {
-      Map.set(id, true, seen)
-      void
-    }, Types.freeVars(Types.applySubstType(state.subst, ty)))
-  List.forEach((constraint: Constraints.Constraint) => {
-    match (constraint) {
-      Constraints.Numeric(spec, _origin) =>
-        match (spec) {
-          Constraints.IsNumeric(ty) => addTypeVars(ty),
-          Constraints.IntLiteral(ty, _value) => addTypeVars(ty),
-        },
-      _ => void,
-    }
-  }, state.constraints)
-  seen
-}
-
-and normalizeNumericTypeForGeneralize = (ty: Types.Type, state: InferState) => {
-  let numericVars = collectNumericConstraintVars(state)
-  let rec rewrite = (current: Types.Type) =>
-    match (Types.applySubstType(state.subst, current)) {
-      Types.TVar(id) =>
-        if (Map.get(id, numericVars) != None) {
-          Types.TNumber
-        } else {
-          Types.TVar(id)
-        },
-      Types.TFun(a, b) => Types.TFun(rewrite(a), rewrite(b)),
-      Types.TTuple(items) => Types.TTuple(List.map(rewrite, items)),
-      Types.TNominal(name, args) => Types.TNominal(name, List.map(rewrite, args)),
-      other => other,
-    }
-  rewrite(ty)
-}
-
-and functionCallMode = (clauses: List<CoreAst.FnClause>) =>
-  match (clauses) {
-    [
-      {
-        param: { kind: CoreAst.Lit(CoreAst.Unit), _ },
-        _,
-      },
-    ] => Flow.UnitThunk,
-    _ => Flow.UnaryValue,
-  }
-
-and normalizeNumericTypeWithVarSet = (
-  ty: Types.Type,
-  subst: Types.Subst,
-  numericVars: Map.Map<Number, Bool>,
-) => {
-  let rec rewrite = (current: Types.Type) =>
-    match (Types.applySubstType(subst, current)) {
-      Types.TVar(id) =>
-        if (Map.get(id, numericVars) != None) {
-          Types.TNumber
-        } else {
-          Types.TVar(id)
-        },
-      Types.TFun(a, b) => Types.TFun(rewrite(a), rewrite(b)),
-      Types.TTuple(items) => Types.TTuple(List.map(rewrite, items)),
-      Types.TNominal(name, args) => Types.TNominal(name, List.map(rewrite, args)),
-      other => other,
-    }
-  rewrite(ty)
 }
 
 and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
