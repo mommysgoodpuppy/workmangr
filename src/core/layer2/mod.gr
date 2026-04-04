@@ -1,8 +1,8 @@
 module Layer2
 
-from "../layer1/infer.gr" include Infer
+from "../layer1/infer_state.gr" include InferState as Layer1InferState
 from "./solve.gr" include Layer2Solve
 
 // Layer 2: solve constraints from Layer 1 and finalize substitutions.
-provide let solve: (Infer.Layer1Result) => Infer.Layer2Result =
+provide let solve: (Layer1InferState.Layer1Result) => Layer1InferState.Layer2Result =
   Layer2Solve.solveConstraints

@@ -8,7 +8,7 @@ from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
 from "../solver.gr" include Solver
 from "../types.gr" include Types
-from "../layer1/infer.gr" include Infer
+from "../layer1/infer_state.gr" include InferState as Layer1InferState
 
 let isConcreteConflict = (left: Types.Type, right: Types.Type) => {
   let rec loop = (a: Types.Type, b: Types.Type) =>
@@ -105,14 +105,14 @@ let normalizeNumericTypeWithVarSet = (
 
 // Add a type mark to the accumulated marks and marksByNode map.
 let addMark = (
-  marks: List<Infer.TypeMark>,
-  marksByNode: Map.Map<Number, List<Infer.TypeMark>>,
-  reason: Infer.TypeMarkReason,
+  marks: List<Layer1InferState.TypeMark>,
+  marksByNode: Map.Map<Number, List<Layer1InferState.TypeMark>>,
+  reason: Layer1InferState.TypeMarkReason,
   origin: Constraints.Origin,
   mark: CoreAst.Mark,
   message: String,
 ) => {
-  let entry: Infer.TypeMark = { reason, origin, blame: None, related: [], mark, message }
+  let entry: Layer1InferState.TypeMark = { reason, origin, blame: None, related: [], mark, message }
   let updatedMarks = [entry, ...marks]
   let updatedByNode = if (origin.nodeId >= 0) {
     let existing = match (Map.get(origin.nodeId, marksByNode)) {
@@ -129,32 +129,32 @@ let addMark = (
 
 // Detect conflicting hole observations and emit unfillable-hole marks.
 let addUnfillableHoleMarks = (
-  marks: List<Infer.TypeMark>,
-  marksByNode: Map.Map<Number, List<Infer.TypeMark>>,
-  holeObservations: Map.Map<Number, List<Infer.HoleObservation>>,
+  marks: List<Layer1InferState.TypeMark>,
+  marksByNode: Map.Map<Number, List<Layer1InferState.TypeMark>>,
+  holeObservations: Map.Map<Number, List<Layer1InferState.HoleObservation>>,
   solvedSubst: Types.Subst,
 ) =>
   List.reduce(
     (
-      acc: (List<Infer.TypeMark>, Map.Map<Number, List<Infer.TypeMark>>),
-      entry: (Number, List<Infer.HoleObservation>),
+      acc: (List<Layer1InferState.TypeMark>, Map.Map<Number, List<Layer1InferState.TypeMark>>),
+      entry: (Number, List<Layer1InferState.HoleObservation>),
     ) => {
       let (accMarks, accByNode) = acc
       let (holeId, observations) = entry
       let normalized = List.map(
-        (obs: Infer.HoleObservation) =>
+        (obs: Layer1InferState.HoleObservation) =>
           {
             observed: Types.applySubstType(solvedSubst, obs.observed),
             origin: obs.origin,
-          }: Infer.HoleObservation,
+          }: Layer1InferState.HoleObservation,
         observations
       )
-      let rec hasConflict = (remaining: List<Infer.HoleObservation>) =>
+      let rec hasConflict = (remaining: List<Layer1InferState.HoleObservation>) =>
         match (remaining) {
           [] => false,
           [head, ...tail] => {
             let pairConflict = List.some(
-              (other: Infer.HoleObservation) =>
+              (other: Layer1InferState.HoleObservation) =>
                 isConcreteConflict(head.observed, other.observed),
               tail
             )
@@ -165,7 +165,7 @@ let addUnfillableHoleMarks = (
         addMark(
           accMarks,
           accByNode,
-          Infer.UnfillableHole,
+          Layer1InferState.UnfillableHole,
           Constraints.makeOrigin(holeId, "unfillable hole"),
           CoreAst.UnfillableHole,
           "Type error: unfillable hole"
@@ -179,7 +179,7 @@ let addUnfillableHoleMarks = (
   )
 
 // Layer 2: solve deferred domain/numeric constraints from Layer 1 output.
-provide let solveConstraints = (layer1: Infer.Layer1Result) => {
+provide let solveConstraints = (layer1: Layer1InferState.Layer1Result) => {
   // Hazel-style layering: Layer 1 enforced HM equality constraints.
   // Layer 2 handles only deferred domain/numeric constraints.
   let deferred = List.filter((constraint: Constraints.Constraint) =>
@@ -237,13 +237,13 @@ provide let solveConstraints = (layer1: Infer.Layer1Result) => {
         holeObservations: layer1.holeObservations,
         varBindingOrigins: layer1.varBindingOrigins,
         bindingBlames: layer1.bindingBlames,
-      }: Infer.Layer2Result
+      }: Layer1InferState.Layer2Result
     },
     Err(Solver.Occurs(origin)) => {
       let (marks, marksByNode) = addMark(
         layer1.marks,
         layer1.marksByNode,
-        Infer.OccursCycle,
+        Layer1InferState.OccursCycle,
         origin,
         CoreAst.OccursCheck,
         "Type error: occurs check failed"
@@ -263,7 +263,7 @@ provide let solveConstraints = (layer1: Infer.Layer1Result) => {
         holeObservations: layer1.holeObservations,
         varBindingOrigins: layer1.varBindingOrigins,
         bindingBlames: layer1.bindingBlames,
-      }: Infer.Layer2Result
+      }: Layer1InferState.Layer2Result
     },
     Err(Solver.CannotUnify(left, right, origin)) => {
       let message = "Type error ("
@@ -275,7 +275,7 @@ provide let solveConstraints = (layer1: Infer.Layer1Result) => {
       let (marks, marksByNode) = addMark(
         layer1.marks,
         layer1.marksByNode,
-        Infer.TypeMismatch,
+        Layer1InferState.TypeMismatch,
         origin,
         CoreAst.Inconsistent,
         message
@@ -295,14 +295,14 @@ provide let solveConstraints = (layer1: Infer.Layer1Result) => {
         holeObservations: layer1.holeObservations,
         varBindingOrigins: layer1.varBindingOrigins,
         bindingBlames: layer1.bindingBlames,
-      }: Infer.Layer2Result
+      }: Layer1InferState.Layer2Result
     },
     Err(Solver.NumericViolation(origin, violationMsg)) => {
       let message = "Type error (" ++ origin.description ++ "): " ++ violationMsg
       let (marks, marksByNode) = addMark(
         layer1.marks,
         layer1.marksByNode,
-        Infer.TypeMismatch,
+        Layer1InferState.TypeMismatch,
         origin,
         CoreAst.Inconsistent,
         message
@@ -322,7 +322,7 @@ provide let solveConstraints = (layer1: Infer.Layer1Result) => {
         holeObservations: layer1.holeObservations,
         varBindingOrigins: layer1.varBindingOrigins,
         bindingBlames: layer1.bindingBlames,
-      }: Infer.Layer2Result
+      }: Layer1InferState.Layer2Result
     },
   }
 }

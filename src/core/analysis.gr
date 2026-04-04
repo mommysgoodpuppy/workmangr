@@ -5,6 +5,7 @@ from "map" include Map
 
 from "./core_ast.gr" include CoreAst
 from "./layer1/infer.gr" include Infer
+from "./layer1/infer_state.gr" include InferState as Layer1InferState
 from "./layer2/solve.gr" include Layer2Solve
 from "./types.gr" include Types
 from "./source.gr" include Source
@@ -14,12 +15,12 @@ from "../frontend/frontend.gr" include Frontend
 
 provide record Analysis {
   program: CoreAst.Program,
-  infer: Infer.Layer2Result,
+  infer: Layer1InferState.Layer2Result,
 }
 
 let originClue = (origin: Constraints.Origin) => Error.Note(Constraints.originToString(origin))
 
-let blameClues = (entry: Infer.TypeMark) =>
+let blameClues = (entry: Layer1InferState.TypeMark) =>
   match (entry.blame) {
     Some(blameOrigin) =>
       if (blameOrigin == entry.origin) {
@@ -51,7 +52,7 @@ let markSpan = (mark: CoreAst.Mark) => match (mark) {
 }
 
 let resolveTypeMarkSpan = (
-  entry: Infer.TypeMark,
+  entry: Layer1InferState.TypeMark,
   nodeSpans: Map.Map<Number, Source.Span>,
 ) => {
   let fromMark = markSpan(entry.mark)
@@ -296,10 +297,10 @@ let buildNodeSpanIndex = (program: CoreAst.Program) => {
 }
 
 provide let typeInferenceDiagnostics = (
-  marks: List<Infer.TypeMark>,
+  marks: List<Layer1InferState.TypeMark>,
   nodeSpans: Map.Map<Number, Source.Span>,
 ) => {
-  List.map((entry: Infer.TypeMark) => {
+  List.map((entry: Layer1InferState.TypeMark) => {
     let span = match (resolveTypeMarkSpan(entry, nodeSpans)) {
       Some(found) => found,
       None => Source.makeSpan(1, 1, 0, 1),

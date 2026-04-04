@@ -15,6 +15,7 @@ from "../core_ast.gr" include CoreAst
 from "../env.gr" include Env
 from "../error.gr" include Error
 from "../layer1/infer.gr" include Infer
+from "../layer1/infer_state.gr" include InferState as Layer1InferState
 from "../layer2/solve.gr" include Layer2Solve
 from "../infection_registry.gr" include InfectionRegistry
 from "../source.gr" include Source
@@ -35,7 +36,7 @@ provide record ModuleSummary {
   moduleId: String,
   surfaceProgram: SurfaceAst.Program,
   program: CoreAst.Program,
-  infer: Infer.Layer2Result,
+  infer: Layer1InferState.Layer2Result,
   typeEntries: List<TypeAtOffset>,
   valueExports: Types.Env,
   typeExports: Map.Map<String, Env.TypeInfo>,
@@ -72,7 +73,7 @@ let spanContainsOffset = (span: Source.Span, offset: Number) => {
 
 let spanLength = (span: Source.Span) => span.end - span.start
 
-let buildTypeEntries = (program: CoreAst.Program, infer: Infer.Layer2Result) => {
+let buildTypeEntries = (program: CoreAst.Program, infer: Layer1InferState.Layer2Result) => {
   let nodeSpans = Analysis.buildNodeSpans(program)
   let raw = List.filterMap(
     ((nodeId, inferredType): (Number, Types.Type)) =>
@@ -114,13 +115,13 @@ provide let effectNotesAtNodeInSummary = (
   nodeId: Number,
 ) => match (Map.get(nodeId, summary.infer.effectEventsByNode)) {
   Some(events) =>
-    List.map((event: Infer.EffectEvent) => event.message, List.reverse(events)),
+    List.map((event: Layer1InferState.EffectEvent) => event.message, List.reverse(events)),
   None => [],
 }
 
 let typeDiagnosticsForProgram = (
   program: CoreAst.Program,
-  infer: Infer.Layer2Result,
+  infer: Layer1InferState.Layer2Result,
 ) => {
   let nodeSpans = Analysis.buildNodeSpans(program)
   Analysis.typeInferenceDiagnostics(infer.marks, nodeSpans)
@@ -517,7 +518,7 @@ let collectExplicitExports = (program: CoreAst.Program) => {
   (exportedValues, exportedTypes)
 }
 
-let buildOwnExports = (lowered: CoreAst.Program, infer: Infer.Layer2Result) => {
+let buildOwnExports = (lowered: CoreAst.Program, infer: Layer1InferState.Layer2Result) => {
   let values = Map.make()
   let types = Map.make()
   let allValues = Env.snapshotValues(infer.env)

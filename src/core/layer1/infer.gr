@@ -13,8 +13,8 @@ from "../constraints.gr" include Constraints
 from "../env.gr" include Env
 from "../flow.gr" include Flow
 from "../infection_registry.gr" include InfectionRegistry
-from "../solver.gr" include Solver
 from "../types.gr" include Types
+from "../layer2/mod.gr" include Layer2
 from "../layer2/infection.gr" include Layer2Infection
 from "./expr.gr" include Layer1Expr
 from "./patterns.gr" include Layer1Patterns
@@ -28,32 +28,13 @@ from "./declarations.gr" include Layer1Decl
 from "./bindings.gr" include Layer1Bindings
 from "./top.gr" include Layer1Top
 
-provide enum TypeMarkReason {
-  TypeMismatch,
-  OccursCycle,
-  UnknownIdentifier,
-  UnfillableHole,
-  Internal,
-}
-
-provide record TypeMark {
-  reason: TypeMarkReason,
-  origin: Constraints.Origin,
-  blame: Option<Constraints.Origin>,
-  related: List<Constraints.Origin>,
-  mark: CoreAst.Mark,
-  message: String,
-}
-
-provide record HoleObservation {
-  observed: Types.Type,
-  origin: Constraints.Origin,
-}
-
-provide record EffectEvent {
-  kind: String,
-  message: String,
-}
+provide type TypeMarkReason = Layer1InferState.TypeMarkReason
+provide type TypeMark = Layer1InferState.TypeMark
+provide type HoleObservation = Layer1InferState.HoleObservation
+provide type EffectEvent = Layer1InferState.EffectEvent
+provide type InferState = Layer1InferState.InferState
+provide type Layer1Result = Layer1InferState.Layer1Result
+provide type Layer2Result = Layer1InferState.Layer2Result
 
 record InfectionCarrierWrap {
   domain: String,
@@ -69,222 +50,8 @@ record LookupResult {
   identities: Flow.DomainIdentities,
   functionNodeId: Option<Number>,
 }
-
-record InferState {
-  nextVar: Number,
-  subst: Types.Subst,
-  env: Env.TypingEnv,
-  flow: Flow.FlowState,
-  infectionRegistry: InfectionRegistry.Registry,
-  nodeTypes: Map.Map<Number, Types.Type>,
-  topBindings: Map.Map<String, Types.Scheme>,
-  topBindingRawTypes: Map.Map<String, Types.Type>,
-  constraints: List<Constraints.Constraint>,
-  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
-  marks: List<TypeMark>,
-  marksByNode: Map.Map<Number, List<TypeMark>>,
-  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
-  holeObservations: Map.Map<Number, List<HoleObservation>>,
-  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
-  bindingBlames: Map.Map<Number, Constraints.Origin>,
-}
-
-// Output of Layer 1: all generated constraints and type information, ready for Layer 2.
-provide record Layer1Result {
-  subst: Types.Subst,
-  env: Env.TypingEnv,
-  flow: Flow.FlowState,
-  infectionRegistry: InfectionRegistry.Registry,
-  nodeTypes: Map.Map<Number, Types.Type>,
-  topBindings: Map.Map<String, Types.Scheme>,
-  topBindingRawTypes: Map.Map<String, Types.Type>,
-  constraints: List<Constraints.Constraint>,
-  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
-  marks: List<TypeMark>,
-  marksByNode: Map.Map<Number, List<TypeMark>>,
-  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
-  holeObservations: Map.Map<Number, List<HoleObservation>>,
-  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
-  bindingBlames: Map.Map<Number, Constraints.Origin>,
-}
-
-// Output of Layer 2: solved types, finalized substitution, and all diagnostics.
-provide record Layer2Result {
-  subst: Types.Subst,
-  env: Env.TypingEnv,
-  flow: Flow.FlowState,
-  infectionRegistry: InfectionRegistry.Registry,
-  nodeTypes: Map.Map<Number, Types.Type>,
-  topBindings: Map.Map<String, Types.Scheme>,
-  constraints: List<Constraints.Constraint>,
-  matchArms: Map.Map<Number, List<Layer1Patterns.MatchArmInfo>>,
-  marks: List<TypeMark>,
-  marksByNode: Map.Map<Number, List<TypeMark>>,
-  effectEventsByNode: Map.Map<Number, List<EffectEvent>>,
-  holeObservations: Map.Map<Number, List<HoleObservation>>,
-  varBindingOrigins: Map.Map<Number, Constraints.Origin>,
-  bindingBlames: Map.Map<Number, Constraints.Origin>,
-}
-
-let toMarksReason = (reason: TypeMarkReason) =>
-  match (reason) {
-    TypeMismatch => Layer1InferState.TypeMismatch,
-    OccursCycle => Layer1InferState.OccursCycle,
-    UnknownIdentifier => Layer1InferState.UnknownIdentifier,
-    UnfillableHole => Layer1InferState.UnfillableHole,
-    Internal => Layer1InferState.Internal,
-  }
-
-let fromMarksReason = (reason: Layer1InferState.TypeMarkReason) =>
-  match (reason) {
-    Layer1InferState.TypeMismatch => TypeMismatch,
-    Layer1InferState.OccursCycle => OccursCycle,
-    Layer1InferState.UnknownIdentifier => UnknownIdentifier,
-    Layer1InferState.UnfillableHole => UnfillableHole,
-    Layer1InferState.Internal => Internal,
-  }
-
-let toMarksTypeMark = (entry: TypeMark) => {
-  let out: Layer1InferState.TypeMark = {
-    reason: toMarksReason(entry.reason),
-    origin: entry.origin,
-    blame: entry.blame,
-    related: entry.related,
-    mark: entry.mark,
-    message: entry.message,
-  }
-  out
-}
-
-let fromMarksTypeMark = (entry: Layer1InferState.TypeMark) => {
-  let out: TypeMark = {
-    reason: fromMarksReason(entry.reason),
-    origin: entry.origin,
-    blame: entry.blame,
-    related: entry.related,
-    mark: entry.mark,
-    message: entry.message,
-  }
-  out
-}
-
-let toMarksHoleObservation = (obs: HoleObservation) => {
-  let out: Layer1InferState.HoleObservation = { observed: obs.observed, origin: obs.origin }
-  out
-}
-
-let fromMarksHoleObservation = (obs: Layer1InferState.HoleObservation) => {
-  let out: HoleObservation = { observed: obs.observed, origin: obs.origin }
-  out
-}
-
-let toMarksEffectEvent = (entry: EffectEvent) => {
-  let out: Layer1InferState.EffectEvent = { kind: entry.kind, message: entry.message }
-  out
-}
-
-let fromMarksEffectEvent = (entry: Layer1InferState.EffectEvent) => {
-  let out: EffectEvent = { kind: entry.kind, message: entry.message }
-  out
-}
-
-let mapMarksByNodeToMarks = (source: Map.Map<Number, List<TypeMark>>) => {
-  let out = Map.make()
-  List.forEach(((nodeId, items): (Number, List<TypeMark>)) => {
-    Map.set(nodeId, List.map(toMarksTypeMark, items), out)
-    void
-  }, Map.toList(source))
-  out
-}
-
-let mapMarksByNodeFromMarks = (source: Map.Map<Number, List<Layer1InferState.TypeMark>>) => {
-  let out = Map.make()
-  List.forEach(((nodeId, items): (Number, List<Layer1InferState.TypeMark>)) => {
-    Map.set(nodeId, List.map(fromMarksTypeMark, items), out)
-    void
-  }, Map.toList(source))
-  out
-}
-
-let mapEffectsByNodeToMarks = (source: Map.Map<Number, List<EffectEvent>>) => {
-  let out = Map.make()
-  List.forEach(((nodeId, items): (Number, List<EffectEvent>)) => {
-    Map.set(nodeId, List.map(toMarksEffectEvent, items), out)
-    void
-  }, Map.toList(source))
-  out
-}
-
-let mapEffectsByNodeFromMarks = (source: Map.Map<Number, List<Layer1InferState.EffectEvent>>) => {
-  let out = Map.make()
-  List.forEach(((nodeId, items): (Number, List<Layer1InferState.EffectEvent>)) => {
-    Map.set(nodeId, List.map(fromMarksEffectEvent, items), out)
-    void
-  }, Map.toList(source))
-  out
-}
-
-let mapHoleObservationsToMarks = (source: Map.Map<Number, List<HoleObservation>>) => {
-  let out = Map.make()
-  List.forEach(((holeId, items): (Number, List<HoleObservation>)) => {
-    Map.set(holeId, List.map(toMarksHoleObservation, items), out)
-    void
-  }, Map.toList(source))
-  out
-}
-
-let mapHoleObservationsFromMarks = (source: Map.Map<Number, List<Layer1InferState.HoleObservation>>) => {
-  let out = Map.make()
-  List.forEach(((holeId, items): (Number, List<Layer1InferState.HoleObservation>)) => {
-    Map.set(holeId, List.map(fromMarksHoleObservation, items), out)
-    void
-  }, Map.toList(source))
-  out
-}
-
-let toMarksState = (state: InferState) => {
-  let out: Layer1InferState.InferState = {
-    nextVar: state.nextVar,
-    subst: state.subst,
-    env: state.env,
-    flow: state.flow,
-    infectionRegistry: state.infectionRegistry,
-    nodeTypes: state.nodeTypes,
-    topBindings: state.topBindings,
-    topBindingRawTypes: state.topBindingRawTypes,
-    constraints: state.constraints,
-    matchArms: state.matchArms,
-    marks: List.map(toMarksTypeMark, state.marks),
-    marksByNode: mapMarksByNodeToMarks(state.marksByNode),
-    effectEventsByNode: mapEffectsByNodeToMarks(state.effectEventsByNode),
-    holeObservations: mapHoleObservationsToMarks(state.holeObservations),
-    varBindingOrigins: state.varBindingOrigins,
-    bindingBlames: state.bindingBlames,
-  }
-  out
-}
-
-let fromMarksState = (state: Layer1InferState.InferState) => {
-  let out: InferState = {
-    nextVar: state.nextVar,
-    subst: state.subst,
-    env: state.env,
-    flow: state.flow,
-    infectionRegistry: state.infectionRegistry,
-    nodeTypes: state.nodeTypes,
-    topBindings: state.topBindings,
-    topBindingRawTypes: state.topBindingRawTypes,
-    constraints: state.constraints,
-    matchArms: state.matchArms,
-    marks: List.map(fromMarksTypeMark, state.marks),
-    marksByNode: mapMarksByNodeFromMarks(state.marksByNode),
-    effectEventsByNode: mapEffectsByNodeFromMarks(state.effectEventsByNode),
-    holeObservations: mapHoleObservationsFromMarks(state.holeObservations),
-    varBindingOrigins: state.varBindingOrigins,
-    bindingBlames: state.bindingBlames,
-  }
-  out
-}
+let toMarksState = (state: InferState) => state
+let fromMarksState = (state: Layer1InferState.InferState) => state
 
 let mut inferDebugEnabled: Bool = false
 
@@ -475,56 +242,11 @@ let logState = (label: String, state: InferState, nodeId: Number=-1) => {
   )
 }
 
-let makeInitialState = () => {
-  let subst = Types.emptySubst()
-  let env = seedBuiltinValues(Env.empty())
-  let flow = Flow.emptyState()
-  let infectionRegistry = InfectionRegistry.empty()
-  let nodeTypes = Map.make()
-  let topBindings = Map.make()
-  let topBindingRawTypes = Map.make()
-  {
-    nextVar: 0,
-    subst,
-    env,
-    flow,
-    infectionRegistry,
-    nodeTypes,
-    topBindings,
-    topBindingRawTypes,
-    constraints: [],
-    matchArms: Map.make(),
-    marks: [],
-    marksByNode: Map.make(),
-    effectEventsByNode: Map.make(),
-    holeObservations: Map.make(),
-    varBindingOrigins: Map.make(),
-    bindingBlames: Map.make(),
-  }
-}
+let makeInitialState = () => Layer1InferState.makeInitialState(seedBuiltinValues)
 
-let toLayer1Result = (state: InferState) => {
-  {
-    subst: state.subst,
-    env: state.env,
-    flow: state.flow,
-    infectionRegistry: state.infectionRegistry,
-    nodeTypes: state.nodeTypes,
-    topBindings: state.topBindings,
-    topBindingRawTypes: state.topBindingRawTypes,
-    constraints: state.constraints,
-    matchArms: state.matchArms,
-    marks: state.marks,
-    marksByNode: state.marksByNode,
-    effectEventsByNode: state.effectEventsByNode,
-    holeObservations: state.holeObservations,
-    varBindingOrigins: state.varBindingOrigins,
-    bindingBlames: state.bindingBlames,
-  }: Layer1Result
-}
+let toLayer1Result = Layer1InferState.toLayer1Result
 
-let recordConstraint = (state: InferState, constraint: Constraints.Constraint) =>
-  { ...state, constraints: [constraint, ...state.constraints] }
+let recordConstraint = Layer1InferState.recordConstraint
 
 let originForNode = (nodeId: Number, description: String) =>
   {
@@ -556,21 +278,11 @@ let typeExprOrigin = (typeExpr: CoreAst.TypeExpr, description: String) =>
     out
   }
 
-let recordNumericConstraint = (
-  state: InferState,
-  numeric: Constraints.NumericConstraint,
-  origin: Constraints.Origin,
-) => recordConstraint(state, Constraints.Numeric(numeric, origin))
+let recordNumericConstraint = Layer1InferState.recordNumericConstraint
 
-let recordNumericIs = (state: InferState, ty: Types.Type, origin: Constraints.Origin) =>
-  recordNumericConstraint(state, Constraints.IsNumeric(ty), origin)
+let recordNumericIs = Layer1InferState.recordNumericIs
 
-let recordNumericIntLiteral = (
-  state: InferState,
-  ty: Types.Type,
-  value: Number,
-  origin: Constraints.Origin,
-) => recordNumericConstraint(state, Constraints.IntLiteral(ty, value), origin)
+let recordNumericIntLiteral = Layer1InferState.recordNumericIntLiteral
 
 let addTypeMarkWithBlame = (
   state: InferState,
@@ -582,7 +294,7 @@ let addTypeMarkWithBlame = (
 ) => {
   let out = Layer1Marks.addTypeMarkWithBlame(
     toMarksState(state),
-    toMarksReason(reason),
+    reason,
     origin,
     blame,
     mark,
@@ -600,7 +312,7 @@ let addTypeMark = (
 ) => {
   let out = Layer1Marks.addTypeMark(
     toMarksState(state),
-    toMarksReason(reason),
+    reason,
     origin,
     mark,
     message
@@ -638,13 +350,9 @@ let recordMatchArms = (fnExpr: CoreAst.FnExpr, state: InferState) => {
   fromMarksState(out)
 }
 
-let freshVar = (state: InferState) => {
-  let id = state.nextVar
-  (Types.TVar(id), { ...state, nextVar: id + 1 })
-}
+let freshVar = Layer1InferState.freshVar
 
-let apply = (state: InferState, t: Types.Type) =>
-  Types.applySubstType(state.subst, t)
+let apply = Layer1InferState.apply
 
 let toLayer2Wrap = (wrap: InfectionCarrierWrap) => {
   let out: Layer2Infection.InfectionCarrierWrap = {
@@ -1151,11 +859,7 @@ let unifyForPatternWithBlame = (
   fromMarksState(out)
 }
 
-let recordNodeType = (id: Number, t: Types.Type, state: InferState) => {
-  let applied = apply(state, t)
-  Map.set(id, applied, state.nodeTypes)
-  applied
-}
+let recordNodeType = Layer1InferState.recordNodeType
 
 let bindingBlameForExprNode = (state: InferState, nodeId: Number) => {
   let out = Layer1Marks.bindingBlameForExprNode(toMarksState(state), nodeId)
@@ -1262,7 +966,9 @@ let cloneEnvValues = (values: Types.Env) =>
 
 let zerosTypeFromAnnotation = Layer1Zeros.typeFromAnnotation
 let zerosIsZerosCastTarget = Layer1Zeros.isZerosCastTarget
+let zerosInvalidZerosCastRaw = Layer1Zeros.invalidZerosCast
 let zerosIsZeroValidTypeRaw = Layer1Zeros.isZeroValidType
+let zerosInferRecordCastRaw = Layer1Zeros.inferZerosRecordConstructorCast
 
 let zerosIsZeroValidType = (
   ty: Types.Type,
@@ -1286,16 +992,8 @@ let zerosIsZeroValidType = (
 }
 
 let invalidZerosCast = (expr: CoreAst.Expr, state: InferState, detail: String) => {
-  let state1 = addTypeMark(
-    state,
-    TypeMismatch,
-    originForNode(expr.node.id, "cast"),
-    CoreAst.Inconsistent,
-    "Type error: invalid cast to Zeros: " ++ detail
-  )
-  let tUnknown = Types.THole(expr.node.id)
-  let tRecorded = recordNodeType(expr.node.id, tUnknown, state1)
-  (tRecorded, state1)
+  let (ty, nextState) = zerosInvalidZerosCastRaw(expr, toMarksState(state), detail)
+  (ty, fromMarksState(nextState))
 }
 
 let rec inferZerosRecordConstructorCast = (
@@ -1304,125 +1002,18 @@ let rec inferZerosRecordConstructorCast = (
   items: List<CoreAst.RecordItem>,
   state: InferState,
 ) => {
-  match (Env.lookupType(state.env, typeName.text)) {
-    Some(typeInfo) =>
-      match (typeInfo.recordFields) {
-        Some(_recordFields) => {
-          let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
-            typeInfo.typeParams,
-            state.nextVar
-          )
-          let nominalType = Types.TNominal(typeInfo.name, paramTypes)
-          let state0 = { ...state, nextVar }
-          let rec collectFields = (
-            remaining: List<CoreAst.RecordItem>,
-            st: InferState,
-            acc: List<ProvidedRecordField>,
-          ) =>
-            match (remaining) {
-              [] => (List.reverse(acc), st),
-              [item, ...rest] => match (item) {
-                CoreAst.Field(fieldName, valueExpr) => {
-                  let (valueType, st1) = inferExpr(valueExpr, st)
-                  let field: ProvidedRecordField = {
-                    name: fieldName.text,
-                    nameOrigin: originForNode(fieldName.node.id, "record literal field"),
-                    valueType,
-                    valueOrigin: exprOrigin(valueExpr, "record literal field"),
-                  }
-                  collectFields(rest, st1, [field, ...acc])
-                },
-                CoreAst.Spread(valueExpr) => {
-                  let (spreadType, st1) = inferExpr(valueExpr, st)
-                  match (apply(st1, spreadType)) {
-                    Types.TNominal(spreadName, spreadArgs) =>
-                      match (recordCtxResolveNominalRecordFields(spreadName, spreadArgs, st1)) {
-                        Some(spreadFields) => {
-                          let spreadOrigin = exprOrigin(valueExpr, "record spread")
-                          let spreadProvided = List.map(
-                            ((spreadFieldName, spreadFieldType): (String, Types.Type)) => ({
-                              name: spreadFieldName,
-                              nameOrigin: spreadOrigin,
-                              valueType: spreadFieldType,
-                              valueOrigin: spreadOrigin,
-                            }: ProvidedRecordField),
-                            spreadFields
-                          )
-                          collectFields(rest, st1, List.append(acc, spreadProvided))
-                        },
-                        None =>
-                          collectFields(rest, st1, acc),
-                      },
-                    _ =>
-                      collectFields(rest, st1, acc),
-                  }
-                },
-              },
-            }
-          let (fields, state1) = collectFields(items, state0, [])
-          let resolvedFields = match (recordCtxResolveNominalRecordFields(typeInfo.name, paramTypes, state1)) {
-            Some(fieldList) => fieldList,
-            None => [],
-          }
-          let rec unifyProvidedFields = (
-            remaining: List<ProvidedRecordField>,
-            st: InferState,
-          ) =>
-            match (remaining) {
-              [] => st,
-              [field, ...rest] =>
-                match (recordCtxFindRecordFieldType(resolvedFields, field.name)) {
-                  Some(expectedFieldType) => {
-                    let st1 = unifyBlaming(
-                      field.valueType,
-                      expectedFieldType,
-                      originForNode(castExpr.node.id, "zeros cast field"),
-                      Some(field.valueOrigin),
-                      st
-                    )
-                    unifyProvidedFields(rest, st1)
-                  },
-                  None => {
-                    let st1 = addTypeMarkWithBlame(
-                      st,
-                      TypeMismatch,
-                      originForNode(castExpr.node.id, "zeros cast field"),
-                      Some(field.nameOrigin),
-                      CoreAst.Inconsistent,
-                      "Type error: unknown record field " ++ field.name
-                    )
-                    unifyProvidedFields(rest, st1)
-                  },
-                },
-            }
-          let state2 = unifyProvidedFields(fields, state1)
-          let zeroValid = zerosIsZeroValidType(nominalType, state2, [])
-          if (!zeroValid) {
-            invalidZerosCast(
-              castExpr,
-              state2,
-              "all-zero representation is not valid for " ++ renderType(nominalType, state2)
-            )
-          } else {
-            let _ = recordNodeType(typeName.node.id, nominalType, state2)
-            let _ = recordNodeType(castExpr.node.id, nominalType, state2)
-            (nominalType, state2)
-          }
-        },
-        None =>
-          invalidZerosCast(
-            castExpr,
-            state,
-            typeName.text ++ " is not a record type"
-          ),
-      },
-    None =>
-      invalidZerosCast(
-        castExpr,
-        state,
-        "zeros cast currently requires a fresh record construction"
-      ),
+  let inferExprBridge = (expr: CoreAst.Expr, marksState: Layer1InferState.InferState) => {
+    let (t, st) = inferExpr(expr, fromMarksState(marksState))
+    (t, toMarksState(st))
   }
+  let (ty, st) = zerosInferRecordCastRaw(
+    castExpr,
+    typeName,
+    items,
+    toMarksState(state),
+    inferExprBridge
+  )
+  (ty, fromMarksState(st))
 }
 
 and exprIdentitiesForNode = (state: InferState, nodeId: Number) =>
@@ -1749,7 +1340,7 @@ and withPatternBindingsKind = (
       } else {
         let marked = addTypeMark(
           state2,
-          TypeMismatch,
+          Layer1InferState.TypeMismatch,
           originForNode(pattern.node.id, "constructor pattern arity"),
           CoreAst.PatternError,
           arityMessage
@@ -1988,7 +1579,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
       let stateFn = if (clauses == []) {
         addTypeMark(
           stateWithMatch,
-          Internal,
+          Layer1InferState.Internal,
           originForNode(expr.node.id, "function clauses"),
           CoreAst.Internal("empty function clauses"),
           "Type error: empty function clauses"
@@ -2133,7 +1724,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                                     None =>
                                       addTypeMarkWithBlame(
                                         state2,
-                                        TypeMismatch,
+                                        Layer1InferState.TypeMismatch,
                                         originForNode(expr.node.id, "record projection missing field"),
                                         fieldBlame,
                                         CoreAst.Inconsistent,
@@ -2175,7 +1766,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                             _ =>
                               addTypeMarkWithBlame(
                                 state2,
-                                TypeMismatch,
+                                Layer1InferState.TypeMismatch,
                                 originForNode(expr.node.id, "record projection"),
                                 targetBlame,
                                 CoreAst.Inconsistent,
@@ -2209,7 +1800,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                                 None =>
                                   addTypeMarkWithBlame(
                                     state2,
-                                    TypeMismatch,
+                                    Layer1InferState.TypeMismatch,
                                     originForNode(expr.node.id, "record projection missing field"),
                                     fieldBlame,
                                     CoreAst.Inconsistent,
@@ -2251,7 +1842,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                         _ =>
                           addTypeMarkWithBlame(
                             state2,
-                            TypeMismatch,
+                            Layer1InferState.TypeMismatch,
                             originForNode(expr.node.id, "record projection"),
                             targetBlame,
                             CoreAst.Inconsistent,
@@ -2268,7 +1859,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                   let (tUnknown, state1) = freshVar(state)
                   let state2 = addTypeMarkWithBlame(
                     state1,
-                    TypeMismatch,
+                    Layer1InferState.TypeMismatch,
                     originForNode(expr.node.id, "record projection field"),
                     Some(blameExprOrigin(arg, "record projection field")),
                     CoreAst.Inconsistent,
@@ -2314,7 +1905,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                                 None =>
                                   addTypeMarkWithBlame(
                                     state2,
-                                    TypeMismatch,
+                                    Layer1InferState.TypeMismatch,
                                     originForNode(expr.node.id, "record projection missing field"),
                                     fieldBlame,
                                     CoreAst.Inconsistent,
@@ -2324,7 +1915,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                             None =>
                               addTypeMarkWithBlame(
                                 state2,
-                                TypeMismatch,
+                                Layer1InferState.TypeMismatch,
                                 originForNode(expr.node.id, "record projection nominal"),
                                 targetBlame,
                                 CoreAst.Inconsistent,
@@ -2354,7 +1945,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                         _ =>
                           addTypeMarkWithBlame(
                             state2,
-                            TypeMismatch,
+                            Layer1InferState.TypeMismatch,
                             originForNode(expr.node.id, "record projection"),
                             targetBlame,
                             CoreAst.Inconsistent,
@@ -2388,7 +1979,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                             None =>
                               addTypeMarkWithBlame(
                                 state2,
-                                TypeMismatch,
+                                Layer1InferState.TypeMismatch,
                                 originForNode(expr.node.id, "record projection missing field"),
                                 fieldBlame,
                                 CoreAst.Inconsistent,
@@ -2398,7 +1989,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                         None =>
                           addTypeMarkWithBlame(
                             state2,
-                            TypeMismatch,
+                            Layer1InferState.TypeMismatch,
                             originForNode(expr.node.id, "record projection nominal"),
                             targetBlame,
                             CoreAst.Inconsistent,
@@ -2428,7 +2019,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                     _ =>
                       addTypeMarkWithBlame(
                         state2,
-                        TypeMismatch,
+                        Layer1InferState.TypeMismatch,
                         originForNode(expr.node.id, "record projection"),
                         targetBlame,
                         CoreAst.Inconsistent,
@@ -2445,7 +2036,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
               let (tUnknown, state1) = freshVar(state)
               let state2 = addTypeMarkWithBlame(
                 state1,
-                TypeMismatch,
+                Layer1InferState.TypeMismatch,
                 originForNode(expr.node.id, "record projection field"),
                 Some(blameExprOrigin(fieldExpr, "record projection field")),
                 CoreAst.Inconsistent,
@@ -2509,7 +2100,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                                 None => {
                                   let st2 = addTypeMarkWithBlame(
                                     st1,
-                                    TypeMismatch,
+                                    Layer1InferState.TypeMismatch,
                                     originForNode(expr.node.id, "record spread"),
                                     Some(exprOrigin(valueExpr, "record spread")),
                                     CoreAst.Inconsistent,
@@ -2521,7 +2112,7 @@ and inferExpr = (expr: CoreAst.Expr, state: InferState) => {
                             _ => {
                               let st2 = addTypeMarkWithBlame(
                                 st1,
-                                TypeMismatch,
+                                Layer1InferState.TypeMismatch,
                                 originForNode(expr.node.id, "record spread"),
                                 Some(exprOrigin(valueExpr, "record spread")),
                                 CoreAst.Inconsistent,
@@ -2952,7 +2543,7 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
                     None => {
                       let st2 = addTypeMarkWithBlame(
                         st1,
-                        TypeMismatch,
+                        Layer1InferState.TypeMismatch,
                         originForNode(binding.value.node.id, "record spread"),
                         Some(exprOrigin(valueExpr, "record spread")),
                         CoreAst.Inconsistent,
@@ -2964,7 +2555,7 @@ let inferBindingValue = (binding: CoreAst.LetBinding, state: InferState) => {
                 _ => {
                   let st2 = addTypeMarkWithBlame(
                     st1,
-                    TypeMismatch,
+                    Layer1InferState.TypeMismatch,
                     originForNode(binding.value.node.id, "record spread"),
                     Some(exprOrigin(valueExpr, "record spread")),
                     CoreAst.Inconsistent,
@@ -3178,7 +2769,7 @@ let inferRecursiveBindings = (bindings: List<CoreAst.LetBinding>, state: InferSt
             let (fallback, st1) = freshVar(st)
             let st2 = addTypeMark(
               st1,
-              Internal,
+              Layer1InferState.Internal,
               originForNode(binding.node.id, "recursive placeholder"),
               CoreAst.Internal("missing recursive placeholder"),
               "Type error: missing placeholder for recursive binding " ++ name
@@ -3380,3 +2971,9 @@ provide let inferProgramLayer1WithTypingEnv = (
     importedTypes,
     InfectionRegistry.empty()
   )
+
+provide let inferProgram = (program: CoreAst.Program) =>
+  Layer2.solve(inferProgramLayer1(program))
+
+provide let inferProgramWithEnv = (program: CoreAst.Program, env: Types.Env) =>
+  Layer2.solve(inferProgramLayer1WithEnv(program, env))

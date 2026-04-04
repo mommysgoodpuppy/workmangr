@@ -4,8 +4,12 @@ from "list" include List
 from "map" include Map
 
 from "../core_ast.gr" include CoreAst
+from "../env.gr" include Env
 from "../types.gr" include Types
 from "./expr.gr" include Layer1Expr
+from "./marks.gr" include Layer1Marks
+from "./record_ctx.gr" include Layer1RecordCtx
+from "./unify.gr" include Layer1Unify
 from "./infer_state.gr" include InferState as Layer1InferState
 
 provide let typeFromAnnotation = (annotation: CoreAst.TypeExpr) =>
@@ -106,5 +110,165 @@ provide let rec isZeroValidType = (
         },
       _ => false,
     }
+  }
+}
+
+provide let invalidZerosCast = (
+  expr: CoreAst.Expr,
+  state: Layer1InferState.InferState,
+  detail: String,
+) => {
+  let state1 = Layer1Marks.addTypeMark(
+    state,
+    Layer1InferState.TypeMismatch,
+    Layer1Marks.originForNode(expr.node.id, "cast"),
+    CoreAst.Inconsistent,
+    "Type error: invalid cast to Zeros: " ++ detail
+  )
+  let tUnknown = Types.THole(expr.node.id)
+  let tRecorded = Layer1InferState.recordNodeType(expr.node.id, tUnknown, state1)
+  (tRecorded, state1)
+}
+
+provide let rec inferZerosRecordConstructorCast = (
+  castExpr: CoreAst.Expr,
+  typeName: CoreAst.Name,
+  items: List<CoreAst.RecordItem>,
+  state: Layer1InferState.InferState,
+  inferExpr: (
+    CoreAst.Expr,
+    Layer1InferState.InferState,
+  ) => (Types.Type, Layer1InferState.InferState),
+) => {
+  let zerosIsZeroValidType = (
+    ty: Types.Type,
+    st: Layer1InferState.InferState,
+    seenNominals: List<String>,
+  ) =>
+    isZeroValidType(
+      ty,
+      st,
+      seenNominals,
+      Layer1RecordCtx.resolveNominalRecordFields
+    )
+  match (Env.lookupType(state.env, typeName.text)) {
+    Some(typeInfo) =>
+      match (typeInfo.recordFields) {
+        Some(_recordFields) => {
+          let (paramTypes, _paramMap, nextVar) = Layer1Expr.instantiateTypeParams(
+            typeInfo.typeParams,
+            state.nextVar
+          )
+          let nominalType = Types.TNominal(typeInfo.name, paramTypes)
+          let state0 = { ...state, nextVar }
+          let rec collectFields = (
+            remaining: List<CoreAst.RecordItem>,
+            st: Layer1InferState.InferState,
+            acc: List<Layer1RecordCtx.ProvidedRecordField>,
+          ) =>
+            match (remaining) {
+              [] => (List.reverse(acc), st),
+              [item, ...rest] => match (item) {
+                CoreAst.Field(fieldName, valueExpr) => {
+                  let (valueType, st1) = inferExpr(valueExpr, st)
+                  let field: Layer1RecordCtx.ProvidedRecordField = {
+                    name: fieldName.text,
+                    nameOrigin: Layer1Marks.originForNode(fieldName.node.id, "record literal field"),
+                    valueType,
+                    valueOrigin: Layer1Marks.exprOrigin(valueExpr, "record literal field"),
+                  }
+                  collectFields(rest, st1, [field, ...acc])
+                },
+                CoreAst.Spread(valueExpr) => {
+                  let (spreadType, st1) = inferExpr(valueExpr, st)
+                  match (Layer1InferState.apply(st1, spreadType)) {
+                    Types.TNominal(spreadName, spreadArgs) =>
+                      match (Layer1RecordCtx.resolveNominalRecordFields(spreadName, spreadArgs, st1)) {
+                        Some(spreadFields) => {
+                          let spreadOrigin = Layer1Marks.exprOrigin(valueExpr, "record spread")
+                          let spreadProvided = List.map(
+                            ((spreadFieldName, spreadFieldType): (String, Types.Type)) => ({
+                              name: spreadFieldName,
+                              nameOrigin: spreadOrigin,
+                              valueType: spreadFieldType,
+                              valueOrigin: spreadOrigin,
+                            }: Layer1RecordCtx.ProvidedRecordField),
+                            spreadFields
+                          )
+                          collectFields(rest, st1, List.append(acc, spreadProvided))
+                        },
+                        None =>
+                          collectFields(rest, st1, acc),
+                      },
+                    _ =>
+                      collectFields(rest, st1, acc),
+                  }
+                },
+              },
+            }
+          let (fields, state1) = collectFields(items, state0, [])
+          let resolvedFields = match (Layer1RecordCtx.resolveNominalRecordFields(typeInfo.name, paramTypes, state1)) {
+            Some(fieldList) => fieldList,
+            None => [],
+          }
+          let rec unifyProvidedFields = (
+            remaining: List<Layer1RecordCtx.ProvidedRecordField>,
+            st: Layer1InferState.InferState,
+          ) =>
+            match (remaining) {
+              [] => st,
+              [field, ...rest] =>
+                match (Layer1RecordCtx.findRecordFieldType(resolvedFields, field.name)) {
+                  Some(expectedFieldType) => {
+                    let st1 = Layer1Unify.unifyBlaming(
+                      field.valueType,
+                      expectedFieldType,
+                      Layer1Marks.originForNode(castExpr.node.id, "zeros cast field"),
+                      Some(field.valueOrigin),
+                      st
+                    )
+                    unifyProvidedFields(rest, st1)
+                  },
+                  None => {
+                    let st1 = Layer1Marks.addTypeMarkWithBlame(
+                      st,
+                      Layer1InferState.TypeMismatch,
+                      Layer1Marks.originForNode(castExpr.node.id, "zeros cast field"),
+                      Some(field.nameOrigin),
+                      CoreAst.Inconsistent,
+                      "Type error: unknown record field " ++ field.name
+                    )
+                    unifyProvidedFields(rest, st1)
+                  },
+                },
+            }
+          let state2 = unifyProvidedFields(fields, state1)
+          let zeroValid = zerosIsZeroValidType(nominalType, state2, [])
+          if (!zeroValid) {
+            invalidZerosCast(
+              castExpr,
+              state2,
+              "all-zero representation is not valid for "
+                ++ Layer1InferState.renderType(nominalType, state2)
+            )
+          } else {
+            let _ = Layer1InferState.recordNodeType(typeName.node.id, nominalType, state2)
+            let _ = Layer1InferState.recordNodeType(castExpr.node.id, nominalType, state2)
+            (nominalType, state2)
+          }
+        },
+        None =>
+          invalidZerosCast(
+            castExpr,
+            state,
+            typeName.text ++ " is not a record type"
+          ),
+      },
+    None =>
+      invalidZerosCast(
+        castExpr,
+        state,
+        "zeros cast currently requires a fresh record construction"
+      ),
   }
 }

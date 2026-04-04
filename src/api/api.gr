@@ -12,6 +12,7 @@ from "../core/surface_ast.gr" include SurfaceAst
 from "../core/core_ast.gr" include CoreAst
 from "../core/analysis.gr" include Analysis
 from "../core/layer1/infer.gr" include Infer
+from "../core/layer1/infer_state.gr" include InferState as Layer1InferState
 from "../core/layer2/solve.gr" include Layer2Solve
 from "../core/constraints.gr" include Constraints
 from "../core/types.gr" include Types
@@ -504,11 +505,11 @@ let constraintsToJson = (constraints: List<Constraints.Constraint>) =>
   "[" ++ joinStrings(",", List.map(constraintToJson, constraints)) ++ "]"
 
 let typeMarkReasonToString = (reason: Infer.TypeMarkReason) => match (reason) {
-  Infer.TypeMismatch => "TypeMismatch",
-  Infer.OccursCycle => "OccursCycle",
-  Infer.UnknownIdentifier => "UnknownIdentifier",
-  Infer.UnfillableHole => "UnfillableHole",
-  Infer.Internal => "Internal",
+  Layer1InferState.TypeMismatch => "TypeMismatch",
+  Layer1InferState.OccursCycle => "OccursCycle",
+  Layer1InferState.UnknownIdentifier => "UnknownIdentifier",
+  Layer1InferState.UnfillableHole => "UnfillableHole",
+  Layer1InferState.Internal => "Internal",
 }
 
 let markTagToJson = (mark: CoreAst.Mark) => match (mark) {

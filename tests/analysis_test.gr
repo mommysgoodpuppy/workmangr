@@ -10,6 +10,7 @@ from "../src/core/constraints.gr" include Constraints
 from "../src/core/core_ast.gr" include CoreAst
 from "../src/core/error.gr" include Error
 from "../src/core/layer1/infer.gr" include Infer
+from "../src/core/layer1/infer_state.gr" include InferState as Layer1InferState
 from "../src/core/source.gr" include Source
 from "string" include String
 
@@ -38,7 +39,7 @@ test("typeInferenceDiagnostics uses mark span for unknown identifiers", () => {
   let node: CoreAst.Node = { id: 777, span }
   let name: CoreAst.Name = { node, text: "ys" }
   let mark: Infer.TypeMark = {
-    reason: Infer.UnknownIdentifier,
+    reason: Layer1InferState.UnknownIdentifier,
     origin: Constraints.makeOrigin(-1, "unknown identifier"),
     blame: None,
     related: [],
@@ -59,7 +60,7 @@ test("typeInferenceDiagnostics uses mark span for unknown identifiers", () => {
 
 test("typeInferenceDiagnostics keeps related origins as notes", () => {
   let mark: Infer.TypeMark = {
-    reason: Infer.TypeMismatch,
+    reason: Layer1InferState.TypeMismatch,
     origin: Constraints.makeOrigin(10, "match scrutinee"),
     blame: None,
     related: [
@@ -98,7 +99,7 @@ test("typeInferenceDiagnostics keeps related origins as notes", () => {
 
 test("typeInferenceDiagnostics includes blame origin as note", () => {
   let mark: Infer.TypeMark = {
-    reason: Infer.TypeMismatch,
+    reason: Layer1InferState.TypeMismatch,
     origin: Constraints.makeOrigin(10, "binding annotation"),
     blame: Some(Constraints.makeOrigin(20, "binding value")),
     related: [],

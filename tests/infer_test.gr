@@ -5,6 +5,7 @@ use Test.*
 
 from "../src/frontend/frontend.gr" include Frontend
 from "../src/core/layer1/infer.gr" include Infer
+from "../src/core/layer1/infer_state.gr" include InferState as Layer1InferState
 from "../src/core/layer1/mod.gr" include Layer1
 from "../src/core/layer2/mod.gr" include Layer2
 from "../src/core/core_ast.gr" include CoreAst
@@ -38,7 +39,13 @@ let assertFunScheme = (scheme: Types.Scheme) => {
   }
 }
 
-let expectTopBinding = (state: Infer.InferState, name: String) =>
+let expectTopBinding = (state: Layer1InferState.Layer2Result, name: String) =>
+  match (Map.get(name, state.topBindings)) {
+    Some(scheme) => scheme,
+    None => fail "missing binding: " ++ name,
+  }
+
+let expectTopBindingLayer2 = (state: Layer1InferState.Layer2Result, name: String) =>
   match (Map.get(name, state.topBindings)) {
     Some(scheme) => scheme,
     None => fail "missing binding: " ++ name,
@@ -118,7 +125,7 @@ let truth = keep(true);
   let truthScheme = expectTopBinding(state, "truth")
   let hasHardTypeMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && !String.contains("unresolved numeric", entry.message),
     state.marks
   )
@@ -187,7 +194,7 @@ let classify = match(index:Int) => {
   let state = inferSource(source)
   let hasHardMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("cannot unify", entry.message),
     state.marks
   )
@@ -203,7 +210,7 @@ let x = 1 + 1: U8;
   let scheme = expectTopBinding(state, "x")
   let hasHardMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("cannot unify", entry.message),
     state.marks
   )
@@ -284,7 +291,7 @@ let file = fopen(\"simple.wm\", \"rb\");
   let scheme = expectTopBinding(state, "file")
   let hasHardMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("cannot unify", entry.message),
     state.marks
   )
@@ -345,7 +352,7 @@ let useFile = (path) => {
   let scheme = expectTopBinding(state, "useFile")
   let hasHardMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("cannot unify", entry.message),
     state.marks
   )
@@ -477,7 +484,7 @@ let ok = IOk(1);
   let state = inferSource(source)
   let hasUndefinedDomain = List.some(
     (mark: Infer.TypeMark) =>
-      mark.reason == Infer.TypeMismatch
+      mark.reason == Layer1InferState.TypeMismatch
         && String.contains("uses undefined infection domain shortCircuit", mark.message),
     state.marks
   )
@@ -544,7 +551,7 @@ let out = lift(IOk(1));
   let state = inferSource(source)
   let rejected = List.some(
     (mark: Infer.TypeMark) =>
-      mark.reason == Infer.TypeMismatch
+      mark.reason == Layer1InferState.TypeMismatch
         && String.contains("rejects infection domain shortCircuit", mark.message),
     state.marks
   )
@@ -633,7 +640,7 @@ let out = sanitize(IOk(1));
   let state = inferSource(source)
   let rejected = List.some(
     (mark: Infer.TypeMark) =>
-      mark.reason == Infer.TypeMismatch
+      mark.reason == Layer1InferState.TypeMismatch
         && String.contains("rejects infection domain shortCircuit", mark.message),
     state.marks
   )
@@ -701,7 +708,7 @@ let b = lift(true);
   let bScheme = expectTopBinding(state, "b")
   let hasHardTypeMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && !String.contains("unresolved numeric", entry.message),
     state.marks
   )
@@ -759,7 +766,7 @@ let out = id(1);
 
   let layer2State = Layer2.solve(layer1State)
   assertEquals(0, List.length(layer2State.constraints))
-  let outScheme = expectTopBinding(layer2State, "out")
+  let outScheme = expectTopBindingLayer2(layer2State, "out")
   assertEquals("U8", Types.typeToString(outScheme.ty))
 })
 
@@ -953,7 +960,7 @@ let bad = if (true) { Left{ x = 1 } } else { Right{ x = 1 } };
   let state = inferSource(source)
   let hasNominalMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("cannot unify nominal types Left and Right", entry.message),
     state.marks
   )
@@ -970,7 +977,7 @@ let keep = 1;
   let keepScheme = expectTopBinding(state, "keep")
   assertEquals("U8", Types.typeToString(keepScheme.ty))
   let hasUnknownIdentifier = List.some(
-    (entry: Infer.TypeMark) => entry.reason == Infer.UnknownIdentifier,
+    (entry: Infer.TypeMark) => entry.reason == Layer1InferState.UnknownIdentifier,
     state.marks
   )
   let hasFreeVar = List.some(
@@ -994,7 +1001,7 @@ let _b = h(1);
   let state = inferSource(source)
   let hasUnfillable = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnfillableHole
+      entry.reason == Layer1InferState.UnfillableHole
         && match (entry.mark) {
           CoreAst.UnfillableHole => true,
           _ => false,
@@ -1021,7 +1028,7 @@ let keep = 1;
   assertEquals("U8", Types.typeToString(keepScheme.ty))
   let hasPatternArityMark = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && match (entry.mark) {
           CoreAst.PatternError => true,
           _ => false,
@@ -1047,7 +1054,7 @@ let keep = 1;
   assertEquals("U8", Types.typeToString(keepScheme.ty))
   let hasUnknownOrPatternMark = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnknownIdentifier
+      entry.reason == Layer1InferState.UnknownIdentifier
         || match (entry.mark) {
           CoreAst.PatternError => true,
           _ => false,
@@ -1074,7 +1081,7 @@ let first = (pair) => {
   }
   let hasUnknownIdentifier = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnknownIdentifier
+      entry.reason == Layer1InferState.UnknownIdentifier
         && match (entry.mark) {
           CoreAst.FreeVar(name) => name.text == "xs" || name.text == "ys",
           _ => false,
@@ -1113,7 +1120,7 @@ let outer = (x) => {
   let state = inferSource(source)
   let hasUnknownHelper = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnknownIdentifier
+      entry.reason == Layer1InferState.UnknownIdentifier
         && entry.message == "Type error: unknown identifier helper",
     state.marks
   )
@@ -1138,11 +1145,11 @@ let fromSome = (o) => {
   let layered = Layer2.solve(Layer1.inferProgram(program))
 
   let directOut = expectTopBinding(direct, "out")
-  let layeredOut = expectTopBinding(layered, "out")
+  let layeredOut = expectTopBindingLayer2(layered, "out")
   assertEquals(Types.typeToString(directOut.ty), Types.typeToString(layeredOut.ty))
 
   let directFromSome = expectTopBinding(direct, "fromSome")
-  let layeredFromSome = expectTopBinding(layered, "fromSome")
+  let layeredFromSome = expectTopBindingLayer2(layered, "fromSome")
   assertEquals(
     Types.typeToString(directFromSome.ty),
     Types.typeToString(layeredFromSome.ty)
@@ -1163,12 +1170,12 @@ let classify = (x) => {
   let state = inferSource(source)
   let hasTypeMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch,
+      entry.reason == Layer1InferState.TypeMismatch,
     state.marks
   )
   let hasUnknownBound = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnknownIdentifier
+      entry.reason == Layer1InferState.UnknownIdentifier
         && String.contains("bound", entry.message),
     state.marks
   )
@@ -1194,7 +1201,7 @@ let pick = (x) => {
   let pickScheme = expectTopBinding(state, "pick")
   let hasHardTypeMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && !String.contains("unresolved numeric", entry.message),
     state.marks
   )
@@ -1224,7 +1231,7 @@ let onlyPair = (p) => {
   let onlyPairScheme = expectTopBinding(state, "onlyPair")
   let hasUnknownIdentifier = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnknownIdentifier
+      entry.reason == Layer1InferState.UnknownIdentifier
         && (String.contains("x", entry.message) || String.contains("y", entry.message)),
     state.marks
   )
@@ -1253,7 +1260,7 @@ let choose = (b) => {
   let chooseScheme = expectTopBinding(state, "choose")
   let hasUnknownPanic = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.UnknownIdentifier
+      entry.reason == Layer1InferState.UnknownIdentifier
         && String.contains("Panic", entry.message),
     state.marks
   )
@@ -1312,7 +1319,7 @@ let y = Panic(1);
   let state = inferSourceWithEnv(source, importedEnv)
   let hasStringConstraintMismatch = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && (
           (String.contains("cannot unify", entry.message) && String.contains("String", entry.message))
             || String.contains("not numeric", entry.message)
@@ -1450,7 +1457,7 @@ let read = (x) => {
   let state = inferSource(source)
   let hasConstrainedBlame = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("Type error (match scrutinee)", entry.message)
         && (
           match (entry.blame) {
@@ -1473,7 +1480,7 @@ let bad = f(1);
   let state = inferSource(source)
   let hasCalleeBlame = List.some(
     (entry: Infer.TypeMark) =>
-      entry.reason == Infer.TypeMismatch
+      entry.reason == Layer1InferState.TypeMismatch
         && String.contains("Type error (function application)", entry.message)
         && (
           match (entry.blame) {

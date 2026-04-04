@@ -2,11 +2,12 @@ module Layer1Generate
 
 from "../core_ast.gr" include CoreAst
 from "../layer1/infer.gr" include Infer
+from "../layer1/infer_state.gr" include InferState as Layer1InferState
 from "../types.gr" include Types
 
 // Layer 1 generation API: produce Layer1Result with constraints.
-provide let program: (CoreAst.Program) => Infer.Layer1Result = (program) =>
+provide let program: (CoreAst.Program) => Layer1InferState.Layer1Result = (program) =>
   Infer.inferProgramLayer1(program)
 
-provide let programWithEnv: (CoreAst.Program, Types.Env) => Infer.Layer1Result = (program, env) =>
+provide let programWithEnv: (CoreAst.Program, Types.Env) => Layer1InferState.Layer1Result = (program, env) =>
   Infer.inferProgramLayer1WithEnv(program, env)
