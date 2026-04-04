@@ -43,83 +43,19 @@ record InfectionCarrierWrap {
   extraArgs: List<Types.Type>,
 }
 
-record LookupResult {
-  ty: Types.Type,
-  bindingId: Number,
-  scopeId: Number,
-  identities: Flow.DomainIdentities,
-  functionNodeId: Option<Number>,
-}
 let toMarksState = (state: InferState) => state
 let fromMarksState = (state: Layer1InferState.InferState) => state
 
-let mut inferDebugEnabled: Bool = false
-
-provide let setInferDebug = (enabled: Bool) => {
-  inferDebugEnabled = enabled
-}
-
-let inferDebug = (message: String) => {
-  if (inferDebugEnabled) {
-    let _ = File.fdWrite(File.stderr, Bytes.fromString("[Infer] " ++ message ++ "\n"))
-    void
-  } else {
-    void
-  }
-}
-
-let mapSize = (m) => List.length(Map.toList(m))
-
-let isReservedValueName = (name: String) => name == "Panic"
-
-let reservedNameError = (name: String) =>
-  "Type error: reserved identifier " ++ name ++ " cannot be declared"
-
-let renderType = (t: Types.Type, state: InferState) =>
-  Types.typeToReadableString(Types.applySubstType(state.subst, t))
-
-let renderOrigin = (origin: Constraints.Origin) =>
-  Constraints.originToString(origin)
-
-let renderOriginTrail = (origins: List<Constraints.Origin>) =>
-  match (origins) {
-    [] => "<none>",
-    _ => Array.join(" <= ", Array.fromList(List.map(renderOrigin, origins))),
-  }
-
-let recentOrigins = (state: InferState, n: Number) => {
-  let recent = List.filterMap((constraint: Constraints.Constraint) =>
-    match (constraint) {
-      Constraints.Equality(_, _, o) => Some(o),
-      Constraints.Domain(_, o) => Some(o),
-      Constraints.Numeric(_, o) => Some(o),
-    }, state.constraints)
-  let rec take = (items: List<Constraints.Origin>, count: Number, acc: List<Constraints.Origin>) =>
-    if (count <= 0) {
-      List.reverse(acc)
-    } else {
-      match (items) {
-        [] => List.reverse(acc),
-        [head, ...tail] => take(tail, count - 1, [head, ...acc]),
-      }
-    }
-  take(recent, n, [])
-}
-
-let tracePatternStep = (
-  label: String,
-  pattern: CoreAst.Pattern,
-  expectedType: Types.Type,
-  state: InferState,
-) => {
-  inferDebug(
-    label
-      ++ " patternNode="
-      ++ toString(pattern.node.id)
-      ++ " expected="
-      ++ renderType(expectedType, state)
-  )
-}
+provide let setInferDebug = Layer1InferState.setInferDebug
+let inferDebug = Layer1InferState.inferDebug
+let mapSize = Layer1InferState.mapSize
+let isReservedValueName = Layer1InferState.isReservedValueName
+let reservedNameError = Layer1InferState.reservedNameError
+let renderType = Layer1InferState.renderType
+let renderOrigin = Layer1InferState.renderOrigin
+let renderOriginTrail = Layer1InferState.renderOriginTrail
+let recentOrigins = Layer1InferState.recentOrigins
+let tracePatternStep = Layer1InferState.tracePatternStep
 
 let seedBuiltinValues = (env: Env.TypingEnv) => {
   let intType = Types.TNominal("Int", [])
@@ -224,23 +160,7 @@ let seedBuiltinValues = (env: Env.TypingEnv) => {
   env
 }
 
-let logState = (label: String, state: InferState, nodeId: Number=-1) => {
-  inferDebug(
-    label
-      ++ " node="
-      ++ toString(nodeId)
-      ++ " env="
-      ++ toString(mapSize(Env.snapshotValues(state.env)))
-      ++ " subst="
-      ++ toString(mapSize(state.subst))
-      ++ " constraints="
-      ++ toString(List.length(state.constraints))
-      ++ " marks="
-      ++ toString(List.length(state.marks))
-      ++ " nextVar="
-      ++ toString(state.nextVar)
-  )
-}
+let logState = Layer1InferState.logState
 
 let makeInitialState = () => Layer1InferState.makeInitialState(seedBuiltinValues)
 
@@ -248,35 +168,11 @@ let toLayer1Result = Layer1InferState.toLayer1Result
 
 let recordConstraint = Layer1InferState.recordConstraint
 
-let originForNode = (nodeId: Number, description: String) =>
-  {
-    let out = Layer1Marks.originForNode(nodeId, description)
-    out
-  }
-
-let exprOrigin = (expr: CoreAst.Expr, description: String) =>
-  {
-    let out = Layer1Marks.exprOrigin(expr, description)
-    out
-  }
-
-let blameExprOrigin = (expr: CoreAst.Expr, description: String) =>
-  {
-    let out = Layer1Marks.blameExprOrigin(expr, description)
-    out
-  }
-
-let patternOrigin = (pattern: CoreAst.Pattern, description: String) =>
-  {
-    let out = Layer1Marks.patternOrigin(pattern, description)
-    out
-  }
-
-let typeExprOrigin = (typeExpr: CoreAst.TypeExpr, description: String) =>
-  {
-    let out = Layer1Marks.typeExprOrigin(typeExpr, description)
-    out
-  }
+let originForNode = Layer1Marks.originForNode
+let exprOrigin = Layer1Marks.exprOrigin
+let blameExprOrigin = Layer1Marks.blameExprOrigin
+let patternOrigin = Layer1Marks.patternOrigin
+let typeExprOrigin = Layer1Marks.typeExprOrigin
 
 let recordNumericConstraint = Layer1InferState.recordNumericConstraint
 
@@ -284,71 +180,12 @@ let recordNumericIs = Layer1InferState.recordNumericIs
 
 let recordNumericIntLiteral = Layer1InferState.recordNumericIntLiteral
 
-let addTypeMarkWithBlame = (
-  state: InferState,
-  reason: TypeMarkReason,
-  origin: Constraints.Origin,
-  blame: Option<Constraints.Origin>,
-  mark: CoreAst.Mark,
-  message: String,
-) => {
-  let out = Layer1Marks.addTypeMarkWithBlame(
-    toMarksState(state),
-    reason,
-    origin,
-    blame,
-    mark,
-    message
-  )
-  fromMarksState(out)
-}
-
-let addTypeMark = (
-  state: InferState,
-  reason: TypeMarkReason,
-  origin: Constraints.Origin,
-  mark: CoreAst.Mark,
-  message: String,
-) => {
-  let out = Layer1Marks.addTypeMark(
-    toMarksState(state),
-    reason,
-    origin,
-    mark,
-    message
-  )
-  fromMarksState(out)
-}
-
-let addReservedNameMark = (state: InferState, node: CoreAst.Node, name: String) => {
-  let out = Layer1Marks.addReservedNameMark(toMarksState(state), node, name)
-  fromMarksState(out)
-}
-
-let noteHoleObservation = (
-  state: InferState,
-  holeId: Number,
-  observed: Types.Type,
-  origin: Constraints.Origin,
-) => {
-  let out = Layer1Marks.noteHoleObservation(toMarksState(state), holeId, observed, origin)
-  fromMarksState(out)
-}
-
-let noteEffectEvent = (
-  state: InferState,
-  nodeId: Number,
-  kind: String,
-  message: String,
-) => {
-  let out = Layer1Marks.noteEffectEvent(toMarksState(state), nodeId, kind, message)
-  fromMarksState(out)
-}
-
-let recordMatchArms = (fnExpr: CoreAst.FnExpr, state: InferState) => {
-  let out = Layer1Marks.recordMatchArms(fnExpr, toMarksState(state))
-  fromMarksState(out)
-}
+let addTypeMarkWithBlame = Layer1Marks.addTypeMarkWithBlame
+let addTypeMark = Layer1Marks.addTypeMark
+let addReservedNameMark = Layer1Marks.addReservedNameMark
+let noteHoleObservation = Layer1Marks.noteHoleObservation
+let noteEffectEvent = Layer1Marks.noteEffectEvent
+let recordMatchArms = Layer1Marks.recordMatchArms
 
 let freshVar = Layer1InferState.freshVar
 
@@ -754,140 +591,19 @@ let recordCtxValidateRecordLiteralAgainstNominal = (
   fromMarksState(out)
 }
 
-let unifyBlaming = (
-  left: Types.Type,
-  right: Types.Type,
-  origin: Constraints.Origin,
-  blame: Option<Constraints.Origin>,
-  state: InferState,
-) => {
-  let out = Layer1Unify.unifyBlaming(
-    left,
-    right,
-    origin,
-    blame,
-    toMarksState(state)
-  )
-  fromMarksState(out)
-}
-
-let unify = (
-  left: Types.Type,
-  right: Types.Type,
-  origin: Constraints.Origin,
-  state: InferState,
-) => {
-  let out = Layer1Unify.unify(left, right, origin, toMarksState(state))
-  fromMarksState(out)
-}
-
-let unifyForNode = (
-  nodeId: Number,
-  description: String,
-  left: Types.Type,
-  right: Types.Type,
-  state: InferState,
-) => {
-  let out = Layer1Unify.unifyForNode(
-    nodeId,
-    description,
-    left,
-    right,
-    toMarksState(state)
-  )
-  fromMarksState(out)
-}
-
-let unifyForNodeWithBlame = (
-  nodeId: Number,
-  description: String,
-  left: Types.Type,
-  right: Types.Type,
-  blame: Option<Constraints.Origin>,
-  state: InferState,
-) => {
-  let out = Layer1Unify.unifyForNodeWithBlame(
-    nodeId,
-    description,
-    left,
-    right,
-    blame,
-    toMarksState(state)
-  )
-  fromMarksState(out)
-}
-
-let unifyForExprWithBlame = (
-  originNodeId: Number,
-  description: String,
-  left: Types.Type,
-  right: Types.Type,
-  blameExpr: CoreAst.Expr,
-  blameDescription: String,
-  state: InferState,
-) => {
-  let out = Layer1Unify.unifyForExprWithBlame(
-    originNodeId,
-    description,
-    left,
-    right,
-    blameExpr,
-    blameDescription,
-    toMarksState(state)
-  )
-  fromMarksState(out)
-}
-
-let unifyForPatternWithBlame = (
-  originNodeId: Number,
-  description: String,
-  left: Types.Type,
-  right: Types.Type,
-  blamePattern: CoreAst.Pattern,
-  blameDescription: String,
-  state: InferState,
-) => {
-  let out = Layer1Unify.unifyForPatternWithBlame(
-    originNodeId,
-    description,
-    left,
-    right,
-    blamePattern,
-    blameDescription,
-    toMarksState(state)
-  )
-  fromMarksState(out)
-}
+let unifyBlaming = Layer1Unify.unifyBlaming
+let unify = Layer1Unify.unify
+let unifyForNode = Layer1Unify.unifyForNode
+let unifyForNodeWithBlame = Layer1Unify.unifyForNodeWithBlame
+let unifyForExprWithBlame = Layer1Unify.unifyForExprWithBlame
+let unifyForPatternWithBlame = Layer1Unify.unifyForPatternWithBlame
 
 let recordNodeType = Layer1InferState.recordNodeType
 
-let bindingBlameForExprNode = (state: InferState, nodeId: Number) => {
-  let out = Layer1Marks.bindingBlameForExprNode(toMarksState(state), nodeId)
-  out
-}
-
-let currentFunctionParamBindingId = (state: InferState) => {
-  let out = Layer1Marks.currentFunctionParamBindingId(toMarksState(state))
-  out
-}
-
-let noteBindingBlameForExprNode = (
-  state: InferState,
-  nodeId: Number,
-  origin: Constraints.Origin,
-) => {
-  let out = Layer1Marks.noteBindingBlameForExprNode(toMarksState(state), nodeId, origin)
-  fromMarksState(out)
-}
-
-let rec noteBindingBlameForExpr = (
-  state: InferState,
-  expr: CoreAst.Expr,
-  description: String,
-) => {
-  let out = Layer1Marks.noteBindingBlameForExpr(toMarksState(state), expr, description)
-  fromMarksState(out)
-}
+let bindingBlameForExprNode = Layer1Marks.bindingBlameForExprNode
+let currentFunctionParamBindingId = Layer1Marks.currentFunctionParamBindingId
+let noteBindingBlameForExprNode = Layer1Marks.noteBindingBlameForExprNode
+let noteBindingBlameForExpr = Layer1Marks.noteBindingBlameForExpr
 
 let handleMatchApplication = (
   fnExpr: CoreAst.FnExpr,
@@ -924,45 +640,10 @@ let handleMatchApplication = (
   fromMarksState(out)
 }
 
-let fromEnvLookupResult = (entry: Layer1EnvLookup.LookupResult) => {
-  {
-    ty: entry.ty,
-    bindingId: entry.bindingId,
-    scopeId: entry.scopeId,
-    identities: entry.identities,
-    functionNodeId: entry.functionNodeId,
-  }: LookupResult
-}
-
-let envLookup_lookupEnv = Layer1EnvLookup.lookupEnv
-let envLookup_registerImportedTypeInfo = Layer1EnvLookup.registerImportedTypeInfo
-let envLookup_lookupQualifiedProjection = Layer1EnvLookup.lookupQualifiedProjection
-let envLookup_cloneEnvValues = Layer1EnvLookup.cloneEnvValues
-
-let lookupEnv = (name: CoreAst.Name, state: InferState) => {
-  let (lookup, nextState) = envLookup_lookupEnv(name, toMarksState(state))
-  (fromEnvLookupResult(lookup), fromMarksState(nextState))
-}
-
-let registerImportedTypeInfo = (
-  env: Env.TypingEnv,
-  typeName: String,
-  info: Env.TypeInfo,
-) => envLookup_registerImportedTypeInfo(env, typeName, info)
-
-let lookupQualifiedProjection = (
-  baseName: CoreAst.Name,
-  fieldName: String,
-  state: InferState,
-) =>
-  match (envLookup_lookupQualifiedProjection(baseName, fieldName, toMarksState(state))) {
-    Some((lookup, nextState)) =>
-      Some((fromEnvLookupResult(lookup), fromMarksState(nextState))),
-    None => None,
-  }
-
-let cloneEnvValues = (values: Types.Env) =>
-  envLookup_cloneEnvValues(values)
+let lookupEnv = Layer1EnvLookup.lookupEnv
+let registerImportedTypeInfo = Layer1EnvLookup.registerImportedTypeInfo
+let lookupQualifiedProjection = Layer1EnvLookup.lookupQualifiedProjection
+let cloneEnvValues = Layer1EnvLookup.cloneEnvValues
 
 let zerosTypeFromAnnotation = Layer1Zeros.typeFromAnnotation
 let zerosIsZerosCastTarget = Layer1Zeros.isZerosCastTarget
