@@ -10,6 +10,7 @@ from "../core/analysis.gr" include Analysis
 from "../core/env.gr" include Env
 from "../core/error.gr" include Error
 from "../core/layer1/infer.gr" include Infer
+from "../core/layer1/infer_state.gr" include InferState as Layer1InferState
 from "../core/layer1/expr.gr" include Layer1Expr
 from "../core/module/module_infer.gr" include ModuleInfer
 from "../core/semantic_index.gr" include SemanticIndex
@@ -37,6 +38,10 @@ let getLineText = (source: String, line: Number) => {
   }
 }
 
+let typedInfer = (analysis: Analysis.Analysis) => {
+  analysis.infer: Layer1InferState.Layer2Result
+}
+
 let rec bindTypeParams = (
   names: List<String>,
   args: List<Types.Type>,
@@ -54,8 +59,9 @@ let renderTypeWithContext = (
   ty: Types.Type,
   analysis: Analysis.Analysis,
 ) => {
+  let infer = typedInfer(analysis)
   let rec render = (t: Types.Type) =>
-    match (Types.applySubstType(analysis.infer.subst, t)) {
+    match (Types.applySubstType(infer.subst, t)) {
       Types.TFun(paramTy, resultTy) => {
         let renderedParam = match (paramTy) {
           Types.TFun(_, _) => "(" ++ render(paramTy) ++ ")",
@@ -71,7 +77,7 @@ let renderTypeWithContext = (
         } else {
           typeName ++ "<" ++ Array.join(", ", Array.fromList(List.map(render, args))) ++ ">"
         }
-        match (Env.lookupType(analysis.infer.env, typeName)) {
+        match (Env.lookupType(infer.env, typeName)) {
           Some(typeInfo) =>
             match (typeInfo.recordFields) {
               Some(fields) => {
@@ -104,13 +110,14 @@ let renderTypeWithContext = (
 }
 
 let summarizeNode = (source: String, node: CoreAst.Expr, analysis: Analysis.Analysis) => {
-  match (Map.get(node.node.id, analysis.infer.nodeTypes)) {
+  let infer = typedInfer(analysis)
+  match (Map.get(node.node.id, infer.nodeTypes)) {
     None => None,
     Some(nodeType) => {
       let pos = Source.offsetToLineCol(source, node.node.span.start)
       let excerpt = Source.slice(source, node.node.span)
       let typeStr = renderTypeWithContext(nodeType, analysis)
-      let effectInfo = match (Map.get(node.node.id, analysis.infer.effectEventsByNode)) {
+      let effectInfo = match (Map.get(node.node.id, infer.effectEventsByNode)) {
         Some(events) =>
           Some(
             Array.join(
@@ -136,7 +143,8 @@ let summarizeNode = (source: String, node: CoreAst.Expr, analysis: Analysis.Anal
 }
 
 let summarizePattern = (source: String, pattern: CoreAst.Pattern, analysis: Analysis.Analysis) => {
-  match (Map.get(pattern.node.id, analysis.infer.nodeTypes)) {
+  let infer = typedInfer(analysis)
+  match (Map.get(pattern.node.id, infer.nodeTypes)) {
     None => None,
     Some(nodeType) => {
       let pos = Source.offsetToLineCol(source, pattern.node.span.start)
@@ -459,7 +467,8 @@ let printTopBindings = (analysis: Analysis.Analysis) => {
   print("=== Top-Level Bindings ===")
   print("")
 
-  let bindings = Map.toList(analysis.infer.topBindings)
+  let infer = typedInfer(analysis)
+  let bindings = Map.toList(infer.topBindings)
 
   List.forEach(
     (pair) => {
@@ -476,8 +485,9 @@ let printDiagnostics = (
   lineFilter: Option<Number>,
 ) => {
   let nodeSpans = Analysis.buildNodeSpans(analysis.program)
+  let infer = typedInfer(analysis)
   let diagnostics: List<Error.CompilerError> =
-    Analysis.typeInferenceDiagnostics(analysis.infer.marks, nodeSpans)
+    Analysis.typeInferenceDiagnostics(infer.marks, nodeSpans)
   let filtered = match (lineFilter) {
     None => diagnostics,
     Some(lineNum) =>

@@ -8,6 +8,7 @@ from "../../core/source.gr" include Source
 from "../../core/core_ast.gr" include CoreAst
 from "../../core/types.gr" include Types
 from "../../core/layer1/infer.gr" include Infer
+from "../../core/layer1/infer_state.gr" include InferState as Layer1InferState
 from "../../core/env.gr" include Env
 from "../../core/flow.gr" include Flow
 from "../../core/module/module_system.gr" include ModuleSystem
@@ -18,7 +19,7 @@ from "./core_ir.gr" include WmcExpCoreIR as IR
 // ── Lowering context ──────────────────────────────────────────────
 
 record LowerCtx {
-  infer: Infer.Layer2Result,
+  infer: Layer1InferState.Layer2Result,
   moduleId: String,
 }
 
